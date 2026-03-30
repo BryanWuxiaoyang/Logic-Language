@@ -18,10 +18,13 @@ class Token:
 TokenStream = list[Token]
 
 _MULTI_CHAR_SYMBOLS: Final[tuple[str, ...]] = (
+    ":=:",
     "=>",
     "::",
     "|-",
     "->",
+    "&&",
+    "||",
     ">=",
     "<=",
     "!=",
@@ -61,7 +64,6 @@ _SINGLE_CHAR_SYMBOLS: Final[set[str]] = {
     "→",
     "⇒",
 }
-_NORMALIZED_SYMBOLS: Final[dict[str, str]] = {"｜": "|"}
 _ESCAPE_SEQUENCES: Final[dict[str, str]] = {
     '"': '"',
     "\\": "\\",
@@ -183,11 +185,18 @@ def _tokenize_content(
 
     while index < len(content):
         char = content[index]
-        normalized = _NORMALIZED_SYMBOLS.get(char, char)
         column = start_column + index
 
         if char == "\t":
             _raise_tokenizer_error(source_name, line_number, column, "tabs are not allowed")
+
+        if char == "｜":
+            _raise_tokenizer_error(
+                source_name,
+                line_number,
+                column,
+                "full-width separator '｜' is not allowed; use ASCII '|'",
+            )
 
         if char.isspace():
             index += 1
@@ -215,13 +224,13 @@ def _tokenize_content(
             index += len(symbol)
             continue
 
-        if normalized in _SINGLE_CHAR_SYMBOLS:
-            tokens.append(Token("SYMBOL", normalized, line_number, column))
+        if char in _SINGLE_CHAR_SYMBOLS:
+            tokens.append(Token("SYMBOL", char, line_number, column))
             index += 1
             continue
 
-        if _is_custom_symbol_char(normalized):
-            tokens.append(Token("SYMBOL", normalized, line_number, column))
+        if _is_custom_symbol_char(char):
+            tokens.append(Token("SYMBOL", char, line_number, column))
             index += 1
             continue
 

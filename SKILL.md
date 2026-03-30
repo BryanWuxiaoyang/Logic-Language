@@ -8,7 +8,7 @@ description: "Generate, validate, and translate `.lp` logic programs to executab
 This skill introduces a logic program language, with postfix `.lp`.
 
 Design goal:
-
+- `logic_language` is a knowledge representation language
 - `logic_language` is for human-readable core logic, not low-level implementation detail.
 - Prefer concise and easy-to-understand declarations while keeping core logic correct.
 - Skip border-cases handling to avoid too many branches
@@ -53,7 +53,9 @@ The input arguments needed for translation are:
 Use `/scripts/semantic_parser.py {file-path}` to check semantics.
 
 ## 3 Reformat program
-Use `scripts/reformat.py {file-path}` to reformat it. It gives correct indents and convert `\...` codes into symbols. E.g. `\in` = `∈`.
+Use `scripts/reformat.py {file-path}` to reformat it. It convert latex-style symbol-representation `\...` into symbols. E.g. `\in` = `∈`.
+
+After reformat, there should be no `\...` symbol exists in text.
 
 ## 3 Analyze the Logic Program
  

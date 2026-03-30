@@ -1,117 +1,106 @@
 # SPEC for `.lp` Logic Program
 
-This document defines the required syntax and semantics for logic program files with postfix `.lp`.
-LLM outputs that target this format must follow these rules.
+- This document defines the required syntax and semantics for logic program files with postfix `.lp`.
+- LLM outputs that target this format must follow these rules.
+- logic program is used to describe natural language concepts for domain-knowledge/algorithm into a more easy-understand, more logical form. 
+- It is a high-order-language with non-classical semantics.
+  
+# Language Summary
+- This language is a hybrid logic language for knowledge representation. It uses rules and conditions as its core, and adopts a unified symbol/function/set/cond view to describe concepts, relations, functions, sets, and class inheritance. It supports premise-to-conclusion reasoning in a style similar to first-order logic and logic programming, while also providing more engineering-oriented features such as classes, member functions, set comprehensions, recursive definitions, and localized natural-language conditions. Overall, it is not a single standard textbook logic system, but is better understood as a high-level knowledge modeling language that blends logic programming, description-logic-style ontology modeling, and functional DSL ideas.
 
-# Function
-- A `function` or `func` or `f` represents a 1-1 mapping from a `function` to another `function`.
-- Written form `function: in_arg => out_arg` represents all possible `functions` that takes in_arg and output out_arg, under certain `conditions`.
+# basics
+## symbol
+- `symbol`/`sym` represents a base unit for program
+- `sym(sym)` is named as a `call`. It is also a `sym`, it maps a `sym` to another `sym`
+- When 2 written `sym` has same name, they are same `sym`
+  
+## function
+- A `function`/`func`/`f` is identical to `symbol`
 
-- When 2 written `function` has same name, they are same function.
-
-# Symbol
-- `symbol` is identical to `function`
-So a `function` represents a 1-1 mapping from a `symbol` to another `symbol`
-
-# intrinsic symbols
-- `null`, `true`, `false`, `bool`
-- `condition-function`, `=`, `≠`, `&&`
-- `~`
+## intrinsic symbols
 - `tuple`
-- `set`, `∩`, `∈`
-- `set_cond`, `∀`, `∃`
-- `class`
+- `=`, `≠`, `!`, `&&`
+- `null`, `true`, `false`
+- `set`, `cond`, `∩`, `∈`
+- `~`, `bool`
+- `value`
+- `∀`, `∃`
 
-# condition-function
-- A `condition-function` or `cond` is a `function` that maps a symbol to `true`/`false`: `cond: in_sym => bool_sym`
-- `true_cond: sym => bool_sym`, for all `sym`, `true_cond(sym) = true`
-- `false_cond: sym => bool_sym`, for all `sym`, `false_cond(sym) = false`
-- `=` is a `cond`, `=: (sym1, sym2) => bool_sym`, `bool_sym = true` iff `sym1` and `sym2` represent same symbol
-- `≠` is a `cond`: `≠: (sym1, sym2) => bool_sym`. `bool_sym = false` iff `sym1 = sym2`
-- `!` is a `cond`: 
-  - `!: bool_sym1 => bool_sym2`. `bool_sym2 = true` iff `bool_sym1 = false`
-  - `!: cond1 => cond2`, For any `sym`, `cond2(sym) = !cond1(sym)`
-- `&&` is a `cond`: `&&: {bool_sym1, bool_sym2} => bool_sym3`. `bool_sym3 = true` iff `bool_sym1 = true` and `bool_sym2 = true`.
+## tuple
+- `tuple` is a `sym`, represents a function `tuple: id_sym => sym`
+- A literal tuple-like `sym` is written as `(a, b, ...)`
+- `f((a, b))` can be written as `f(a, b)`
+- When the `function` is written as an operator such as `=`/`+`, and is used to feed a 2-elem-tuple, it can be written as: `op(sym1, sym2) = sym1 op sym2`
+- When the `function` is written as an operator such as `*`, and is used to feed 1 symbol, it can be written as `op(sym) = opsym`
 
-# inheritance(~)
-- `~` represents a `cond`: `~: (sym1, sym2) => bool_sym`
-- `bool~true = true`, `bool~false = true`
-- When writing a `symbol-name` as a function in_arg/out_arg, and the `symbol-name` is already declared in previous statements, it instead declares `symbol` that inherits the `symbol-name`.
-  - E.g.
-    ```text
-    A
-    f: A => A1
-    ```
-    `f` declare a mapping that maps `A~in_arg` to `A~out_arg`
+## equality
+- `=(sym1, sym2)`: represents whether `sym1` and `sym2` have same behaviors on all situations. This is intentionally left ambiguous to suit for various contexts.
+- `true`
+- `false`
+- `∀{=(sym, sym) = true | sym ≠ null | sym }`
+- `!`: `!true = false`, `!false = true`
+- `≠ = !=`
+- For a literal tuple-like sym `(sym1, ..., symn)`: `(sym1, ..., symn)(i) = symi` for `i = 1, ..., n`
 
-# tuple
-- A `tuple` represents a function `tuple: id => sym`
+## set
+- `set` is a `sym`/`function`
+- A literal set-like `sym` is written as `{a, b, ...}`
+- For any `sym` shown in `{sym1, ..., symn}`, `{sym1, ..., symn}(sym) = true`; otherwise `{sym1, sym2, ...}(sym) = false`
+- `f({sym1,..., symn})` can be written as `f{sym1,..., symn}`
+- `∈`: `sym1 ∈ sym2 = sym2(sym1)`
+- `∀{ ∀{ set1(sym) ∈ {true, false} | sym } | set~set1 | set1 }`
+- `∉`: `sym1 ∉ sym2 = !(sym1 ∈ sym2)`
+- `∩`: ` ∩(sym1, sym2)(sym) = sym1(sym) && sym2(sym)`
+- `full_set`, `{*} = full_set`
+- `empty_set`, `{} = empty_set`
 
-- Written form `(a, b)` represents: 
-  - `tuple~(a,b)`, 
-  - `(a, b)(0) = a`, `(a, b)(1) = b`
-  - For `n ≠ 0 or 1` => `(a, b) = null`
+## cond
+- `cond` is a `sym`/`function`
+- `cond = set`
+- The language allows partial or non-classical logical descriptions.
+- However, when a condition evaluation depends on itself through a non-well-founded cycle and cannot be grounded by a finite expansion, the program is invalid.
 
-- When a `function`'s in-arg and out-arg are tuples, it's written as:
-`function: (in_arg1, in_arg2) => (out_arg1, out_arg2)`
+## value
+- `value`/`val`/`v` is a `sym`
+- For all literal values `0`/`1`/...: 
+  - `val~0`, `val~1`, ...
 
-- When calling a `function` with tuple as in-arg, we can ignore the duplicate `()`: `f(a, b) = f((a, b))`
+## inheritance(~)
+- `~` represents inheritance relationship
+- Written form: `~(sym1, sym2) = sym1~sym2`
+- `sym~sym`
+- For all literal tuple-like syms `(sym1, ..., symn)`: `tuple~(sym1,...,symn)`
+- For all literal set-like syms `{sym1, ..., symn}`: `set~{sym1, ..., symn}`
+- `set~full_set`, `set~empty_set`
+- `bool`: `bool~true`, `bool~false`
 
-# set
-- A `set` is identical to `cond`: `set: sym => bool_sym`, `set = cond`. So `set` share same usage patterns as `cond`.
-
-- `∈` represents a `cond`: `∈: {sym, set1} => bool_sym`, that `sym ∈ set1 = set1(sym)`
-
-- `∩` represents a `function`: `∩: (set1, set2) => set3`, `set~set1`, `set~set2`, `set3(sym) = set1(sym) && set2(sym)`
-
-- `full_set = true_cond`, `set~full_set`
-  - Written form `{*} = full_set`
-
-- `empty_set = false_cond`, `set~full_set`
-  - Written form: `{} = false_set`
-
-- Written form `{a, b}`: 
-  - `set~{a, b}`
-  - `{a, b}(a) = true`, `{a, b}(b) = true`
-  - For `sym ≠ a or b`, `{a, b}(sym) = false`
-
-- When a literal set is a single in-arg for a function, it can ignore the `()`. E.g. `f({1, 2}) = f{1, 2}`
-
-- Written form: `{ | cond }` represents: `set~{| cond}`, `{| cond} = cond`.
-  - E.g. `{| sym > 0 }` represents a `set'` that:
-    - `set~set'`
-    -  `set'(sym) = (sym > 0)`
--  Written form: `{| sym }`
-  - `{| sym } = empty_set` if `sym = false`
-  - `{| sym } = full_set` if `sym = true`
-  - `{| sym } = sym` if `cond~sym`. i.e. `sym` represents a `cond`, which is identical to `set`
-  - `{| sym } = full_set` if `!bool~sym` and `!cond~sym`
-
--  Written form: `{| cond2 | cond1}` represents a `set'` that is the `∩` of 2 sets: `{| cond2 | cond1} = cond2' ∩ cond1'`, where `cond2'` and `cond1'` have same predicates as `cond2` and `cond1`, but in-args are aggrated from in-args of both `cond2` and `cond1`
-   - `,` is identical to `|`, but inner-order is reversed. e.g. `{x, y, z} = {| z | y | x}`
-   -  E.g. `{| sym2 > 0 | sym1 > 0 | sym1, sym2 }` represents:
-      -  Expand `,` to: `{sym2 > 0 | sym1 > 0 | sym2 | sym1}`
-      -  Derive `in_args` from right-to-left: `(sym1, sym2)`
-      -  Derive to 4 sets:
-         - `set1 = {| sym1 > 0}: (sym1, sym2) => bool_sym`
-         - `set2 = {| sym2 > 0}: (sym1, sym2) => bool_sym`
-         - `set3 = {| sym2}: {sym1, sym2} => bool_sym = full_set`
-         - `set4 = {| sym1}: {sym1, sym2} => bool_sym = full_set`
-      - `set' = set1 ∩ set2 ∩ set3 ∩ set4`. i.e. `set'(sym1, sym2) = true` iff `sym1 > 0, sym2 > 0`
-    - E.g. if `integer~x, integer~y`, `{| y < 3 | y > 0 | x = 0 | x, y } = {(0, 1), (0, 2)}`
-    - Written form can be expand to multi-lines, read from bottom-up.
-      - E.g. `{| cond3 | cond2 | cond1}` = 
-        ```text
-            {
-                | cond3
-                | cond2
-                | cond1
-            }
-        ```
-    - Theorem: Different ordering of `conds` represents same set: `{| cond2 | cond1} = {| cond1 | cond2}`
+## Set comprehension and mapped sets
+- `{| cond(sym1',...,symn') | (sym1, ..., symk)} = cond'`. `cond'(sym1, ..., symk) = cond(...,sym1, ..., symk,...)`, it inserts variables into corresponding pos in `cond`
+- `{| cond(sym1,..., symn) } = {| cond(sym1, ..., symn) | (sym1', ..., symk')}`. `(sym1',...,symk')` are variables
+- `{| f1(sym1,...) | f2(sym1',...) | ...}`
+  - First walk through from right-to-left to derive all declared symbols `_syms = (_sym1, _sym2, ...)`.
+  - Then split it to join of multiplt sub_sets: `{| f1(sym1,...) | f2(sym1',...) | ...} = {| f1'(_sym1, ...)} ∩ {| f2'(_sym1, ...)} ...`, where `f1'`/`f2'` is `f1` applied on all `_syms` as input-arg.
+  - `,` is identical to `|`, but inner-order is reversed. e.g. `{sym1, sym2, sym3} = {| sym3 | sym2 | sym1}`
+  -  E.g. `{| sym2 > 0 | sym1 > 0 | sym1, sym2 }` represents:
+    -  Expand `,` to: `{sym2 > 0 | sym1 > 0 | sym2 | sym1}`
+    -  Derive `in_args` from right-to-left: `(sym1, sym2)`
+    -  Derive to 4 sets:
+       - `set1 = {| f1(sym1, sym2) }`, `f1(sym1, sym2) = (sym2 > 0)`
+       - `set2 = {| f2(sym1, sym2) }`, `f2(sym1, sym2) = (sym1 > 0)`
+    - `set' = {| sym2 > 0 | sym1 > 0 | sym1, sym2} = set1 ∩ set2`. i.e. `set'(sym1, sym2) = (sym1 > 0 && sym2 > 0)`
+  - E.g. if `integer~x, integer~y`, `{| y < 3 | y > 0 | x = 0 | x, y } = {(0, 1), (0, 2)}`
+  - Written form can be expand to multi-lines, read from bottom-up.
+    - E.g. `{| cond3 | cond2 | cond1}` = 
+      ```text
+          {
+              | cond3
+              | cond2
+              | cond1
+          }
+      ```
 
 - `apply: (set, f) => set1`, it maps every `sym ∈ set` through `f` into `set1`
-  - For all `sym`: `apply(set, f)(sym) = { | sym'' = f(sym') | sym' ∈ set }`
+  - For all `sym`: `apply(set, f)(sym) = ({ | f(sym') = sym | sym' ∈ set } ≠ {})`
 - Written form: `{f | cond}` is a `mapped_set`. It represents a `set'` that derives from `{| cond }` applied on `f`.
   - For any `sym`, `{f | cond}(sym) = ({| sym = f(sym') | sym' ∈ {| cond} } ≠ {})`
   - The symbols used in `f` must appear in `conds`. Otherwise it is invalid.
@@ -127,34 +116,35 @@ So a `function` represents a 1-1 mapping from a `symbol` to another `symbol`
             }
         ```
 
-# ∀/∃ cond
-- `∀` and `∃` are `set_conds`, which are `cond` that takes a `set` as in_arg.
-- 
-- `∃` is a `cond`: `∃: set => bool_sym`. `∃(set) = (set ≠ {})`
+## ∀/∃ cond
+- `cond~∀`, `cond~∃`
+
+- `∃: set => bool_sym`. `∃(set) = (set ≠ {})`
   - `set~∃`. `∃` represents a `set` that stores all non-empty sets.
   - E.g. if `integer~x`, `∃{| x < 3 | x > 0} = ∃{1, 2} = true`
 
-- `∀` is a `cond`: 
-  - `∀: set => bool_sym`. `∀(set) = (false ∉ set)`
+- `∀: set => bool_sym`. `∀(set) = (false ∉ set)`
     - `set~∀`, `∀` represents a `set` that doesn't contain `false`.
     - E.g. if `integer~x`, `∀{ x > 0 | x > 1} = ∀{true} = true`, `∀{ x < 3 | x > 0} = ∀{true, false} = false`, `∀{} = true`
-  - `∀: (target_cond, premise_cond) => bool_sym`
 
-- Written form: `∀{target_cond | premise_cond} = ∀(target_cond, premise_cond)`
-
-- Written form of `∀{target_cond | premise_cond}` can expand to multi-lines without `{}`, read from **top-down**:
+- Written form: `∀{target_cond | premise_cond} = ∀(set')`, `set' = {target_cond | premise_cond }`
+  
+# extension: syntax-sugars and formating-rules
+## ∀ cond: `∀{target_cond | premise_cond}`
+- Written form: `∀{target_cond | premise_cond}`
+  - Given a `∀`-statement, it's identical to expanding it using all syntax-rules below into `∀{target_cond | premise_cond}` form.
+  - `∀{target_cond | premise_cond}` can expand to multi-lines without `{}`, read from **top-down**:
   - Each line after `∀` should be indented
-  - E.g. 
-    ```text
-    ∀{ target_cond | cond2 | cond1 }` = 
-    ∀
-        | cond1
-        | cond2
-        target_cond
-    ```
-  - `,` in `target_cond` splits a `set_cond` into multiple `sub_set_conds`.
-    - E.g. `∀{ target_cond1, target_cond2 | cond } = ∀{target_cond1 | cond} && ∀{target_cond2 | target_cond1 | cond}`
-    - Note: it's not identical to `&&`, the second `sub_set_cond` introduces `| target_cond1`
+    - E.g. 
+      ```text
+      ∀{ target_cond | cond2 | cond1 } =
+      ∀
+          | cond1
+          | cond2
+          target_cond
+      ```
+  - `,` in `target_cond` is `&&`, it can split a `set_cond` into multiple `sub_set_conds`.
+    - E.g. `∀{ target_cond1, target_cond2 | cond } = ∀{ target_cond1 && target_cond2 | cond } = ∀{target_cond1 | cond} && ∀{target_cond2 | cond}`
   - multiple `target_cond` can appear alternately between `premise_cond`:
     - E.g.
         ```text
@@ -180,7 +170,6 @@ So a `function` represents a 1-1 mapping from a `symbol` to another `symbol`
             | cond2
             | target_cond1
             | target_cond2
-            | cond3
             target_cond3
         ```
   - A `set_cond` expression can be branched with `|-`. It is identical to multiple splited `set_conds`, each represent a branch.
@@ -257,14 +246,7 @@ So a `function` represents a 1-1 mapping from a `symbol` to another `symbol`
     ```
     To fully decompose the `set_cond`, first decompose `branch-conds` to split into multiple `sub_set_conds`. Second, for each `sub_set_cond`, decompose `target_cond` to split into `sub_sub_set_conds`. Finally gather all `sub_sub_set_conds` as the decomposed result.
 
-- Theorem
-  - `∃{| cond2 | cond1} = !∀{ !cond2 | cond1} = !∀{ !cond1 | cond2 }`
-  - `!∃{| cond2 | cond1} = ∀{ !cond2 | cond1 } = ∀{ cond1 | cond2 }`
-  - `∀{target_cond | premise_cond | ∀{target_cond | premise_cond}} = true`
-  - `∀{ x > 2 | x > 3} = true`
-  - `∀{ x > 1| x > 2} = true`
-
-# syntax sugar: cond nested in function
+## cond nested in function
 - A `cond` can be nested inside a `function`. The `function`'s in_arg and out_arg will be implicit `premise_conds`.
   - E.g.
   ```text
@@ -330,21 +312,12 @@ So a `function` represents a 1-1 mapping from a `symbol` to another `symbol`
     } = false
     ```
 
-# class
+## class
 - `class` is same as `symbol`
-- ``
-
-
-# proof of program
-- A program is proved iff all expanded statements are `true`.
-  E.g.
-  ```text
-  ∀{ x > 2 | x > 0 }
-  ```
-  is a `wrong` program because `∀{ x > 2 | x > 0 } = false`
+- The `class-member-function` is expanded to normal `function`
 
 ### 1.4 Inheritance
-There is an intrinsic inheritance function `~: (parent_symbol, sub_symbol) => bool`
+There is an primitive inheritance function `~: (parent_symbol, sub_symbol) => bool`
 It itself is undefined, but it is used to define conditions that the sub-item satisfies all conditions on parent-item.
 It satisfies:
 `∀{ sym~sym | sym }`
@@ -364,20 +337,18 @@ add: (sym1, sym2) => sym3
 ```
 It declares 2 symbols `val` and `one`, and `val~one`. And defined `add` function with inheritance conditions.
 
-#### 1.4.1 Cyclic Inheritance
-When `sym1~sym2` and `sym2~sym1` we use `sym1~sym2~sym1` or `sym1 = sym2`. It means the 2 symbols are identical.
+### 1.4 Cyclic Inheritance
+When `sym1~sym2` and `sym2~sym1` we can use `sym1~sym2~sym1`.
 It satisfies:
 `∀{ sym2~sym3 | sym1~sym3 | sym3 | sym1 = sym2 }` 
 `∀{ sym3~sym2 | sym3~sym1 | sym3 | sym1 = sym2 }` 
 
 If multiple symbols are identical, when call it `identical-symbol-group`.
 
-### 1.5 Classes
+- `∀{ sym1 = sym2 | sym1~sym2~sym1 | sym1, sym2 }`
 
-`class` is formally defined intrinsically same as `symbol`, just with some special conventions or syntax-sugars in function-declarations and function-usages.
-
-#### 1.5.1 Symbol Naming Convention on Class
-In function declaration or condition-statements, when the symbol-name is named as `{prefix}{class}` or `{class}{digits}`, it implicitly contains a condition that symbol inherits this class.
+### Symbol Naming Convention on Class
+In function declaration or condition-statements, when the symbol-name is named as `{prefix}{class}`/`{class}{postfix}`, it implicitly contains a condition that symbol inherits this class.
 
 E.g. 
 `f: (class1, class2) => class3` is identical to
@@ -389,7 +360,7 @@ f: (class1, class2) => class3:
 ```
 Which means when the input_args are all inheriting `class`, then output_arg also inherits `class`.
 
-If name `class` is used as argument in function-declaration, it is refering to a symbol inheriting this `class`, instead of `class`-symbol itself. Then within this function-scope all conditions referencing `class` is indicating this argument instead of `class`-symbol.
+If a declared `symbol`/`class` is used as argument in function-declaration/condition-statement, it is refering to a new `symbol` inheriting this `class`, instead of `class` itself. Then within this function-scope all conditions referencing `class` is indicating this argument instead of `class`.
 E.g.
 ```
 A
@@ -404,42 +375,10 @@ function: sym1 => sym
     A~sym
     sym~sym1
 ```
-`A~A1` is identical to `sym~sym1`, which is not as expected.
-Therefore we should use `class` as argument only if within the scope there is no direct use of `class`, e.g. `class~symbol`. Otherwise it will not be interpreted as class-symbol inheritance, instead of symbol-symbol inheritance.
+`A~A1 = sym~sym1`, which is not as expected.
+Therefore we should use `class` as argument only if within the scope there is no direct use of `class`, e.g. `class~symbol`. Otherwise it will not be interpreted as class-symbol inheritance, instead symbol-symbol inheritance.
 
-- Note: function-declaration can't take declared-symbol as argument.
-
-If name `class` is used as argument in a condition-statement, it is refering to `class` itself instead of a symbol inheriting `class`. 
-E.g. 
-Given 
-```
-A
-B
-A~B
-```
-Then
-`∀{ B~A1 | A1 = B1 | B1 }` is different from `∀{ B~A | A = B | B }`. 
-`∀{ B~A1 | A1 = B1 | B1 }` is identical to
-```
-∀{ B~A1
-    | A1 = B1
-    | B~B1
-    ｜ A, B, A~B
-}
-```
-It defines conditions on symbols inheriting `B`.
-
-`∀{ B~A | A = B | B }` is identical to
-```
-∀{ B~A
-    | A = B
-    | B
-    | A, B, A~B
-}
-```
-It defines conditions on `class`-symbols themselves. And this statement is always `true` because `A=B` implies `B~A`.
-
-#### 1.5.2 Class Member Functions
+### 1.5.2 Class Member Functions
 
 A class can have member functions.
 E.g.
@@ -454,31 +393,34 @@ f: (symbol, in_arg) => out_arg
     | class~symbol
 ```
 
-A method's name is formally defined as `member-function-name` itself, not `class::member-function`. Therefore if 2 classes both has method `f` and same arity, then the 2 methods are same. I.e. `classA::f = classB::f`.
+`∀{ class1::member_f = class2::member_f | class1, class2, member_f }`, when 2 `class` both have `member_f`, the 2 `functions` are identical, so they share same conditions.
 
+- Because the `class-symbol` is first-arg, it's prerequisite is `| class~symbol`, so it doesn't conflict with other classes' conditions.
 - By defining so, sub-class can be put as first-argument in paren-class's methods. Dynamic dispatching on inheritance is achieved.
+- Also, aspect-based dynamic dispatching is also allowed. I.e. For 2 unrelated class-symbol, if they both have member-function `val`, then `sym.val` is valid for argument from both class
 
-Member-function can be declared in class-scope:
+Syntax-sugar: Member-function can be declared in class-scope:
 E.g.
 ```text
 class
     ::f1: (class, in_arg) => out_arg
     ::f2: (class, in_arg) => out_arg
+=
+class
+class::f1: (class, in_arg) => out_arg
+class::f2: (class, in_arg) => out_arg
 ```
-It declared `class`, `class::f1`, `class::f2`.
 
-When calling member-function on a symbol `symbol` with `class~symbol`, `symbol.f(in_arg)` is identical to `class::f(symbol, in_arg)`
-
-When a symbol inherits `class`, `symbol.f` is a function:
+When a symbol inherits `class`, `symbol.f` is a function that:
 ```text
     ∀{ sym.f(in_args) = class::f(sym, in_args)
         | in_args
-        sym.f: in_args => out_args
         | class~sym
+        | sym
     }
 ```
 
-#### 1.5.3 Class Member Field
+### 1.5.3 Class Member Field
 A class can have fields
 `class::field: class => field`
 or simply
@@ -486,7 +428,7 @@ or simply
 
 field is formally defined as a member function.
 
-#### 1.5.4 Class Inheritance
+### 1.5.4 Class Inheritance
 
 Because `class` is `symbol`, classes can also inherits each other.
 
@@ -514,7 +456,7 @@ A~B
     | symbol }
 ```
 
-If sub-class declares a member-function with the same name and signature as parent-class, then the 2 member-functions are the same function.
+If sub-class declares a member-function with the same name and signature as parent-class, there is an implicit equality that: `parent_class::f = sub_class::f`
 E.g.
 ```text
 A~B
@@ -671,7 +613,7 @@ A
     ∀{ A.val = 1 | A}
 ```
 
-#### 1.5.9 Enum Class
+#### Enum Class
 There is no real-enum-classes. Instead we can declare a `class` and a set of `sub-classes` to represent enums.
 
 E.g.
@@ -690,25 +632,22 @@ It first declared a class named 'type'. Then declared 2 sub-classes `type1` and 
 
 - in `bool = ∀{A.type = type1}`, Although `bool = A.type = type1` is valid. For readability, it's recommended to write as `bool = (A.type = type1)`(here `()` defines operator precedence, not `tuple`) or `bool = ∀{A.type = type1}`
 
-### 1.6 Condition Deduction and Paradox
- TODO:
-
-### 1.7 Comments
+## Comments
 Comments are prefixed with '#'. It doesn't participate in the program semantic, just use a more natural way to describe the program parts.
 
-### 1.8 Topic Headings
+### Topic Headings
 Topic headings are prefixed with '@'. It doesn't participate in the program semantic. It's used to organize the program for better readability. All contents inside the heading should be indented by 1 level.
 
-### 1.9 Module Import
+### Module Import
 Other `.lp` modules can be imported by `$import {module_path}`. It's copies in all content from `{module_path}`. It will recursively introduce all classes and functions defined in `module_path`.
 
 When accessing items in the `module_path`, we can either directly use item-name if it doesn't cause ambiguity, or use `{module_name}::{item-name}`.
 
-### 1.10 Chained Comparison
+### Chained Comparison
 A comparison condition can be chained.
-E.g. `∀{ 0 < x < 3 ｜ x}` is identical to `∀{0 < x, x < 3 | x}`
+E.g. `∀{ 0 < x < 3 | x}` is identical to `∀{0 < x, x < 3 | x}`
 
-### 1.11 Recursive Function Definition
+### Recursive Function Definition
 A function condition may contain function-itself. This is a recursive definition. The condition is valid if it can be proved through induction. I.e. when sub-function satisfies all other conditions except this recursive condition, the function can be deduced to satisfy those conditions as well.
 
 E.g.
@@ -726,14 +665,14 @@ add: vals => v
 ```
 In this example, `add(vals)` has a condition that is recursively defining `add`. We can deduce that when `add(vals[1:]) = sum{ vals[i] | i ∈ [0: vals.size]}`, then `add(vals)= sum{ vals[i] | i ∈ [0: vals.size]}` satisfies.
 
-### 1.12 Indentation Rules
+### Indentation Rules
 - All contents in a `@topic heading` is indented by 1 level.
 - All conditions in a `function` or `class` declaration is indented by 1 level.
 - Multi-line expanded condition is indented by 1 level.
 E.g.
 ```text
 ∀
-    ｜ cond1
+    | cond1
     cond
 ```
 - branch condition is indented by 1 level
@@ -747,7 +686,7 @@ E.g.
             target_cond2
 ```
 
-### 1.13 Alias Function Name
+### Alias Function Name
 A function can have alias name or operator. The alias name is wrapped in brackets after the full name.
 E.g.
 ```text
@@ -763,7 +702,7 @@ A
 ```
 This function overrload '+' operator. We can use `A + A1` to refer to `A.add(A1)`.
 
-### 1.14 Lambda Function
+### Lambda Function
 A function can be anonymously define inline with `->`.
 
 The function's declaration and the condition constraining the output_arg can be defined with `->` statement.
@@ -772,8 +711,6 @@ E.g. `in_arg -> f(in_arg)` is identical to
 lambda_function: in_arg => out_arg
     out_arg = f(in_arg)
 ```
-
-- All lambda functions are not same with each other. I.e. assume they are given different names.
 
 - When A lambda function is assigned to a function, it first defines the lambda function, the define a condtion indicating this `function` is identical to lambda funciton.
 E.g.
@@ -813,16 +750,16 @@ is identical to
 is identical to
 `A::val = A.base_val + 1`
 
-### 1.15 Symbol naming conventions
+### Symbol naming conventions
 The symbol-name inherently imply its inherited class.
-- `{prefix}_{class}`, `{class{digit}}`, `{class}_{digit}` represent a symbol inheriting `class`.
+- `{prefix}{class}`, `{class}{postfix}` represent a symbol inheriting `class`.
 - `{class}s` is a set/list of symbols inheriting `class`. E.g. `vals`. It can be either set or list, depending on the context.
 - `{class}_list` is a list of symbols inheriting `class`
 - nested naming from above rules.
 - `{classA}_to_{classB}_map` or `{classA}_to_{classB}_f` is a function-mapping from classA to classB. E.g. `key_to_value_map`
 - `{arbitrary_name}_f` represents a function symbol which is declared in the scope explicitly.
 
-### 1.16 `else` condition in branch-condition
+### `else` condition in branch-condition
 When in branch-condition `|-`, `|- else` is allowed when the remaining condition is trivial and verbose.
 
 E.g.
@@ -848,7 +785,7 @@ is identical to
             y > 0
 ```
 
-### 1.17 Function as the only first-class member
+### Function as the only first-class member
 In formal semantics, all items are intrinsically `functions`.
 - `symbol` is intrinsically `functions`
 - `set` is intrinsically `function`: `set: symbol => bool`
@@ -859,10 +796,10 @@ In formal semantics, all items are intrinsically `functions`.
 - `class-member-function` is intrinsically `function`, with first-arg inheriting `class`.
 - class inheritance is defined upon function `~`
 
-### 1.18 Intrinsics
+### Intrinsics
 There are many intrinsic classes/functions defined in `@/references/standard_library.lp`. All `*.lp` files will implicitly import it.
 
-#### 1.18.1 intrinsic `condition` Function
+### intrinsic `condition` Function
 There is a intrinsic `condition({args}, "desc")` function. It describes a condition with natural language in `"desc"` that includes symbols in `{args}`.
 
 `condition("desc")` describes a condition with `"desc"`, All available symbols in current scope are in `{args}` implicitly.
@@ -888,7 +825,7 @@ add: (v1, v2) => v
     v = v1 + v2
 ```
 
-#### 1.18.2 Intrinsic symbols
+### Intrinsic symbols
 - `null` value
 When a function's output-args doesn't satisfy any conditions, or the output-arg is explicitly set to `null`, the output-arg is `null`.
 E.g.
@@ -901,10 +838,7 @@ f: v => v1
 ```
 Then `f(-1) = null`, `f(0) = null`.
 
-### 1.19 set as only in-arg
-Syntax Sugar: If in a function-call, a set is the only in-arg, we can merge `({})` into `{}`. E.g. `max({1,2}) = max{1,2}`
-
-## 2 Example References
+# Example References
 - `@/references/LC-730 palindrome.lp` and `@/references/LC-730 palindrome.py` are the logic program and the translated python program.
 - `@/references/SegTree.lp` and `@/references/SegTree.py` are the logic program and the translated python program.
 - `@/references/DataFlowAnalysis.lp` is a program describing compiler-domain-knowledge about data-flow-framework.

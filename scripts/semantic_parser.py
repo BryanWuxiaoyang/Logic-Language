@@ -2306,7 +2306,10 @@ class _LineExpressionParser:
     _INFIX_PRECEDENCE: Final[dict[str, int]] = {
         "->": 21,
         "is": 15,
+        "||": 10,
+        "&&": 11,
         "=": 20,
+        ":=:": 20,
         "==": 20,
         "!=": 20,
         "≠": 20,

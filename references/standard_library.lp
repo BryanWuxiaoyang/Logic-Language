@@ -1,17 +1,21 @@
+
 null
+
+true
+∀{ true(sym) = true | sym}
+
+false
+∀{ false(sym) = false | sym}
 
 bool
 bool~true
 bool~false
 
-!: bool => bool1
-    ∀
-        |- bool = true
-            bool1 = false
-        |- bool = false
-            bool1 = true
+!
+!(false) = true
+!(true) = false
 
-~: (symbol1, symbol2) => bool
+~
 
 # intrinsic operators on symbols and values
 =: (symbol1, symbol2) => bool
@@ -21,29 +25,21 @@ bool~false
         |- symbol2 = null
             bool = false
         |- else
-            bool = condition("symbol1 and symbol2 satisfy same conditions")
+            condition("symbol1 and symbol2 have same behavior")
 
->: (symbol1, symbol2) => bool
-≥(\ge): (symbol1, symbol2) => bool
-<: (symbol1, symbol2) => bool
-≤(\le): (symbol1, symbol2) => bool
-≠: (symbol1, symbol2) => bool
-*: (symbol1, symbol2) => symbol
-/: (symbol1, symbol2) => symbol
-+: (symbol1, symbol2) => symbol
--: (symbol1, symbol2) => symbol
-max: (symbol1, symbol2) => symbol
-min: (symbol1, symbol2) => symbol
+≠ = !=
 
-value(val)(v)
+&&
+&&(true, true) :=: true
+&&(false, true) :=: false
+&&(true, false) :=: false
+&&(false, false) :=: false
 
-val~max_val
-∀{ val ≤ max_val | val }
-
-val~min_val
-∀{ val ≥ min_val | val }
-
-val~size~val
+||
+||(true, true) :=: true
+||(false, true) :=: true
+||(true, false) :=: true
+||(false, false) :=: false
 
 tuple
     ::size
@@ -51,15 +47,47 @@ tuple
 set
     : symbol => bool
     ::size: set => size
-    ::⊆(\included_in): (set, set1) => bool
+    ::⊆: (set, set1) => bool
         bool = ∀{ symbol ∈ set1 | symbol ∈ set }
-    ::⊂(\subset): (set, set1) => bool
-        bool = ∀{ set ⊆ set1, set ≠ set1 }
+    ::⊂: (set, set1) => bool
+        bool = (set ⊆ set1 && set ≠ set1)
 
-∈(\in): (symbol, set) => bool
+full_set
+{*} = full_set
+
+empty_set
+{} = empty_set
+
+value
+val = value
+v = val
+
+set~value
+∀{ value(sym) = (sym = value) | sym }
+
+val~max_val
+∀{ val ≤ max_val | val }
+
+val~min_val
+∀{ val ≥ min_val | val }
+
+>
+≥(\ge) = (> || =)
+<
+≤(\le) = (< || =)
+*
+/
++
+-
+max
+min
+
+val = size
+
+∈: (symbol, set) => bool
     bool = set(symbol)
 
-∉(\notin): (symbol, set) => bool
+∉: (symbol, set) => bool
     bool = !set(symbol)
 
 condition: (symbols, desc) => bool
@@ -76,63 +104,34 @@ set.is_singleton: set => bool
     condition("extract the single element from set")
     ∀{ symbol = symbol1 | symbol1 ∈ set }
 
-
-function
-    ::in_args_size
-    ::out_args_size
-    ::arity = (in_args_size, out_args_size)
-    ::name
-    ::signature: function => signature
-        ∀
-            |- function.name ≠ null
-                signature = (function.name, function.in_args_size, function.out_args_size)
-            |- function.name = null
-                signature = null
-                # signature will not equal if it is null
-
-∀{ function1 = function2
-    | function1.signature = function2.signature
-    | function1, function2
-}
-
-function
+map
     ::keys
     ::vals
     ::items(kv_pairs): function => key_val_set
+    ::__call__: (map, key) => val
 
-identity_function: args_size => f
-    f.in_args_size = args_size
-    f.out_args_size = args_size
-    f = in_args -> in_args
+৹
+∀{৹(f1, f2)(sym) = f2(f1(sym)) | f1, f2, sym}
 
-function
-    ::is_endo: function => bool
-        bool = ∀{ function.in_args_size = function.out_args_size }
-    
-    ::args_size: function => size
-        | function.is_endo
-        size = function.in_args_size
+identity_f
+∀{ identity_f(sym) = sym | sym }
 
-    ::concat(\concat): (function, function1) => function2
-    ::concat(৹): (function, function1) => function2
-        | function.is_endo
-        | function1.is_endo
-        | function.args_size = function1.args_size
-        function2.is_endo
-        function2.args_size = function.args_size
-        ∀{ function2(*in_args) = function1(*function(*in_args)) | in_args }
+^: (f, n) => f1
+    | val~n
+    ∀
+        |- n = 0
+            f1 = identity_f
+        |- n > 0
+            f1 = ৹(f, ^(f, n - 1))
 
-    ::exp(^): (function, v) => function1
-        ∀
-            |- v = 0
-                function1 = identity_function(function.in_args_size)
-            |- v > 0
-                function1 = function ৹ function^(v-1)
+i
+value = i
 
-value~i~value
-value~id~value
-value~n~value
-value~size~value
+id
+value = id
+
+size
+value = size
 
 list
     ::size: list => size
