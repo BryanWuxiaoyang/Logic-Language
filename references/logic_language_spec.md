@@ -75,44 +75,52 @@
 - `bool`: `bool~true`, `bool~false`
 
 ## Set comprehension and mapped sets
-- `{| cond(sym1',...,symn') | (sym1, ..., symk)} = cond'`. `cond'(sym1, ..., symk) = cond(...,sym1, ..., symk,...)`, it inserts variables into corresponding pos in `cond`
-- `{| cond(sym1,..., symn) } = {| cond(sym1, ..., symn) | (sym1', ..., symk')}`. `(sym1',...,symk')` are variables
-- `{| f1(sym1,...) | f2(sym1',...) | ...}`
-  - First walk through from right-to-left to derive all declared symbols `_syms = (_sym1, _sym2, ...)`.
-  - Then split it to join of multiplt sub_sets: `{| f1(sym1,...) | f2(sym1',...) | ...} = {| f1'(_sym1, ...)} ∩ {| f2'(_sym1, ...)} ...`, where `f1'`/`f2'` is `f1` applied on all `_syms` as input-arg.
-  - `,` is identical to `|`, but inner-order is reversed. e.g. `{sym1, sym2, sym3} = {| sym3 | sym2 | sym1}`
-  -  E.g. `{| sym2 > 0 | sym1 > 0 | sym1, sym2 }` represents:
-    -  Expand `,` to: `{sym2 > 0 | sym1 > 0 | sym2 | sym1}`
-    -  Derive `in_args` from right-to-left: `(sym1, sym2)`
-    -  Derive to 4 sets:
-       - `set1 = {| f1(sym1, sym2) }`, `f1(sym1, sym2) = (sym2 > 0)`
-       - `set2 = {| f2(sym1, sym2) }`, `f2(sym1, sym2) = (sym1 > 0)`
-    - `set' = {| sym2 > 0 | sym1 > 0 | sym1, sym2} = set1 ∩ set2`. i.e. `set'(sym1, sym2) = (sym1 > 0 && sym2 > 0)`
-  - E.g. if `integer~x, integer~y`, `{| y < 3 | y > 0 | x = 0 | x, y } = {(0, 1), (0, 2)}`
-  - Written form can be expand to multi-lines, read from bottom-up.
-    - E.g. `{| cond3 | cond2 | cond1}` = 
+- Canonical pipe-delimited brace form is `{| cond1 | cond2 | ... | target}`.
+  - Clauses before the final target are premise clauses.
+  - Premises are processed left-to-right.
+  - If the final target is omitted, use a trailing pipe: `{| cond1 | cond2 |}`.
+- `{| cond(sym1',...,symn') | (sym1, ..., symk) | } = cond'`. `cond'(sym1, ..., symk) = cond(...,sym1, ..., symk,...)`, it inserts variables into corresponding pos in `cond`
+- `{| cond(sym1,..., symn) | } = {| (sym1', ..., symk') | cond(sym1, ..., symn) }`. `(sym1',...,symk')` are variables
+- `{| cond1 | cond2 | ... | target}`
+  - First walk through premise clauses from left-to-right to derive all declared symbols `_syms = (_sym1, _sym2, ...)`.
+  - Then evaluate the final target with those symbols in scope.
+  - `,` keeps multiple expressions inside the same clause. E.g. `{sym1, sym2, sym3} = {| sym1, sym2, sym3 |}`
+  - E.g. `{| sym1, sym2 | sym1 > 0 | sym2 > 0 | }` represents a condition-set over `(sym1, sym2)`.
+  - E.g. if `integer~x, integer~y`, `{| x = 0 | y > 0 | y < 3 | x, y } = {(0, 1), (0, 2)}`
+  - Written form can expand to multi-lines, read from top-down.
+    - E.g.
       ```text
-          {
-              | cond3
-              | cond2
-              | cond1
-          }
+        {| cond1 | cond2 | target} =
+        {
+            | cond1
+            | cond2
+            target
+        }
       ```
+    - E.g. 
+        ```text
+        {| cond1 | cond2 |} =
+        {
+            | cond1
+            | cond2
+        }
+        ```
 
 - `apply: (set, f) => set1`, it maps every `sym ∈ set` through `f` into `set1`
   - For all `sym`: `apply(set, f)(sym) = ({ | f(sym') = sym | sym' ∈ set } ≠ {})`
-- Written form: `{f | cond}` is a `mapped_set`. It represents a `set'` that derives from `{| cond }` applied on `f`.
-  - For any `sym`, `{f | cond}(sym) = ({| sym = f(sym') | sym' ∈ {| cond} } ≠ {})`
+- Written form: `{| cond | f}` is a `mapped_set`. It represents a `set'` that derives from `{| cond | }` applied on `f`.
+  - For any `sym`, `{| cond | f}(sym) = ({| sym' ∈ {| cond | } | sym = f(sym') } ≠ {})`
   - The symbols used in `f` must appear in `conds`. Otherwise it is invalid.
-  - E.g. if `integer~x`, `{ x + 1 | x < 3 | x > 0 | x } = {2, 3}`
-  - Written form can expand to multi-lines, read from **bottom-up**.
-    - E.g. `{f | cond4 | cond3 | cond1, cond2}` = 
+  - E.g. if `integer~x`, `{| x | x > 0 | x < 3 | x + 1} = {2, 3}`
+  - Written form can expand to multi-lines, read from **top-down**.
+    - E.g. `{| cond1, cond2 | cond3 | cond4 | f}` =
         ```text
-            { f
-                | cond4
-                | cond3
-                | cond2
+            {
                 | cond1
+                | cond2
+                | cond3
+                | cond4
+                f
             }
         ```
 
@@ -121,30 +129,30 @@
 
 - `∃: set => bool_sym`. `∃(set) = (set ≠ {})`
   - `set~∃`. `∃` represents a `set` that stores all non-empty sets.
-  - E.g. if `integer~x`, `∃{| x < 3 | x > 0} = ∃{1, 2} = true`
+  - E.g. if `integer~x`, `∃{| x > 0 | x < 3 | } = ∃{1, 2} = true`
 
 - `∀: set => bool_sym`. `∀(set) = (false ∉ set)`
     - `set~∀`, `∀` represents a `set` that doesn't contain `false`.
-    - E.g. if `integer~x`, `∀{ x > 0 | x > 1} = ∀{true} = true`, `∀{ x < 3 | x > 0} = ∀{true, false} = false`, `∀{} = true`
+    - E.g. if `integer~x`, `∀{| x > 1 | x > 0} = ∀{true} = true`, `∀{| x > 0 | x < 3} = ∀{true, false} = false`, `∀{} = true`
 
-- Written form: `∀{target_cond | premise_cond} = ∀(set')`, `set' = {target_cond | premise_cond }`
+- Written form: `∀{| premise_cond | target_cond} = ∀(set')`, `set' = {| premise_cond | target_cond }`
   
 # extension: syntax-sugars and formating-rules
-## ∀ cond: `∀{target_cond | premise_cond}`
-- Written form: `∀{target_cond | premise_cond}`
-  - Given a `∀`-statement, it's identical to expanding it using all syntax-rules below into `∀{target_cond | premise_cond}` form.
-  - `∀{target_cond | premise_cond}` can expand to multi-lines without `{}`, read from **top-down**:
+## ∀ cond: `∀{| premise_cond | target_cond}`
+- Written form: `∀{| premise_cond | target_cond}`
+  - Given a `∀`-statement, it's identical to expanding it using all syntax-rules below into `∀{| premise_cond | target_cond}` form.
+  - `∀{| premise_cond | target_cond}` can expand to multi-lines without `{}`, read from **top-down**:
   - Each line after `∀` should be indented
     - E.g. 
       ```text
-      ∀{ target_cond | cond2 | cond1 } =
+      ∀{| cond1 | cond2 | target_cond} =
       ∀
           | cond1
           | cond2
           target_cond
       ```
   - `,` in `target_cond` is `&&`, it can split a `set_cond` into multiple `sub_set_conds`.
-    - E.g. `∀{ target_cond1, target_cond2 | cond } = ∀{ target_cond1 && target_cond2 | cond } = ∀{target_cond1 | cond} && ∀{target_cond2 | cond}`
+    - E.g. `∀{| cond | target_cond1, target_cond2} = ∀{| cond | target_cond1 && target_cond2} = ∀{| cond | target_cond1} && ∀{| cond | target_cond2}`
   - multiple `target_cond` can appear alternately between `premise_cond`:
     - E.g.
         ```text

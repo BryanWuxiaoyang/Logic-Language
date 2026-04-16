@@ -140,7 +140,9 @@ class Node:
         issues: list[SemanticIssue] = []
         semantic_index = _build_semantic_index(self)
         non_premise_symbols = (
-            _STATIC_NON_PREMISE_SYMBOLS | _collect_enum_symbols(self.children())
+            _STATIC_NON_PREMISE_SYMBOLS
+            | frozenset(semantic_index.class_names)
+            | _collect_enum_symbols(self.children())
         )
         _validate_block(
             self.children(),
@@ -700,6 +702,60 @@ def _clone_statement(statement: Statement) -> Statement:
         return replace(statement)
 
     return statement
+
+
+def _lower_condition_declaration_premise(
+    declaration: Declaration,
+    *,
+    premise_line: int,
+    premise_column: int,
+    trailing_comment: str | None,
+) -> Statement:
+    if declaration.head is None:
+        return declaration
+
+    call_args = _signature_expr_items(declaration.input_expr)
+    mapping_expr = ExpressionStatement(
+        expression=BinaryExpr(
+            left=declaration.output_expr,
+            operator="=",
+            right=CallExpr(
+                callee=declaration.head,
+                args=call_args,
+                separators=[","] * max(0, len(call_args) - 1),
+                delimiter="()",
+                line=declaration.line,
+                column=declaration.column,
+            ),
+            line=declaration.line,
+            column=declaration.column,
+        ),
+        body=[],
+        line=declaration.line,
+        column=declaration.column,
+    )
+    local_signature = replace(
+        declaration,
+        body=[],
+        trailing_comment=None,
+    )
+    quantified_body = [mapping_expr, *[_clone_statement(item) for item in declaration.body]]
+    return Premise(
+        expression=declaration.head,
+        body=[
+            local_signature,
+            ExpandedCondition(
+                quantifier="∀",
+                body=quantified_body,
+                line=declaration.line,
+                column=declaration.column,
+                trailing_comment=None,
+            ),
+        ],
+        line=premise_line,
+        column=premise_column,
+        trailing_comment=trailing_comment,
+    )
 
 
 def parse_program_text(
@@ -1387,11 +1443,14 @@ def _reachable_class_relations(
 
 def _condition_from_quantified_expr(expr: QuantifiedExpr) -> Condition:
     segments = _split_condition_segments(expr.body)
-    if not segments or not segments[0]:
+    premise_segments, target_segment = _canonicalize_pipe_segments(segments)
+    if target_segment is None or not target_segment:
         raise ParserError("quantified condition must contain at least one target")
+    if any(not segment for segment in premise_segments):
+        raise ParserError("quantified condition contains an empty clause")
 
     body: list[Statement] = []
-    for segment in reversed(segments[1:]):
+    for segment in premise_segments:
         premise_expr = _merge_segment_expr(segment)
         body.append(
             Premise(
@@ -1402,7 +1461,7 @@ def _condition_from_quantified_expr(expr: QuantifiedExpr) -> Condition:
             )
         )
 
-    for target_expr in segments[0]:
+    for target_expr in target_segment:
         body.append(
             ExpressionStatement(
                 expression=target_expr,
@@ -1421,17 +1480,13 @@ def _condition_from_quantified_expr(expr: QuantifiedExpr) -> Condition:
 
 
 def _split_condition_segments(body: DelimitedExpr) -> list[list[Expr]]:
-    if body.opener != "{" or body.closer != "}":
-        raise ParserError("quantified condition body must be delimited by braces")
-
-    if not body.items:
+    if not body.items and not body.separators:
         return [[]]
 
     segments: list[list[Expr]] = [[]]
     for index, item in enumerate(body.items):
-        if item is None:
-            raise ParserError("quantified condition contains an empty clause")
-        segments[-1].append(item)
+        if item is not None:
+            segments[-1].append(item)
         if index >= len(body.separators):
             continue
         separator = body.separators[index]
@@ -1443,7 +1498,56 @@ def _split_condition_segments(body: DelimitedExpr) -> list[list[Expr]]:
                 f"unsupported quantified-condition separator {separator!r}"
             )
 
+    for separator in body.separators[len(body.items) :]:
+        if separator == "|":
+            segments.append([])
+            continue
+        if separator != ",":
+            raise ParserError(
+                f"unsupported quantified-condition separator {separator!r}"
+            )
+
     return segments
+
+
+def _canonicalize_pipe_segments(
+    segments: list[list[Expr]],
+) -> tuple[list[list[Expr]], list[Expr] | None]:
+    if not segments:
+        return [], None
+
+    if not segments[0]:
+        if len(segments) == 1:
+            return [], None
+        if not segments[-1]:
+            return list(segments[1:-1]), None
+        return list(segments[1:-1]), list(segments[-1])
+
+    return list(reversed(segments[1:])), list(segments[0])
+
+
+def _build_canonical_pipe_delimited_expr(
+    condition_segments: list[list[Expr]],
+    target_segment: list[Expr] | None,
+    *,
+    line: int,
+    column: int,
+) -> DelimitedExpr:
+    items: list[Expr | None] = [None]
+    items.extend(_merge_segment_expr(segment) for segment in condition_segments)
+    if target_segment is not None and target_segment:
+        items.append(_merge_segment_expr(target_segment))
+        separators = ["|"] * (len(items) - 1)
+    else:
+        separators = ["|"] * len(items)
+    return DelimitedExpr(
+        opener="{",
+        items=items,
+        separators=separators,
+        closer="}",
+        line=line,
+        column=column,
+    )
 
 
 def _merge_segment_expr(items: list[Expr]) -> Expr:
@@ -1611,6 +1715,8 @@ def _format_expr(expr: Expr | None) -> str:
         return _join_with_separators(parts, expr.separators)
 
     if isinstance(expr, DelimitedExpr):
+        if expr.opener == "{" and expr.closer == "}" and "|" in expr.separators:
+            return _format_pipe_delimited_expr(expr)
         parts = [_format_expr(item) for item in expr.items]
         inner = _join_with_separators(parts, expr.separators)
         return f"{expr.opener}{inner}{expr.closer}"
@@ -1643,6 +1749,27 @@ def _format_expr(expr: Expr | None) -> str:
         return f"{expr.quantifier}{_format_expr(expr.body)}"
 
     return repr(expr)
+
+
+def _format_pipe_delimited_expr(expr: DelimitedExpr) -> str:
+    segments = _split_condition_segments(expr)
+    condition_segments, target_segment = _canonicalize_pipe_segments(segments)
+
+    parts = [""]
+    parts.extend(
+        _format_expr(_merge_segment_expr(segment))
+        for segment in condition_segments
+        if segment
+    )
+
+    if target_segment is not None and target_segment:
+        parts.append(_format_expr(_merge_segment_expr(target_segment)))
+        separators = ["|"] * (len(parts) - 1)
+    else:
+        separators = ["|"] * len(parts)
+
+    inner = _join_with_separators(parts, separators)
+    return f"{expr.opener}{inner}{expr.closer}"
 
 
 def _format_atom(expr: Expr) -> str:
@@ -1791,7 +1918,7 @@ def _normalize_semantic_tree(node: Node | None) -> Node | None:
         )
 
     if isinstance(node, DelimitedExpr):
-        return DelimitedExpr(
+        normalized = DelimitedExpr(
             opener=node.opener,
             items=_normalize_expr_items(node.items),
             separators=list(node.separators),
@@ -1799,6 +1926,17 @@ def _normalize_semantic_tree(node: Node | None) -> Node | None:
             line=0,
             column=0,
         )
+        if normalized.opener == "{" and normalized.closer == "}" and "|" in normalized.separators:
+            condition_segments, target_segment = _canonicalize_pipe_segments(
+                _split_condition_segments(normalized)
+            )
+            return _build_canonical_pipe_delimited_expr(
+                condition_segments,
+                target_segment,
+                line=0,
+                column=0,
+            )
+        return normalized
 
     if isinstance(node, AttributeExpr):
         return AttributeExpr(
@@ -2028,11 +2166,16 @@ class SemanticParser:
 
     grouped_expr       ::= "(" [ expression { ("," | ":" | ";" | "|") expression } ] ")"
                          | "[" [ expression { ("," | ":" | ";" | "|") expression } ] "]"
-                         | "{" [ expression { ("," | "|" ) expression } ] "}"
-    quantified_expr    ::= ("∀" | "∃") "{" [ expression { ("," | "|" ) expression } ] "}"
+                         | pipe_brace_expr
+    quantified_expr    ::= ("∀" | "∃") pipe_brace_expr
     call               ::= "(" [ expression { ("," | ":" | ";" | "|") expression } ] ")"
     index              ::= "[" [ expression { ("," | ":" | ";" | "|") expression } ] "]"
-    brace_call         ::= "{" [ expression { ("," | "|" ) expression } ] "}"
+    brace_call         ::= pipe_brace_expr
+    pipe_brace_expr    ::= "{" [ expression { ("," | "|" ) expression } ] "}"
+
+    Canonical pipe order uses a leading `|` and places the target last:
+    `{| cond1 | cond2 | target}` or `{| cond1 | cond2 |}`.
+    The parser still accepts legacy target-first forms for migration.
     infix_op           ::= "->" | "is"
                          | "=" | "==" | "!=" | "≠"
                          | "<" | ">" | "<=" | ">=" | "≤" | "≥"
@@ -2197,6 +2340,14 @@ class SemanticParser:
             )
 
         if start.kind == "SYMBOL" and start.value == "|":
+            declaration = self._try_parse_declaration(line_tokens[1:], body, None)
+            if declaration is not None:
+                return _lower_condition_declaration_premise(
+                    declaration,
+                    premise_line=start.line,
+                    premise_column=start.column,
+                    trailing_comment=trailing_comment,
+                )
             expr = _LineExpressionParser(line_tokens[1:]).parse_complete()
             return Premise(
                 expression=expr,
@@ -2231,7 +2382,9 @@ class SemanticParser:
 
         arrow_index = _find_top_level_symbol(line_tokens[colon_index + 1 :], "=>")
         if arrow_index is None:
-            return None
+            arrow_index = _find_top_level_symbol(line_tokens[colon_index + 1 :], "->")
+            if arrow_index is None:
+                return None
         arrow_index += colon_index + 1
 
         head_tokens = line_tokens[:colon_index]
@@ -2321,6 +2474,10 @@ class _LineExpressionParser:
         "≥": 20,
         "∈": 20,
         "∉": 20,
+        "⊆": 20,
+        "⊂": 20,
+        "⊇": 20,
+        "⊃": 20,
         "!∈": 20,
         "!∉": 20,
         "::": 25,
@@ -2520,12 +2677,26 @@ class _LineExpressionParser:
         items: list[Expr | None] = []
         seen_separators: list[str] = []
         expecting_item = True
+        pipe_layout_active = False
+        next_item_pipe_prefixed = False
+        last_item_pipe_prefixed = False
 
         while True:
             token = self._peek()
             if token is None:
                 self._raise_error(None, f"expected closing {closer!r}")
             if token.kind == "SYMBOL" and token.value == closer:
+                previous = self._peek(-1)
+                if (
+                    opener == "{"
+                    and "|" in separators
+                    and pipe_layout_active
+                    and not expecting_item
+                    and last_item_pipe_prefixed
+                    and previous is not None
+                    and token.line > previous.line
+                ):
+                    seen_separators.append("|")
                 self._consume()
                 return DelimitedExpr(
                     opener=opener,
@@ -2539,20 +2710,46 @@ class _LineExpressionParser:
             if token.kind == "SYMBOL" and token.value in separators:
                 if expecting_item:
                     items.append(None)
-                seen_separators.append(self._consume().value)
+                separator = self._consume().value
+                seen_separators.append(separator)
                 expecting_item = True
+                if separator == "|":
+                    pipe_layout_active = True
+                    next_item_pipe_prefixed = True
+                else:
+                    next_item_pipe_prefixed = False
                 continue
 
             items.append(self.parse_expression())
             expecting_item = False
+            last_item_pipe_prefixed = next_item_pipe_prefixed
+            next_item_pipe_prefixed = False
+            previous = self._peek(-1)
             token = self._peek()
             if token is None:
                 self._raise_error(None, f"expected closing {closer!r}")
             if token.kind == "SYMBOL" and token.value in separators:
-                seen_separators.append(self._consume().value)
+                separator = self._consume().value
+                seen_separators.append(separator)
                 expecting_item = True
+                if separator == "|":
+                    pipe_layout_active = True
+                    next_item_pipe_prefixed = True
+                else:
+                    next_item_pipe_prefixed = False
                 continue
             if token.kind == "SYMBOL" and token.value == closer:
+                continue
+            if (
+                opener == "{"
+                and "|" in separators
+                and pipe_layout_active
+                and previous is not None
+                and token.line > previous.line
+            ):
+                seen_separators.append("|")
+                expecting_item = True
+                next_item_pipe_prefixed = False
                 continue
             self._raise_error(token, f"expected separator or closing {closer!r}")
 
@@ -2657,6 +2854,16 @@ class _LineExpressionParser:
             self._raise_error(None, "expected member name")
         if token.kind == "IDENT":
             return self._consume()
+        if (
+            token.kind == "SYMBOL"
+            and token.value == "["
+            and self._peek(1) is not None
+            and self._peek(1).kind == "SYMBOL"
+            and self._peek(1).value == "]"
+        ):
+            opening = self._consume()
+            self._consume()
+            return Token("SYMBOL", "[]", opening.line, opening.column)
         if token.kind == "SYMBOL" and token.value not in {"(", ")", "[", "]", "{", "}", ",", ".", ":", ";", "|", "=>", "|-"}:
             return self._consume()
         self._raise_error(token, f"expected member name, got {token.kind}")
@@ -4104,21 +4311,34 @@ def _collect_pipe_delimited_required_symbols(
     non_premise_symbols: frozenset[str],
 ) -> set[str]:
     required: set[str] = set()
-    available_to_left: set[str] = set()
+    available: set[str] = set()
+    condition_segments, target_segment = _canonicalize_pipe_segments(
+        _split_condition_segments(expr)
+    )
 
-    for item in reversed(expr.items):
-        if item is None:
+    for segment in condition_segments:
+        if not segment:
             continue
+        item = _merge_segment_expr(segment)
         required.update(
             _collect_premise_required_symbols(
                 item, non_premise_symbols=non_premise_symbols
             )
-            - available_to_left
+            - available
         )
-        available_to_left.update(
+        available.update(
             _collect_expr_exposed_symbols(
                 item, non_premise_symbols=non_premise_symbols
             )
+        )
+
+    if target_segment:
+        item = _merge_segment_expr(target_segment)
+        required.update(
+            _collect_premise_required_symbols(
+                item, non_premise_symbols=non_premise_symbols
+            )
+            - available
         )
 
     return required
