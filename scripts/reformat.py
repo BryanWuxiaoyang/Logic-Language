@@ -336,7 +336,9 @@ def _preserve_non_compression(
     source_lines = _source_statement_lines(statement)
     if not source_lines:
         return formatted_lines
-    if len(formatted_lines) < len(source_lines):
+    # Expand-only formatting: if the source already spans multiple lines,
+    # keep the original layout whenever the formatter would not add lines.
+    if _was_multiline(statement) and len(formatted_lines) <= len(source_lines):
         return source_lines
     return formatted_lines
 
