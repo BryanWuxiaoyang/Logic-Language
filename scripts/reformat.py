@@ -396,7 +396,7 @@ def _format_statement_lines(
         return _preserve_non_compression(statement, lines)
 
     if isinstance(statement, lp_parser.Import):
-        lines = [prefix + "$import {" + statement.module_path + "}" + trailing]
+        lines = [prefix + "$import " + statement.module_path + trailing]
         lines.extend(_format_statement_block(statement.body, indent=indent + 4))
         return _preserve_non_compression(statement, lines)
 

@@ -537,7 +537,7 @@ B~C
 Then `A::val = B::val = C::val`, `∀{C.val > 0, C.val < 2}`.
 
 #### 1.5.5 Cyclic Inheritance
-Same as cyclic inheritance on symbols, when `A~B~A`, then `A` and `B` are identical classes.
+Same as cyclic inheritance on symbols, when `A~B~A`, then `A` and `B` can be feeded in any argument that requires either `A` or `B`
 
 E.g.
 ```
@@ -634,20 +634,20 @@ A
     ::type: A => type
 
     ::is_type1: A => bool
-        bool = ∀{A.type = type1}
+        bool = (A.type = type1)
 ```
 It first declared a class named 'type'. Then declared 2 sub-classes `type1` and `type2`.
 
 - in `bool = ∀{A.type = type1}`, Although `bool = A.type = type1` is valid. For readability, it's recommended to write as `bool = (A.type = type1)`(here `()` defines operator precedence, not `tuple`) or `bool = ∀{A.type = type1}`
 
-## Comments
+### Comments
 Comments are prefixed with '#'. It doesn't participate in the program semantic, just use a more natural way to describe the program parts.
 
 ### Topic Headings
 Topic headings are prefixed with '@'. It doesn't participate in the program semantic. It's used to organize the program for better readability. All contents inside the heading should be indented by 1 level.
 
 ### Module Import
-Other `.lp` modules can be imported by `$import {module_path}`. It's copies in all content from `{module_path}`. It will recursively introduce all classes and functions defined in `module_path`.
+Other `.lp` modules can be imported by `$import module_path`. It copies in all content from `module_path`. It will recursively introduce all classes and functions defined in `module_path`.
 
 When accessing items in the `module_path`, we can either directly use item-name if it doesn't cause ambiguity, or use `{module_name}::{item-name}`.
 
@@ -845,8 +845,3 @@ f: v => v1
         v1 = null
 ```
 Then `f(-1) = null`, `f(0) = null`.
-
-# Example References
-- `@/references/LC-730 palindrome.lp` and `@/references/LC-730 palindrome.py` are the logic program and the translated python program.
-- `@/references/SegTree.lp` and `@/references/SegTree.py` are the logic program and the translated python program.
-- `@/references/DataFlowAnalysis.lp` is a program describing compiler-domain-knowledge about data-flow-framework.

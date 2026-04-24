@@ -115,10 +115,11 @@ value = size
 list
     ::size: list => size
     ::[]: (list, i) => symbol
-    ::append(push_back): (list, symbol) => list1
+    ::append: (list, symbol) => list1
         list1.size = (list.size + 1)
         ∀{| (0 ≤ i) < list.size | list1[i] = list[i]}
         list1[list.size] = symbol
+    ::push_back = list.append
     ::concat(+): (list, list1) => list2
         list2.size = (list.size + list1.size)
         ∀{| (0 ≤ i) < list.size | list2[i] = list[i]}
@@ -147,7 +148,7 @@ slice
     | slice.to_id ≠ max_val
     | slice.to_id ≥ 0
     list ~ slice
-    (slice :: size) = (slice.to_id - slice.from_id)
+    slice.size = (slice.to_id - slice.from_id)
     ∀{| (0 ≤ i) < slice.size | slice[i] = (slice.from_id + i)}
 # list[i:j]
 list :: slice: (list, slice) => list1

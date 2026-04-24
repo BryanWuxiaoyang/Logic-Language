@@ -1652,7 +1652,7 @@ def _format_statement_lines(statement: Statement, *, indent: int) -> list[str]:
         return lines
 
     if isinstance(statement, Import):
-        lines = [prefix + "$import {" + statement.module_path + "}" + trailing]
+        lines = [prefix + "$import " + statement.module_path + trailing]
         lines.extend(_format_statement_block(statement.body, indent=indent + 4))
         return lines
 

@@ -42,26 +42,24 @@ natural_language => logic_language => programming_language
 
 # Tranlate logic program to executable program
 
-## 1 Get Input Arguments
-The input arguments needed for translation are:
-- source logic program
-- output executable program language
-- executable program optimization level (see `### Executable Program Optimization Level`)
-- output executable file path (default=`{logic_program_path}.{language_postfix}`)
+- Get Input Arguments
+    The input arguments needed for translation are:
+    - source logic program
+    - output executable program language
+    - executable program optimization level (see `### Executable Program Optimization Level`)
+    - output executable file path (default=`{logic_program_path}.{language_postfix}`)
 
-## 2 Check Semantic for the logic program
-Use `/scripts/semantic_parser.py {file-path}` to check semantics.
+- Check Semantic for the logic program
+    Use `/scripts/semantic_parser.py {file-path}` to check semantics.
 
-## 3 Reformat program
-Use `scripts/reformat.py {file-path}` to reformat it. It convert latex-style symbol-representation `\...` into symbols. E.g. `\in` = `∈`.
+- Reformat program
+    Use `scripts/reformat.py {file-path}` to reformat it. It convert latex-style symbol-representation `\...` into symbols. E.g. `\in` = `∈`.
+    After reformat, there should be no `\...` symbol exists in text.
 
-After reformat, there should be no `\...` symbol exists in text.
+- Analyze the Logic Program
+- Translate into Executable program
 
-## 3 Analyze the Logic Program
- 
-## 4 Translate into Executable program
-
-### Executable Program Optimization Level
+## Executable Program Optimization Level
 
 When translating logic program to executable program, ask the user explicitly about what optimization-level is expected.
 
@@ -71,12 +69,11 @@ Optimization mode rules:
 - `-O1`: apply `-O0` behavior; Ignore unused symbols and conditions that doesn't contribute to the output of each function.
 - `-O2`: Enable as much optimization as possible as long as main logic is preserved.
 
-# Logic Program Semantic
-- `references/logic_language_spec.md`: Describes full `.lp` syntax/semantics specification.
-- `@/scripts/semantic_parser.py`: Generates formal semantic-architecture and verify semantic-correctness and work as basis for program analyses.
-    - run `verify_semantic_parser` on all `.lp` programs in `@/references` whenever updating the script. Ensure that `semantic_node -> program_source -> semantic_node` process retain all semantic information of original program.
-
 # Tools
+
+## Semantic parser
+`@/scripts/semantic_parser.py`: Generates formal semantic-architecture and verify semantic-correctness and work as basis for program analyses.
+    - run `verify_semantic_parser` on all `.lp` programs in `@/references` whenever updating the script. Ensure that `semantic_node -> program_source -> semantic_node` process retain all semantic information of original program.
 
 ## Class Inheritance Graph
 Use command `show-class-inheritance-graph {class}` to find all parent-classes and sub-classes of a given class from the logic program.

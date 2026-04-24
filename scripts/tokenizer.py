@@ -99,16 +99,36 @@ def tokenize_text(logic_program: str, *, source_name: str = "<string>") -> Token
         if content.startswith("@"):
             tokens.append(Token("HEADING", content[1:].strip(), line_number, indent + 1))
         elif content.startswith("$"):
-            import_text = content[1:].strip()
-            if import_text == "import" or import_text.startswith("import "):
-                import_text = import_text[len("import") :].lstrip()
-            if (
-                import_text.startswith("{")
-                and import_text.endswith("}")
-                and len(import_text) >= 2
-            ):
-                import_text = import_text[1:-1].strip()
-            tokens.append(Token("IMPORT", import_text, line_number, indent + 1))
+            directive_text = content[1:].strip()
+            if directive_text == "import" or directive_text.startswith("import "):
+                import_text = directive_text[len("import") :].lstrip()
+                if import_text.startswith("{") or import_text.endswith("}"):
+                    _raise_tokenizer_error(
+                        source_name,
+                        line_number,
+                        indent + 1,
+                        "import path must not use braces; use '$import path'",
+                    )
+                if not import_text:
+                    _raise_tokenizer_error(
+                        source_name,
+                        line_number,
+                        indent + 1,
+                        "import path must not be empty",
+                    )
+                tokens.append(Token("IMPORT", import_text, line_number, indent + 1))
+            else:
+                directive_name = directive_text.split(None, 1)[0] if directive_text else ""
+                if directive_name:
+                    message = f"unknown directive '${directive_name}'; use '$import'"
+                else:
+                    message = "unknown directive '$'; use '$import'"
+                _raise_tokenizer_error(
+                    source_name,
+                    line_number,
+                    indent + 1,
+                    message,
+                )
         else:
             tokens.extend(
                 _tokenize_content(
