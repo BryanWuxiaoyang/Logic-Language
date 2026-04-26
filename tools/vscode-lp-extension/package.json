@@ -77,8 +77,8 @@
         },
         "lp.backendScriptsRoot": {
           "type": "string",
-          "default": "${workspaceFolder}/skills/logic-language/scripts",
-          "description": "Path to the shared logic-language parser scripts."
+          "default": "${extensionPath}/python_backend/scripts",
+          "description": "Path to the bundled logic-language parser scripts."
         }
       }
     }

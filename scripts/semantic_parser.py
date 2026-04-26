@@ -1460,6 +1460,7 @@ class _LineExpressionParser:
         "∪": 30,
         "∩": 30,
         "*": 40,
+        "%": 40,
         "/": 40,
         "^": 50,
     }
@@ -1661,8 +1662,7 @@ class _LineExpressionParser:
             if token.kind == "SYMBOL" and token.value == closer:
                 previous = self._peek(-1)
                 if (
-                    opener == "{"
-                    and "|" in separators
+                    "|" in separators
                     and pipe_layout_active
                     and not expecting_item
                     and last_item_pipe_prefixed
@@ -1714,11 +1714,10 @@ class _LineExpressionParser:
             if token.kind == "SYMBOL" and token.value == closer:
                 continue
             if (
-                opener == "{"
-                and "|" in separators
-                and pipe_layout_active
-                and previous is not None
-                and token.line > previous.line
+                  "|" in separators
+                  and pipe_layout_active
+                  and previous is not None
+                  and token.line > previous.line
             ):
                 seen_separators.append("|")
                 expecting_item = True
@@ -2082,7 +2081,7 @@ def _collect_module_named_symbols(
     semantic_index: SemanticIndex,
     non_premise_symbols: frozenset[str],
     current_class: str | None = None,
-) -> list[str]:
+    ) -> list[str]:
     return _semantic_symbols.collect_module_named_symbols(
         sys.modules[__name__],
         items,
@@ -2090,6 +2089,26 @@ def _collect_module_named_symbols(
         non_premise_symbols=non_premise_symbols,
         current_class=current_class,
     )
+
+
+def _merge_semantic_indexes(indexes: list[SemanticIndex]) -> SemanticIndex:
+    merged = SemanticIndex()
+    for index in indexes:
+        merged.class_names.update(index.class_names)
+        merged.function_names.update(index.function_names)
+        for owner_class, member_names in index.member_names_by_class.items():
+            merged.member_names_by_class.setdefault(owner_class, set()).update(member_names)
+        for name, signatures in index.function_signatures_by_name.items():
+            merged.function_signatures_by_name.setdefault(name, []).extend(signatures)
+        for key, signatures in index.member_signatures_by_key.items():
+            merged.member_signatures_by_key.setdefault(key, []).extend(signatures)
+        for alias, signatures in index.operator_aliases.items():
+            merged.operator_aliases.setdefault(alias, []).extend(signatures)
+        merged.class_inheritance_relations.update(index.class_inheritance_relations)
+        merged.function_inheritance_relations.update(index.function_inheritance_relations)
+        merged.symbol_inheritance_relations.update(index.symbol_inheritance_relations)
+        merged.function_class_relations.update(index.function_class_relations)
+    return merged
 
 
 def collect_semantic_issues_for_file(logic_program: str | Path) -> tuple[Program, list[SemanticIssue]]:
@@ -2116,17 +2135,27 @@ def collect_semantic_issues_for_file(logic_program: str | Path) -> tuple[Program
         )
 
     full_named_symbols_by_path: dict[Path, frozenset[str]] = {}
+    full_semantic_index_by_path: dict[Path, SemanticIndex] = {}
     for module in modules:
         visible = set(named_symbols_by_path[module.path])
+        visible_indexes = [semantic_index_by_path[module.path]]
         for import_stmt in _iter_root_imports(module.program):
             imported_file = resolve_import_path(module.path.parent, import_stmt.module_path)
             visible.update(full_named_symbols_by_path.get(imported_file, frozenset()))
+            imported_index = full_semantic_index_by_path.get(imported_file)
+            if imported_index is not None:
+                visible_indexes.append(imported_index)
         full_named_symbols_by_path[module.path] = frozenset(visible)
+        full_semantic_index_by_path[module.path] = _merge_semantic_indexes(visible_indexes)
 
     all_issues: list[SemanticIssue] = []
     for module in modules:
-        semantic_index = semantic_index_by_path[module.path]
-        non_premise_symbols = non_premise_symbols_by_path[module.path]
+        semantic_index = full_semantic_index_by_path[module.path]
+        non_premise_symbols = (
+            _STATIC_NON_PREMISE_SYMBOLS
+            | frozenset(semantic_index.class_names)
+            | _collect_enum_symbols(module.program.children())
+        )
         direct_import_visible: set[str] = set()
         for import_stmt in _iter_root_imports(module.program):
             imported_file = resolve_import_path(module.path.parent, import_stmt.module_path)
@@ -2441,6 +2470,8 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     try:
+        if hasattr(sys.stdout, "reconfigure"):
+            sys.stdout.reconfigure(encoding="utf-8", errors="backslashreplace")
         root_node, issues = collect_semantic_issues_for_file(args.logic_program)
     except (OSError, ValueError, TokenizerError, ParserError) as exc:
         print(exc, file=sys.stderr)

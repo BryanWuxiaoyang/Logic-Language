@@ -35,13 +35,13 @@ class BackendClient {
     );
     const configuredValue =
       config.get("backendScriptsRoot") ||
-      "${workspaceFolder}/skills/logic-language/scripts";
+      path.join(this.context.extensionPath, "python_backend", "scripts");
     const resolvedConfigured = this.resolveConfiguredPath(configuredValue, filePath);
     if (resolvedConfigured) {
       return resolvedConfigured;
     }
 
-    return path.resolve(this.context.extensionPath, "..", "..", "scripts");
+    return path.join(this.context.extensionPath, "python_backend", "scripts");
   }
 
   resolveConfiguredPath(configuredValue, filePath) {
@@ -53,6 +53,12 @@ class BackendClient {
       ? vscode.workspace.getWorkspaceFolder(vscode.Uri.file(filePath))
       : vscode.workspace.workspaceFolders && vscode.workspace.workspaceFolders[0];
     const workspaceRoot = workspaceFolder && workspaceFolder.uri.fsPath;
+
+    if (configuredValue.includes("${extensionPath}")) {
+      return path.normalize(
+        configuredValue.replace(/\$\{extensionPath\}/g, this.context.extensionPath)
+      );
+    }
 
     if (configuredValue.includes("${workspaceFolder}")) {
       if (!workspaceRoot) {

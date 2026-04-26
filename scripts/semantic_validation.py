@@ -354,11 +354,9 @@ def lower_condition_declaration_premise(
 
 def validate_block(lp, items, context: ValidationContext) -> None:
     current_symbols = set(context.available_symbols)
-    import_prefix_open = context.allow_imports
 
     for item in items:
         if isinstance(item, lp.Heading):
-            import_prefix_open = False
             if not item.body:
                 _issue(lp, context, "heading must contain an indented body", item.line, item.column)
             validate_block(
@@ -367,7 +365,7 @@ def validate_block(lp, items, context: ValidationContext) -> None:
                 ValidationContext(
                     issues=context.issues,
                     allow_condition_clauses=False,
-                    allow_imports=False,
+                    allow_imports=context.allow_imports,
                     available_symbols=frozenset(current_symbols),
                     non_premise_symbols=context.non_premise_symbols,
                     semantic_index=context.semantic_index,
@@ -377,8 +375,8 @@ def validate_block(lp, items, context: ValidationContext) -> None:
             continue
 
         if isinstance(item, lp.Import):
-            if not context.allow_imports or not import_prefix_open:
-                _issue(lp, context, "import is only valid in the leading module import block", item.line, item.column)
+            if not context.allow_imports:
+                _issue(lp, context, "import is only valid at module scope", item.line, item.column)
             validation_error = lp.validate_import_path(item.module_path)
             if validation_error is not None:
                 _issue(lp, context, validation_error, item.line, item.column)
@@ -387,7 +385,6 @@ def validate_block(lp, items, context: ValidationContext) -> None:
             continue
 
         if isinstance(item, lp.ExpandedCondition):
-            import_prefix_open = False
             if not item.body:
                 _issue(lp, context, "expanded condition must contain an indented body", item.line, item.column)
             validate_condition_body(
@@ -403,22 +400,22 @@ def validate_block(lp, items, context: ValidationContext) -> None:
             continue
 
         if isinstance(item, lp.Branch):
-            import_prefix_open = False
             if not context.allow_condition_clauses:
                 _issue(lp, context, "branch clause '|-' is only valid inside an expanded condition", item.line, item.column)
             if not item.body:
                 _issue(lp, context, "branch clause must contain an indented body", item.line, item.column)
+            declared_symbols = lp._statement_declared_symbols(
+                item,
+                current_class=context.current_class,
+                non_premise_symbols=context.non_premise_symbols,
+            )
             validate_condition_body(
                 lp,
                 item.body,
                 issues=context.issues,
                 available_symbols=frozenset(
                     current_symbols
-                    | lp._statement_declared_symbols(
-                        item,
-                        current_class=context.current_class,
-                        non_premise_symbols=context.non_premise_symbols,
-                    )
+                    | declared_symbols
                 ),
                 enforce_target_symbol_flow=False,
                 non_premise_symbols=context.non_premise_symbols,
@@ -428,20 +425,20 @@ def validate_block(lp, items, context: ValidationContext) -> None:
             continue
 
         if isinstance(item, lp.Premise):
-            import_prefix_open = False
             if not context.allow_condition_clauses:
                 _issue(lp, context, "premise clause '|' is only valid inside an expanded condition", item.line, item.column)
+            declared_symbols = lp._statement_declared_symbols(
+                item,
+                current_class=context.current_class,
+                non_premise_symbols=context.non_premise_symbols,
+            )
             validate_condition_body(
                 lp,
                 item.body,
                 issues=context.issues,
                 available_symbols=frozenset(
                     current_symbols
-                    | lp._statement_declared_symbols(
-                        item,
-                        current_class=context.current_class,
-                        non_premise_symbols=context.non_premise_symbols,
-                    )
+                    | declared_symbols
                 ),
                 enforce_target_symbol_flow=False,
                 non_premise_symbols=context.non_premise_symbols,
@@ -451,11 +448,15 @@ def validate_block(lp, items, context: ValidationContext) -> None:
             continue
 
         if isinstance(item, lp.Declaration):
-            import_prefix_open = False
+            declared_symbols = lp._statement_declared_symbols(
+                item,
+                current_class=context.current_class,
+                non_premise_symbols=context.non_premise_symbols,
+            )
             if item.input_expr is None or item.output_expr is None:
                 _issue(lp, context, "declaration signature must contain both input and output expressions", item.line, item.column)
             owner_class = lp._declaration_owner_class(item, current_class=context.current_class)
-            if owner_class is not None and owner_class not in current_symbols:
+            if owner_class is not None and owner_class not in current_symbols and owner_class not in declared_symbols:
                 _issue(
                     lp,
                     context,
@@ -464,37 +465,36 @@ def validate_block(lp, items, context: ValidationContext) -> None:
                     item.column,
                 )
             child_class = owner_class or context.current_class
+            body_symbols = declared_symbols | lp._statement_exposed_symbols(
+                item,
+                non_premise_symbols=context.non_premise_symbols,
+            )
             validate_condition_body(
                 lp,
                 item.body,
                 issues=context.issues,
                 available_symbols=frozenset(
                     current_symbols
-                    | lp._statement_declared_symbols(
-                        item,
-                        current_class=context.current_class,
-                        non_premise_symbols=context.non_premise_symbols,
-                    )
+                    | body_symbols
                 ),
                 enforce_target_symbol_flow=False,
                 non_premise_symbols=context.non_premise_symbols,
                 semantic_index=context.semantic_index,
                 current_class=child_class,
             )
-            current_symbols.update(
-                lp._statement_declared_symbols(
-                    item,
-                    current_class=context.current_class,
-                    non_premise_symbols=context.non_premise_symbols,
-                )
-            )
+            current_symbols.update(declared_symbols)
             continue
 
         if isinstance(item, lp.ExpressionStatement):
-            import_prefix_open = False
+            declared_symbols = lp._statement_declared_symbols(
+                item,
+                current_class=context.current_class,
+                non_premise_symbols=context.non_premise_symbols,
+            )
             missing_symbols = (
                 lp._statement_required_symbols(item, non_premise_symbols=context.non_premise_symbols)
                 - current_symbols
+                - declared_symbols
             )
             if missing_symbols:
                 _issue(
@@ -505,33 +505,36 @@ def validate_block(lp, items, context: ValidationContext) -> None:
                     item.column,
                 )
             child_class = lp._scoped_block_owner_class(item.expression, item.body, context.semantic_index)
-            validate_block(
-                lp,
-                item.body,
-                ValidationContext(
+            body_symbols = declared_symbols | lp._statement_exposed_symbols(
+                item,
+                non_premise_symbols=context.non_premise_symbols,
+            )
+            if child_class is None:
+                validate_condition_body(
+                    lp,
+                    item.body,
                     issues=context.issues,
-                    allow_condition_clauses=False,
-                    allow_imports=False,
-                    available_symbols=frozenset(
-                        current_symbols
-                        | lp._statement_declared_symbols(
-                            item,
-                            current_class=context.current_class,
-                            non_premise_symbols=context.non_premise_symbols,
-                        )
-                    ),
+                    available_symbols=frozenset(current_symbols | body_symbols),
+                    enforce_target_symbol_flow=False,
                     non_premise_symbols=context.non_premise_symbols,
                     semantic_index=context.semantic_index,
-                    current_class=child_class,
-                ),
-            )
-            current_symbols.update(
-                lp._statement_declared_symbols(
-                    item,
                     current_class=context.current_class,
-                    non_premise_symbols=context.non_premise_symbols,
                 )
-            )
+            else:
+                validate_block(
+                    lp,
+                    item.body,
+                    ValidationContext(
+                        issues=context.issues,
+                        allow_condition_clauses=False,
+                        allow_imports=False,
+                        available_symbols=frozenset(current_symbols | body_symbols),
+                        non_premise_symbols=context.non_premise_symbols,
+                        semantic_index=context.semantic_index,
+                        current_class=child_class,
+                    ),
+                )
+            current_symbols.update(declared_symbols)
             continue
 
         if isinstance(item, lp.Comment):
@@ -539,7 +542,6 @@ def validate_block(lp, items, context: ValidationContext) -> None:
                 _issue(lp, context, "comment cannot have an indented body", item.line, item.column)
             continue
 
-        import_prefix_open = False
         if isinstance(item, lp.Statement):
             current_symbols.update(
                 lp._statement_declared_symbols(
@@ -871,7 +873,11 @@ def validate_call_expression(lp, expr, issues: list, *, semantic_index) -> None:
     if arg_counts is None:
         matching_signatures = list(signatures)
     else:
-        matching_signatures = [signature for signature in signatures if signature.call_arity() in arg_counts]
+        matching_signatures = [
+            signature
+            for signature in signatures
+            if signature.call_arity() in arg_counts or signature.arity in arg_counts
+        ]
 
     if not matching_signatures:
         if isinstance(expr.callee, lp.AttributeExpr) and any(signature.call_arity() == 0 for signature in signatures):

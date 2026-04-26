@@ -46,6 +46,7 @@ _SINGLE_CHAR_SYMBOLS: Final[set[str]] = {
     "-",
     "*",
     "/",
+    "%",
     "^",
     "~",
     "<",

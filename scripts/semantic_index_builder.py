@@ -21,8 +21,6 @@ def validate_import_path(module_path: str) -> str | None:
         return "import path must not be empty"
     if normalized.startswith("{") or normalized.endswith("}"):
         return "import path must not use braces; use '$import module_path'"
-    if normalized.endswith(".lp"):
-        return "import path must not include the .lp suffix"
     if normalized.startswith(".") and not (
         normalized.startswith("./") or normalized.startswith("../")
     ):
@@ -43,7 +41,8 @@ def resolve_import_path(lp, base_dir: Path, module_path: str) -> Path:
 
     raw_path = Path(normalize_import_path_text(module_path))
     candidate = raw_path if raw_path.is_absolute() else (base_dir / raw_path)
-    candidate = candidate.with_suffix(".lp")
+    if candidate.suffix != ".lp":
+        candidate = candidate.with_suffix(".lp")
     if not candidate.exists() or not candidate.is_file():
         raise FileNotFoundError(
             f"unable to resolve import {module_path!r} from {base_dir}"

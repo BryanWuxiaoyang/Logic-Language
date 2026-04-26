@@ -12,12 +12,14 @@ Local VSCode extension for `.lp` logic programs.
 ## Requirements
 
 - Python 3.11+
-- A workspace containing `skills/logic-language/scripts`
+- The extension ships its own backend scripts
 
 ## Settings
 
 - `lp.pythonPath`
 - `lp.backendScriptsRoot`
+
+`lp.backendScriptsRoot` defaults to the bundled `python_backend/scripts` folder inside the extension package.
 
 ## Commands
 

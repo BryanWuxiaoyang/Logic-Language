@@ -60,9 +60,25 @@ def declared_symbols_for_expression(
     current_class: str | None,
     non_premise_symbols: frozenset[str],
 ) -> set[str]:
+    if isinstance(expr, lp.BinaryExpr) and expr.operator == "::":
+        owner_name, member_name = lp._extract_member_owner_and_name(
+            expr,
+            current_class=current_class,
+        )
+        declared_symbols: set[str] = set()
+        if owner_name is not None and owner_name not in lp._STATIC_NON_PREMISE_SYMBOLS:
+            declared_symbols.add(owner_name)
+        if member_name is not None and member_name not in lp._STATIC_NON_PREMISE_SYMBOLS:
+            declared_symbols.add(member_name)
+        return declared_symbols
+
     declared = canonical_declared_name(lp, expr, current_class=current_class)
     if declared is not None and declared not in lp._STATIC_NON_PREMISE_SYMBOLS:
         return {declared}
+    if isinstance(expr, lp.BinaryExpr) and expr.operator == "~":
+        relation_name = lp._extract_relation_name(expr.right)
+        if relation_name is not None and relation_name not in lp._STATIC_NON_PREMISE_SYMBOLS:
+            return {relation_name}
     if isinstance(expr, lp.BinaryExpr) and expr.operator in lp._IMPLICIT_DECLARE_OPERATORS:
         return collect_assignment_target_declared_symbols(
             lp,
@@ -82,6 +98,9 @@ def statement_declared_symbols(
 ) -> set[str]:
     if isinstance(statement, lp.Declaration):
         declared: set[str] = set()
+        owner_name = lp._declaration_owner_class(statement, current_class=current_class)
+        if owner_name is not None and owner_name not in lp._STATIC_NON_PREMISE_SYMBOLS:
+            declared.add(owner_name)
         head_name = canonical_declared_name(lp, statement.head, current_class=current_class)
         if head_name is not None and head_name not in lp._STATIC_NON_PREMISE_SYMBOLS:
             declared.add(head_name)
