@@ -30,6 +30,8 @@ LATEX_SYMBOL_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("∉", ("notin", "nin")),
     ("⊆", ("subseteq", "subset_eq", "subseteqq", "included_in")),
     ("⊂", ("subset", "subsetneq")),
+    ("⊈", ("nsubseteq", "notincludedin", "not_included_in")),
+    ("⊄", ("nsubset", "notsubset")),
     ("⊇", ("supseteq", "supset_eq", "supseteqq")),
     ("⊃", ("supset", "supsetneq")),
     ("∪", ("cup", "bigcup", "union")),

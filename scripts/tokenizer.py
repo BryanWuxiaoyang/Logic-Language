@@ -56,6 +56,10 @@ _SINGLE_CHAR_SYMBOLS: Final[set[str]] = {
     "∃",
     "∈",
     "∉",
+    "⊆",
+    "⊂",
+    "⊈",
+    "⊄",
     "∪",
     "∩",
     "≤",
@@ -102,19 +106,19 @@ def tokenize_text(logic_program: str, *, source_name: str = "<string>") -> Token
             directive_text = content[1:].strip()
             if directive_text == "import" or directive_text.startswith("import "):
                 import_text = directive_text[len("import") :].lstrip()
-                if import_text.startswith("{") or import_text.endswith("}"):
-                    _raise_tokenizer_error(
-                        source_name,
-                        line_number,
-                        indent + 1,
-                        "import path must not use braces; use '$import path'",
-                    )
                 if not import_text:
                     _raise_tokenizer_error(
                         source_name,
                         line_number,
                         indent + 1,
                         "import path must not be empty",
+                    )
+                if import_text.startswith("{") and import_text.endswith("}"):
+                    _raise_tokenizer_error(
+                        source_name,
+                        line_number,
+                        indent + 1,
+                        "import path must not use braces; use '$import module_path'",
                     )
                 tokens.append(Token("IMPORT", import_text, line_number, indent + 1))
             else:

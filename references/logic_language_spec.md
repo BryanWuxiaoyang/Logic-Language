@@ -66,14 +66,62 @@ Examples:
 An `.lp` file is a module.
 
 A module contains:
-- root-scope symbols;
-- root-scope conditions;
-- root-scope imports;
+- root-scope named symbols; (refer to as `module.named_syms`)
+- root-scope anonymous conditions; (`module.conds`)
+- root-scope symbols (i.e. named symbols + conditions); (`module.syms`)
+  - note that `cond` is semantically also a `sym`
+  - use `scripts/expand_module.py` to inspect `module.import_modules`,
+    `module.named_syms`, and `module.conds`
+- root-scope imports(`module.import_modules`);
 - non-semantic organization constructs such as comments and headings.
 
 `$import` composes modules at the semantic level. It is not raw textual macro
 expansion.
 
+Only `declare-sym` enters `module.named_syms` and the module-visible declaration
+set.
+
+`declare-sym` and `use-sym` are distinct:
+- `sym` alone as a statement is a `declare-sym`.
+- `sym::f`, `sym::field`, `sym: in => out`, and `sym::f: (sym, in) => out`
+  are declaration-surface forms.
+- `sym.f(in)`, `f(in)`, `sym.field`, `∀{...}`, and `∃{...}` are anonymous
+  condition-side uses; they do not enter `module.named_syms`.
+- `.` is only surface syntax for call / attribute-style use.
+- `::` is declaration surface syntax. Its semantic name is the member name:
+  `sym::f` and `f` denote the same function symbol `f`.
+- `sym::f: (sym, in) => out` is syntax sugar for `f: (sym, in) => out`.
+
+Single-line `sym::...` requires `sym` to have been declared previously.
+
+Multi-line sugar is legal because it declares both symbols explicitly:
+
+```text
+sym
+    ::f: (sym, in) => out
+```
+
+Binary operators may implicitly declare their destination named symbol only when
+the destination operand is itself a declaration-surface form and the operator is
+one of:
+- `=`, `∈`, `∉`, `⊆`, `⊂`, `⊈`, `⊄`
+- or the corresponding LaTeX aliases accepted by the formatter/parser
+
+A module's full semantic contain all syms from both itself and imported modules.
+Intuitively:
+  - `module.full_syms` = `module.syms` ∪ `∪{| module' ∈ module.import_modules | module'.full_syms}` 
+  - `module.full_named_syms` = `module.full_syms.named_syms`
+  - `module.full_conds` = `module.full_syms.conds`
+  - use `scripts/expand_full_module.py` to inspect `module.full_named_syms`
+    and `module.full_conds`
+
+If two imported parent-modules contain symbols with the same written name,
+those names denote the same semantic symbol. Module import does not create a
+module-qualified symbol namespace.
+
+`scripts/expand_module.py` and `scripts/expand_full_module.py` print canonical
+semantic names. If multiple declaration-surface forms denote the same symbol,
+the expanded output keeps only one semantic name.
 
 # 2. Core Objects and Intrinsics
 
@@ -106,97 +154,52 @@ The language has the following intrinsic symbols:
 - `value`
 - `∀`, `∃`
 
-Additional intrinsic classes and functions are defined in the standard library
-described later in this document.
+The concrete behavior of these symbols is split between this specification and
+the standard library at `@/references/standard_library.lp`. In this document,
+we keep the semantic role and surface syntax; the library carries the reusable
+primitive definitions.
 
 
 ## 2.4 Tuple
 
-- `tuple` is a `sym`. It represents a function `tuple: id_sym => sym`.
-- A literal tuple-like `sym` is written as `(a, b, ...)`.
-- `f((a, b))` can be written as `f(a, b)`.
-- When a function is written as a binary operator such as `=` or `+`, and is
-  used on a 2-element tuple, it can be written as:
-  - `op(sym1, sym2) = sym1 op sym2`
-- When a function is written as a unary operator such as `*`, and is used on
-  one symbol, it can be written as:
-  - `op(sym) = opsym`
-- For a literal tuple-like `sym` `(sym1, ..., symn)`:
-  - `(sym1, ..., symn)(i) = symi` for `i = 1, ..., n`
+`tuple` is the ordered-aggregate intrinsic used to model fixed-arity grouped
+symbols. Literal tuple syntax, projection notation, and tuple-based operator
+desugaring are part of the core surface language; the standard library defines
+the reusable concrete tuple behavior.
 
 
 ## 2.5 Equality
 
-- `=(sym1, sym2)` represents whether `sym1` and `sym2` have the same behavior
-  in all situations. This is intentionally left ambiguous so the language can
-  model different domains.
-- `true` and `false` are intrinsic symbols.
-- `∀{| sym | sym ≠ null | =(sym, sym) = true }`
-- `!true = false`
-- `!false = true`
-- `≠ = !=`
+`=` is the semantic equality symbol. The standard library gives its concrete
+behavior, including the interaction with `null` and the boolean constants
+`true` and `false`.
 
 
 ## 2.6 Set
 
-- `set` is a `sym` / `function`.
-- A literal set-like `sym` is written as `{a, b, ...}`.
-- For any `sym` shown in `{sym1, ..., symn}`:
-  - `{sym1, ..., symn}(sym) = true`
-  - otherwise `{sym1, ..., symn}(sym) = false`
-- `f({sym1, ..., symn})` can be written as `f{sym1, ..., symn}`.
-- `∈` means membership:
-  - `sym1 ∈ sym2 = sym2(sym1)`
-- `∀{| set1 | set ~ set1 | ∀{| sym | set1(sym) ∈ {true, false} } }`
-- `∉` is defined by:
-  - `sym1 ∉ sym2 = !(sym1 ∈ sym2)`
-- `∩` is defined by:
-  - `∩(sym1, sym2)(sym) = sym1(sym) && sym2(sym)`
-- `full_set`, `{*} = full_set`
-- `empty_set`, `{}` = `empty_set`
+`set` is the intrinsic predicate-like symbol used to represent collections.
+Membership, subset relations, intersection, and the `full_set` / `empty_set`
+conventions are standardized in the standard library.
 
 
 ## 2.7 Condition
 
-- `cond` is a `sym` / `function`.
-- `cond = set`
-- The language allows partial or non-classical logical descriptions.
-- However, when a condition evaluation depends on itself through a
-  non-well-founded cycle and cannot be grounded by finite expansion, the
-  program is invalid.
-
-So `condition` should be understood as:
-- a predicate-like symbol;
-- a condition-set;
-- a structured constraint object.
+`cond` is the condition-valued symbol kind. Conditions may be partial or
+non-classical, but self-referential cycles that cannot be grounded by finite
+expansion are invalid.
 
 
 ## 2.8 Value
 
-- `value` / `val` / `v` is a `sym`.
-- For literal values `0`, `1`, ...:
-  - `val ~ 0`
-  - `val ~ 1`
-  - and so on.
+`value` / `val` / `v` is the intrinsic value kind. The standard library defines
+the concrete named value hierarchy used by the language.
 
 
 ## 2.9 Inheritance `~`
 
-- `~` represents inheritance.
-- Written form:
-  - `~(sym1, sym2) = sym1 ~ sym2`
-- `sym ~ sym`
-- For all literal tuple-like symbols `(sym1, ..., symn)`:
-  - `tuple ~ (sym1, ..., symn)`
-- For all literal set-like symbols `{sym1, ..., symn}`:
-  - `set ~ {sym1, ..., symn}`
-- `set ~ full_set`
-- `set ~ empty_set`
-- `bool ~ true`
-- `bool ~ false`
-
-Inheritance is the mechanism that propagates conditions from a more general
-symbol to a more specific symbol.
+`~` is the inheritance relation. It is the mechanism that propagates conditions
+from a more general symbol to a more specific symbol, including class
+inheritance and value-class relationships.
 
 
 # 3. Set Comprehension, Mapped Sets, and Quantified Conditions
@@ -313,38 +316,9 @@ Multi-line layout is also read from top to bottom:
 
 ## 3.3 `∀` and `∃`
 
-- `cond ~ ∀`
-- `cond ~ ∃`
-
-### `∃`
-
-- `∃: set => bool_sym`
-- `∃(set) = (set ≠ {})`
-- `set ~ ∃`
-- `∃` represents the set of all non-empty sets
-
-Example:
-
-```text
-if val ~ x,
-∃{| x > 0 | x < 3 | } = ∃{1, 2} = true
-```
-
-### `∀`
-
-- `∀: set => bool_sym`
-- `∀(set) = (false ∉ set)`
-- `set ~ ∀`
-- `∀` represents the set of all sets that do not contain `false`
-
-Examples:
-
-```text
-if val ~ x,
-∀{| x > 1 | x > 0 } = ∀{true} = true
-∀{| x > 0 | x < 3 } = ∀{true, false} = false
-∀{} = true
-```
+`∀` and `∃` are condition-valued intrinsic symbols whose concrete meaning is
+defined in the standard library. This section focuses on the canonical
+quantified-condition forms and their desugaring.
 
 Canonical written form:
 
@@ -1053,25 +1027,22 @@ Other `.lp` modules may be imported with:
 
 - `$import module_path`
 
-Both forms import the target module into the current module.
-
 Only `$import` is a valid module directive.
-`$include` is not part of the language.
 
 Normative interpretation:
 - the imported module contributes its root-scope symbols and root-scope
   conditions to the current module;
 - imports are recursive, so the imported module's own imports are also brought
   into scope;
-- this should be understood semantically like Python
-  `from module import *`, not like C/C++ textual `#include`;
-- repeated imports of the same resolved module merge by module identity rather
-  than duplicating by raw macro expansion.
-
-Access rules:
-- imported items may be used directly when unambiguous;
-- they may also be referred to as `{module_name}::{item_name}`.
-
+- imports may appear only in the leading import block of a module;
+- only blank lines and comments may appear before that import block;
+- `heading` may not appear before imports;
+- `module_path` must be a terminal-style absolute path or relative path;
+- `foo/bar`, `./foo/bar`, `../foo/bar`, and `/abs/path` are legal;
+- `.FlowGraph` and any path with `.lp` postfix are illegal;
+- import cycles are semantic errors;
+- imported symbols are not namespace-qualified; direct same-name references
+  denote the same semantic symbol across the full imported module closure.
 
 ## 6.4 Chained Comparison
 
@@ -1292,7 +1263,8 @@ These are semantic naming conventions, not merely style suggestions.
 
 ## 9.2 Standard Library Intrinsics
 
-There are many intrinsic classes and functions defined in:
+The standard library contains the concrete definitions for the reusable
+intrinsic classes and functions used throughout `.lp`:
 
 ```text
 @/references/standard_library.lp
@@ -1303,14 +1275,12 @@ All `.lp` files implicitly import this standard library.
 
 ## 9.3 Intrinsic `condition(...)` Function
 
-There is an intrinsic function:
+`condition(...)` is the intrinsic way to attach a semantic condition in prose
+when the full logic form is inconvenient or outside the current domain.
 
 ```text
 condition({args}, "desc")
 ```
-
-It describes a semantic condition in natural language `"desc"` involving the
-symbols in `{args}`.
 
 Shorthand:
 
@@ -1318,53 +1288,9 @@ Shorthand:
 
 This implicitly uses all available symbols in the current scope as `{args}`.
 
-Purpose:
-- use `condition(...)` when a condition is trivial, complicated, outside the
-  current domain knowledge, or inconvenient to write in plain logic syntax;
-- unlike comments, `condition(...)` has semantic meaning.
-
-Example:
-
-```text
-add: (v1, v2) => v
-    # v is the sum of v1 and v2
-```
-
-declares `add` but does not constrain it semantically.
-
-Whereas:
-
-```text
-add: (v1, v2) => v
-    condition("v is the sum of v1 and v2")
-```
-
-is semantically equivalent to:
-
-```text
-add: (v1, v2) => v
-    v = v1 + v2
-```
-
 
 ## 9.4 Intrinsic `null`
 
-`null` is an intrinsic value.
-
-When a function's output symbol does not satisfy any conditions, or the output
-symbol is explicitly set to `null`, the output is `null`.
-
-Example:
-
-```text
-f: v => v1
-    |- v > 0
-        v1 = v
-    |- v = 0
-        v1 = null
-```
-
-Then:
-
-- `f(-1) = null`
-- `f(0) = null`
+`null` is the intrinsic no-result value. If a function's output symbol does not
+satisfy any conditions, or the output is explicitly set to `null`, the result
+is `null`.

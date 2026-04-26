@@ -4,8 +4,6 @@ import argparse
 import copy
 import re
 import sys
-from collections import defaultdict
-from dataclasses import dataclass
 from pathlib import Path
 
 try:
@@ -25,22 +23,26 @@ try:
         Import,
         ParserError,
         Premise,
-        Program,
         QuantifiedExpr,
         SequenceExpr,
         Statement,
         SymbolExpr,
         TokenizerError,
         _build_semantic_index,
+        _canonical_declared_name,
         _declaration_owner_class,
         _extract_member_owner_and_name,
         _is_else_identifier,
         _resolve_branch_premise_expr,
         _scoped_block_owner_class,
         _split_expanded_target_exprs,
+        _statement_declared_symbols,
+        _STATIC_NON_PREMISE_SYMBOLS,
+        load_module_closure,
         parse_condition_text,
-        parse_program_text,
         program_to_source,
+        render_import_path,
+        resolve_import_path,
     )
 except ImportError:  # pragma: no cover - module execution fallback
     from .semantic_parser import (
@@ -59,32 +61,30 @@ except ImportError:  # pragma: no cover - module execution fallback
         Import,
         ParserError,
         Premise,
-        Program,
         QuantifiedExpr,
         SequenceExpr,
         Statement,
         SymbolExpr,
         TokenizerError,
         _build_semantic_index,
+        _canonical_declared_name,
         _declaration_owner_class,
         _extract_member_owner_and_name,
         _is_else_identifier,
         _resolve_branch_premise_expr,
         _scoped_block_owner_class,
         _split_expanded_target_exprs,
+        _statement_declared_symbols,
+        _STATIC_NON_PREMISE_SYMBOLS,
+        load_module_closure,
         parse_condition_text,
-        parse_program_text,
         program_to_source,
+        render_import_path,
+        resolve_import_path,
     )
 
 
 GLOBAL_CONSTRAINT_GROUP = "__global_constraints__"
-
-
-@dataclass(frozen=True, slots=True)
-class ModuleUnit:
-    path: Path
-    program: Program
 
 
 def _signature_items(expr: Expr | None) -> list[Expr]:
@@ -442,305 +442,184 @@ def _expand_declaration_conditions(
     return conditions
 
 
-def _append_constraints(
-    constraints_by_group: dict[str, list[str]],
-    group: str,
-    conditions: list[Condition],
-) -> None:
-    if not conditions:
-        return
-    lines = constraints_by_group.setdefault(group, [])
+def _append_conditions(target: list[str], conditions: list[Condition]) -> None:
     for condition in conditions:
-        lines.append(program_to_source(condition))
+        target.append(program_to_source(condition))
 
 
-def _collect_module_symbols_and_constraints(
-    module: ModuleUnit,
+def _statement_is_declaration_only(
+    item: ExpressionStatement,
     *,
-    symbols: set[str],
-    constraints_by_group: dict[str, list[str]],
-) -> None:
+    current_class: str | None,
+    non_premise_symbols: frozenset[str],
+) -> bool:
+    return bool(
+        _statement_declared_symbols(
+            item,
+            current_class=current_class,
+            non_premise_symbols=non_premise_symbols,
+        )
+    ) and not item.body
+
+
+def _analyze_module(module: LoadedModule) -> tuple[list[str], list[str], list[str]]:
     semantic_index = _build_semantic_index(module.program)
+    non_premise_symbols = (
+        _STATIC_NON_PREMISE_SYMBOLS | frozenset(semantic_index.class_names)
+    )
+    direct_imports: list[str] = []
+    seen_imports: set[str] = set()
+    named_syms: list[str] = []
+    seen_named_syms: set[str] = set()
+    conds: list[str] = []
+
+    for item in module.program.items:
+        if isinstance(item, Import):
+            imported_file = resolve_import_path(module.path.parent, item.module_path)
+            raw_path = Path(item.module_path.strip().replace("\\", "/"))
+            if raw_path.is_absolute():
+                rendered = imported_file.with_suffix("").as_posix()
+            else:
+                rendered = render_import_path(module.path, imported_file)
+            if rendered not in seen_imports:
+                seen_imports.add(rendered)
+                direct_imports.append(rendered)
+
+    def append_named_symbols(statement: Statement, *, current_class: str | None) -> None:
+        for symbol_name in sorted(
+            _statement_declared_symbols(
+                statement,
+                current_class=current_class,
+                non_premise_symbols=non_premise_symbols,
+            )
+        ):
+            if symbol_name in seen_named_syms:
+                continue
+            seen_named_syms.add(symbol_name)
+            named_syms.append(symbol_name)
+
+    def append_statement_conditions(
+        statement: Statement,
+        *,
+        current_class: str | None,
+    ) -> None:
+        initial_state: list[Statement] = []
+        if current_class is not None:
+            initial_state.append(
+                Premise(
+                    expression=IdentifierExpr(
+                        name=current_class,
+                        line=statement.line,
+                        column=statement.column,
+                    ),
+                    body=[],
+                    line=statement.line,
+                    column=statement.column,
+                )
+            )
+
+        if isinstance(statement, Condition):
+            conditions, _ = _expand_condition_items(
+                statement.body,
+                states=[initial_state],
+                quantifier=statement.quantifier,
+            )
+            _append_conditions(conds, conditions)
+            return
+
+        if isinstance(statement, ExpressionStatement) and isinstance(
+            statement.expression, QuantifiedExpr
+        ):
+            quantified_condition = _condition_from_quantified_expression(statement.expression)
+            conditions, _ = _expand_condition_items(
+                quantified_condition.body,
+                states=[initial_state],
+                quantifier=quantified_condition.quantifier,
+            )
+            _append_conditions(conds, conditions)
+            return
+
+        conditions, _ = _expand_condition_items(
+            [copy.deepcopy(statement)],
+            states=[initial_state],
+            quantifier="∀",
+        )
+        _append_conditions(conds, conditions)
 
     def walk_block(items: list[Statement], *, current_class: str | None) -> None:
         for item in items:
+            if isinstance(item, (Comment, Import)):
+                continue
             if isinstance(item, Heading):
                 walk_block(item.body, current_class=current_class)
                 continue
-
-            if isinstance(item, (Import, Comment)):
-                continue
-
             if isinstance(item, Declaration):
-                symbol_name = _declaration_symbol_name(item, current_class=current_class)
-                if symbol_name:
-                    symbols.add(_normalize_symbol_name(symbol_name))
-
-                alias_name = _expr_symbol_name(item.alias)
-                if alias_name:
-                    symbols.add(_normalize_symbol_name(alias_name))
-
-                group = _normalize_symbol_name(symbol_name) if symbol_name else GLOBAL_CONSTRAINT_GROUP
-                declaration_conditions = _expand_declaration_conditions(
-                    item,
-                    current_class=current_class,
-                    initial_state=[],
-                )
-                _append_constraints(
-                    constraints_by_group,
-                    group,
-                    declaration_conditions,
-                )
+                append_named_symbols(item, current_class=current_class)
+                append_statement_conditions(item, current_class=current_class)
+                child_class = _declaration_owner_class(item, current_class=current_class) or current_class
+                if item.body:
+                    walk_block(item.body, current_class=child_class)
                 continue
-
             if isinstance(item, Condition):
-                initial_state: list[Statement] = []
-                if current_class is not None:
-                    initial_state.append(
-                        Premise(
-                            expression=IdentifierExpr(
-                                name=current_class,
-                                line=item.line,
-                                column=item.column,
-                            ),
-                            body=[],
-                            line=item.line,
-                            column=item.column,
-                        )
-                    )
-                conditions, _ = _expand_condition_items(
-                    item.body,
-                    states=[initial_state],
-                    quantifier=item.quantifier,
-                )
-                group = current_class or GLOBAL_CONSTRAINT_GROUP
-                _append_constraints(constraints_by_group, group, conditions)
+                append_statement_conditions(item, current_class=current_class)
                 continue
-
             if isinstance(item, ExpressionStatement):
-                declared_symbol = _declared_symbol_from_expression(
-                    item.expression,
-                    current_class=current_class,
-                )
-                if declared_symbol is not None:
-                    symbols.add(_normalize_symbol_name(declared_symbol))
-
-                scoped_owner = _scoped_block_owner_class(
+                append_named_symbols(item, current_class=current_class)
+                child_class = _scoped_block_owner_class(
                     item.expression,
                     item.body,
                     semantic_index,
-                )
-                if scoped_owner is not None:
-                    if declared_symbol is None:
-                        initial_state: list[Statement] = []
-                        if current_class is not None:
-                            initial_state.append(
-                                Premise(
-                                    expression=IdentifierExpr(
-                                        name=current_class,
-                                        line=item.line,
-                                        column=item.column,
-                                    ),
-                                    body=[],
-                                    line=item.line,
-                                    column=item.column,
-                                )
-                            )
-                        conditions, _ = _expand_condition_items(
-                            [copy.deepcopy(item)],
-                            states=[initial_state],
-                            quantifier="∀",
-                        )
-                        group = current_class or GLOBAL_CONSTRAINT_GROUP
-                        _append_constraints(constraints_by_group, group, conditions)
-                    walk_block(item.body, current_class=scoped_owner)
-                    continue
-
-                if declared_symbol is not None and not item.body:
-                    continue
-
-                if isinstance(item.expression, QuantifiedExpr):
-                    quantified_condition = _condition_from_quantified_expression(item.expression)
-                    initial_state = []
-                    if current_class is not None:
-                        initial_state.append(
-                            Premise(
-                                expression=IdentifierExpr(
-                                    name=current_class,
-                                    line=item.line,
-                                    column=item.column,
-                                ),
-                                body=[],
-                                line=item.line,
-                                column=item.column,
-                            )
-                        )
-                    conditions, _ = _expand_condition_items(
-                        quantified_condition.body,
-                        states=[initial_state],
-                        quantifier=quantified_condition.quantifier,
-                    )
-                    group = current_class or GLOBAL_CONSTRAINT_GROUP
-                    _append_constraints(constraints_by_group, group, conditions)
-                    continue
-
-                initial_state = []
-                if current_class is not None:
-                    initial_state.append(
-                        Premise(
-                            expression=IdentifierExpr(
-                                name=current_class,
-                                line=item.line,
-                                column=item.column,
-                            ),
-                            body=[],
-                            line=item.line,
-                            column=item.column,
-                        )
-                    )
-                conditions, _ = _expand_condition_items(
-                    [copy.deepcopy(item)],
-                    states=[initial_state],
-                    quantifier="∀",
-                )
-                group = current_class or GLOBAL_CONSTRAINT_GROUP
-                _append_constraints(constraints_by_group, group, conditions)
-                continue
+                ) or current_class
+                if not _statement_is_declaration_only(
+                    item,
+                    current_class=current_class,
+                    non_premise_symbols=non_premise_symbols,
+                ):
+                    append_statement_conditions(item, current_class=current_class)
+                if item.body:
+                    walk_block(item.body, current_class=child_class)
 
     walk_block(module.program.items, current_class=None)
+    return direct_imports, named_syms, conds
 
 
-def _module_import_paths(items: list[Statement]) -> list[str]:
-    imports: list[str] = []
-    for item in items:
-        if isinstance(item, Import):
-            imports.append(item.module_path)
-        for child in item.body:
-            imports.extend(_module_import_paths([child]))
-    return imports
+def _render_lines(section_name: str, values: list[str]) -> list[str]:
+    lines = [section_name]
+    for value in values:
+        lines.extend(("    " + line) if line else "" for line in value.splitlines())
+    return lines
 
 
-def _import_path_candidates(base_dir: Path, module_path: str) -> list[Path]:
-    raw = module_path.strip()
-    if not raw:
-        return []
-
-    raw_norm = raw.replace("\\", "/")
-    bases: list[Path] = []
-    seen_bases: set[str] = set()
-
-    def add_base(path_text: str) -> None:
-        key = path_text.strip()
-        if not key or key in seen_bases:
-            return
-        seen_bases.add(key)
-        bases.append(Path(key))
-
-    if raw_norm.startswith("./") or raw_norm.startswith("../") or "/" in raw_norm:
-        add_base(raw_norm)
-    elif raw_norm.startswith("."):
-        trimmed = raw_norm.lstrip(".")
-        if trimmed:
-            add_base(trimmed)
-            if "." in trimmed:
-                add_base(trimmed.replace(".", "/"))
-    else:
-        add_base(raw_norm)
-        if "." in raw_norm and not raw_norm.endswith(".lp"):
-            add_base(raw_norm.replace(".", "/"))
-
-    candidates: list[Path] = []
-    seen_candidates: set[str] = set()
-    for base in bases:
-        full_base = base if base.is_absolute() else (base_dir / base)
-        variants = [full_base]
-        if full_base.suffix != ".lp":
-            variants.insert(0, full_base.with_suffix(".lp"))
-        for variant in variants:
-            normalized = str(variant)
-            if normalized in seen_candidates:
-                continue
-            seen_candidates.add(normalized)
-            candidates.append(variant)
-    return candidates
-
-
-def _resolve_import_path(base_dir: Path, module_path: str) -> Path:
-    candidates = _import_path_candidates(base_dir, module_path)
-    for candidate in candidates:
-        if candidate.exists() and candidate.is_file():
-            return candidate.resolve()
-
-    candidate_text = ", ".join(str(path) for path in candidates) or "(no candidate paths)"
-    raise FileNotFoundError(
-        f"unable to resolve import {module_path!r} from {base_dir}; tried: {candidate_text}"
-    )
-
-
-def _load_modules_recursive(entry_file: Path) -> list[ModuleUnit]:
-    ordered_modules: list[ModuleUnit] = []
-    visited: set[Path] = set()
-    visiting: set[Path] = set()
-
-    def visit(module_file: Path) -> None:
-        resolved_file = module_file.resolve()
-        if resolved_file in visited:
-            return
-        if resolved_file in visiting:
-            return
-
-        source = resolved_file.read_text(encoding="utf-8")
-        program = parse_program_text(source, source_name=str(resolved_file))
-
-        visiting.add(resolved_file)
-        for import_path in _module_import_paths(program.items):
-            import_file = _resolve_import_path(resolved_file.parent, import_path)
-            visit(import_file)
-        visiting.remove(resolved_file)
-
-        visited.add(resolved_file)
-        ordered_modules.append(ModuleUnit(path=resolved_file, program=program))
-
-    visit(entry_file)
-    return ordered_modules
-
-
-def _indent_block(text: str, *, prefix: str) -> list[str]:
-    if not text:
-        return [prefix.rstrip()]
-    return [prefix + line if line else prefix.rstrip() for line in text.splitlines()]
-
-
-def _render_output(
-    *,
-    symbols: set[str],
-    constraints_by_group: dict[str, list[str]],
-) -> str:
+def render_direct_module(module: LoadedModule) -> str:
+    direct_imports, named_syms, conds = _analyze_module(module)
     lines: list[str] = []
-    lines.append("@symbols")
-    for symbol in sorted(_normalize_symbol_name(item) for item in symbols):
-        lines.append(f"    {symbol}")
-
+    for import_path in direct_imports:
+        lines.append(f"$import {import_path}")
+    if direct_imports:
+        lines.append("")
+    lines.extend(_render_lines("@named_syms", named_syms))
     lines.append("")
-    lines.append("@constraints")
+    lines.extend(_render_lines("@conds", conds))
+    return "\n".join(lines).rstrip() + "\n"
 
-    group_names = sorted(
-        name for name in constraints_by_group.keys() if name != GLOBAL_CONSTRAINT_GROUP
-    )
-    if GLOBAL_CONSTRAINT_GROUP in constraints_by_group:
-        group_names.append(GLOBAL_CONSTRAINT_GROUP)
 
-    for index, group in enumerate(group_names):
-        title = "global_constraints" if group == GLOBAL_CONSTRAINT_GROUP else group
-        lines.append(f"    @{title}")
-        for condition_text in constraints_by_group[group]:
-            lines.extend(_indent_block(condition_text, prefix="        "))
-            lines.append("")
-        if lines[-1] == "":
-            lines.pop()
-        if index != len(group_names) - 1:
-            lines.append("")
+def render_full_module(modules: list[LoadedModule]) -> str:
+    full_named_syms: list[str] = []
+    seen_named_syms: set[str] = set()
+    full_conds: list[str] = []
+    for module in modules:
+        _, named_syms, conds = _analyze_module(module)
+        for symbol_name in named_syms:
+            if symbol_name in seen_named_syms:
+                continue
+            seen_named_syms.add(symbol_name)
+            full_named_syms.append(symbol_name)
+        full_conds.extend(conds)
 
+    lines: list[str] = []
+    lines.extend(_render_lines("@full_named_syms", full_named_syms))
+    lines.append("")
+    lines.extend(_render_lines("@full_conds", full_conds))
     return "\n".join(lines).rstrip() + "\n"
 
 
@@ -750,27 +629,29 @@ def expand_module_file(
     output_file: str | Path | None = None,
 ) -> Path:
     input_path = Path(input_file).resolve()
-    if output_file is None:
-        output_path = input_path.with_suffix(".expanded.lp")
-    else:
-        output_path = Path(output_file).resolve()
-
-    modules = _load_modules_recursive(input_path)
-
-    symbols: set[str] = set()
-    constraints_by_group: dict[str, list[str]] = defaultdict(list)
-    for module in modules:
-        _collect_module_symbols_and_constraints(
-            module,
-            symbols=symbols,
-            constraints_by_group=constraints_by_group,
-        )
-
-    output_text = _render_output(
-        symbols=symbols,
-        constraints_by_group=constraints_by_group,
+    output_path = (
+        input_path.with_suffix(".expanded.lp")
+        if output_file is None
+        else Path(output_file).resolve()
     )
-    output_path.write_text(output_text, encoding="utf-8")
+    modules = load_module_closure(input_path)
+    output_path.write_text(render_direct_module(modules[-1]), encoding="utf-8")
+    return output_path
+
+
+def expand_full_module_file(
+    input_file: str | Path,
+    *,
+    output_file: str | Path | None = None,
+) -> Path:
+    input_path = Path(input_file).resolve()
+    output_path = (
+        input_path.with_suffix(".full.expanded.lp")
+        if output_file is None
+        else Path(output_file).resolve()
+    )
+    modules = load_module_closure(input_path)
+    output_path.write_text(render_full_module(modules), encoding="utf-8")
     return output_path
 
 

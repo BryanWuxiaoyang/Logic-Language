@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import pprint
 import sys
 from dataclasses import dataclass, field, replace
@@ -11,6 +12,17 @@ try:
     from tokenizer import Token, TokenStream, TokenizerError, tokenize_text, tokenizer
 except ImportError:  # pragma: no cover - module execution fallback
     from .tokenizer import Token, TokenStream, TokenizerError, tokenize_text, tokenizer
+
+try:
+    import semantic_format as _semantic_format
+    import semantic_index_builder as _semantic_index_builder
+    import semantic_symbols as _semantic_symbols
+    import semantic_validation as _semantic_validation
+except ImportError:  # pragma: no cover - module execution fallback
+    from . import semantic_format as _semantic_format
+    from . import semantic_index_builder as _semantic_index_builder
+    from . import semantic_symbols as _semantic_symbols
+    from . import semantic_validation as _semantic_validation
 
 
 @dataclass(frozen=True, slots=True)
@@ -148,6 +160,7 @@ class Node:
             self.children(),
             issues,
             allow_condition_clauses=False,
+            allow_imports=True,
             available_symbols=frozenset(),
             non_premise_symbols=non_premise_symbols,
             semantic_index=semantic_index,
@@ -325,6 +338,12 @@ class Import(Statement):
     trailing_comment: str | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class LoadedModule:
+    path: Path
+    program: Program
+
+
 @dataclass(slots=True)
 class Comment(Statement):
     text: str
@@ -392,17 +411,7 @@ ExpandedCondition = Condition
 def _decompose_condition(
     condition: Condition,
 ) -> list[Condition]:
-    bodies, _ = _decompose_condition_items(condition.body, states=[[]])
-    return [
-        Condition(
-            quantifier=condition.quantifier,
-            body=body,
-            line=condition.line,
-            column=condition.column,
-            trailing_comment=condition.trailing_comment,
-        )
-        for body in bodies
-    ]
+    return _semantic_validation.decompose_condition(sys.modules[__name__], condition)
 
 
 def _decompose_condition_items(
@@ -410,57 +419,11 @@ def _decompose_condition_items(
     *,
     states: list[list[Statement]],
 ) -> tuple[list[list[Statement]], list[list[Statement]]]:
-    emitted_conditions: list[list[Statement]] = []
-    active_states = [list(state) for state in states]
-    index = 0
-
-    while index < len(items):
-        item = items[index]
-
-        if isinstance(item, Comment):
-            active_states = [
-                state + [_clone_statement(item)] for state in active_states
-            ]
-            index += 1
-            continue
-
-        if isinstance(item, Branch):
-            branches: list[Branch] = []
-            while index < len(items) and isinstance(items[index], Branch):
-                branches.append(items[index])
-                index += 1
-
-            branch_conditions, active_states = _expand_branch_group(
-                branches,
-                states=active_states,
-            )
-            emitted_conditions.extend(branch_conditions)
-            continue
-
-        if isinstance(item, Premise):
-            premise_conditions, active_states = _advance_premise(
-                item,
-                states=active_states,
-            )
-            emitted_conditions.extend(premise_conditions)
-            index += 1
-            continue
-
-        if isinstance(item, ExpressionStatement):
-            target_conditions, active_states = _advance_target(
-                item,
-                states=active_states,
-            )
-            emitted_conditions.extend(target_conditions)
-            index += 1
-            continue
-
-        active_states = [
-            state + [_clone_statement(item)] for state in active_states
-        ]
-        index += 1
-
-    return emitted_conditions, active_states
+    return _semantic_validation.decompose_condition_items(
+        sys.modules[__name__],
+        items,
+        states=states,
+    )
 
 
 def _expand_branch_group(
@@ -468,31 +431,11 @@ def _expand_branch_group(
     *,
     states: list[list[Statement]],
 ) -> tuple[list[list[Statement]], list[list[Statement]]]:
-    emitted_conditions: list[list[Statement]] = []
-    next_states: list[list[Statement]] = []
-
-    for state in states:
-        prior_branch_exprs: list[Expr] = []
-        for branch in branches:
-            branch_expr = _resolve_branch_premise_expr(branch, prior_branch_exprs)
-            branch_state = state + [
-                _target_expr_to_premise(
-                    branch_expr,
-                    line=branch.line,
-                    column=branch.column,
-                    trailing_comment=branch.trailing_comment,
-                )
-            ]
-            branch_conditions, branch_states = _decompose_condition_items(
-                branch.body,
-                states=[branch_state],
-            )
-            emitted_conditions.extend(branch_conditions)
-            next_states.extend(branch_states)
-            if not _is_else_identifier(branch.expression):
-                prior_branch_exprs.append(branch.expression)
-
-    return emitted_conditions, next_states
+    return _semantic_validation.expand_branch_group(
+        sys.modules[__name__],
+        branches,
+        states=states,
+    )
 
 
 def _advance_premise(
@@ -500,19 +443,11 @@ def _advance_premise(
     *,
     states: list[list[Statement]],
 ) -> tuple[list[list[Statement]], list[list[Statement]]]:
-    emitted_conditions: list[list[Statement]] = []
-    next_states: list[list[Statement]] = []
-
-    for state in states:
-        premise_state = state + [_clone_premise(premise)]
-        premise_conditions, premise_states = _decompose_condition_items(
-            premise.body,
-            states=[premise_state],
-        )
-        emitted_conditions.extend(premise_conditions)
-        next_states.extend(premise_states)
-
-    return emitted_conditions, next_states
+    return _semantic_validation.advance_premise(
+        sys.modules[__name__],
+        premise,
+        states=states,
+    )
 
 
 def _advance_target(
@@ -520,82 +455,27 @@ def _advance_target(
     *,
     states: list[list[Statement]],
 ) -> tuple[list[list[Statement]], list[list[Statement]]]:
-    emitted_conditions: list[list[Statement]] = []
-    next_states: list[list[Statement]] = []
-
-    for state in states:
-        target_exprs = _split_expanded_target_exprs(target.expression)
-        for target_expr in target_exprs:
-            emitted_conditions.append(
-                state
-                + [
-                    _clone_target_expr(
-                        target_expr,
-                        line=target.line,
-                        column=target.column,
-                        trailing_comment=target.trailing_comment,
-                    )
-                ]
-            )
-
-        # Later siblings depend on all targets from the same line.
-        target_state = state + [
-            _target_expr_to_premise(
-                target_expr,
-                line=target.line,
-                column=target.column,
-                trailing_comment=target.trailing_comment,
-            )
-            for target_expr in target_exprs
-        ]
-        nested_conditions, nested_states = _decompose_condition_items(
-            target.body,
-            states=[target_state],
-        )
-        emitted_conditions.extend(nested_conditions)
-        next_states.extend(nested_states)
-
-    return emitted_conditions, next_states
+    return _semantic_validation.advance_target(
+        sys.modules[__name__],
+        target,
+        states=states,
+    )
 
 
 def _clone_premise(premise: Premise) -> Premise:
-    return Premise(
-        expression=premise.expression,
-        body=[],
-        line=premise.line,
-        column=premise.column,
-        trailing_comment=premise.trailing_comment,
-    )
+    return _semantic_validation.clone_premise(sys.modules[__name__], premise)
 
 
 def _clone_target(target: ExpressionStatement) -> ExpressionStatement:
-    return ExpressionStatement(
-        expression=target.expression,
-        body=[],
-        line=target.line,
-        column=target.column,
-        trailing_comment=target.trailing_comment,
-    )
+    return _semantic_validation.clone_target(sys.modules[__name__], target)
 
 
 def _branch_to_premise(branch: Branch) -> Premise:
-    return Premise(
-        expression=branch.expression,
-        body=[],
-        line=branch.line,
-        column=branch.column,
-        trailing_comment=branch.trailing_comment,
-    )
+    return _semantic_validation.branch_to_premise(sys.modules[__name__], branch)
 
 
 def _target_to_premise(target: ExpressionStatement) -> Premise:
-    return Premise(
-        expression=target.expression,
-        body=[],
-        line=target.line,
-        column=target.column,
-        trailing_comment=target.trailing_comment,
-    )
+    return _semantic_validation.target_to_premise(sys.modules[__name__], target)
 
 
 def _clone_target_expr(
@@ -605,9 +485,9 @@ def _clone_target_expr(
     column: int,
     trailing_comment: str | None,
 ) -> ExpressionStatement:
-    return ExpressionStatement(
-        expression=expr,
-        body=[],
+    return _semantic_validation.clone_target_expr(
+        sys.modules[__name__],
+        expr,
         line=line,
         column=column,
         trailing_comment=trailing_comment,
@@ -621,9 +501,9 @@ def _target_expr_to_premise(
     column: int,
     trailing_comment: str | None,
 ) -> Premise:
-    return Premise(
-        expression=expr,
-        body=[],
+    return _semantic_validation.target_expr_to_premise(
+        sys.modules[__name__],
+        expr,
         line=line,
         column=column,
         trailing_comment=trailing_comment,
@@ -631,77 +511,36 @@ def _target_expr_to_premise(
 
 
 def _split_expanded_target_exprs(expr: Expr) -> list[Expr]:
-    if not isinstance(expr, SequenceExpr):
-        return [expr]
-    return [item for item in expr.items if item is not None] or [expr]
+    return _semantic_validation.split_expanded_target_exprs(sys.modules[__name__], expr)
 
 
 def _resolve_branch_premise_expr(branch: Branch, prior_branch_exprs: list[Expr]) -> Expr:
-    if not _is_else_identifier(branch.expression):
-        return branch.expression
-    return _build_residual_else_guard(prior_branch_exprs, branch)
+    return _semantic_validation.resolve_branch_premise_expr(
+        sys.modules[__name__],
+        branch,
+        prior_branch_exprs,
+    )
 
 
 def _build_residual_else_guard(prior_branch_exprs: list[Expr], branch: Branch) -> Expr:
-    negated_items: list[Expr] = [
-        _negate_expr(expr, line=branch.line, column=branch.column)
-        for expr in prior_branch_exprs
-    ]
-    if not negated_items:
-        return IdentifierExpr(name="else", line=branch.line, column=branch.column)
-    if len(negated_items) == 1:
-        return negated_items[0]
-    return SequenceExpr(
-        items=negated_items,
-        separators=[","] * (len(negated_items) - 1),
-        line=branch.line,
-        column=branch.column,
+    return _semantic_validation.build_residual_else_guard(
+        sys.modules[__name__],
+        prior_branch_exprs,
+        branch,
     )
 
 
 def _negate_expr(expr: Expr, *, line: int, column: int) -> Expr:
-    if isinstance(expr, UnaryExpr) and expr.operator == "!":
-        return expr.operand
-    return UnaryExpr(operator="!", operand=expr, line=line, column=column)
+    return _semantic_validation.negate_expr(
+        sys.modules[__name__],
+        expr,
+        line=line,
+        column=column,
+    )
 
 
 def _clone_statement(statement: Statement) -> Statement:
-    if isinstance(statement, Condition):
-        return Condition(
-            quantifier=statement.quantifier,
-            body=[_clone_statement(item) for item in statement.body],
-            line=statement.line,
-            column=statement.column,
-            trailing_comment=statement.trailing_comment,
-        )
-
-    if isinstance(statement, Premise):
-        return Premise(
-            expression=statement.expression,
-            body=[_clone_statement(item) for item in statement.body],
-            line=statement.line,
-            column=statement.column,
-            trailing_comment=statement.trailing_comment,
-        )
-
-    if isinstance(statement, Branch):
-        return Branch(
-            expression=statement.expression,
-            body=[_clone_statement(item) for item in statement.body],
-            line=statement.line,
-            column=statement.column,
-            trailing_comment=statement.trailing_comment,
-        )
-
-    if isinstance(statement, (ExpressionStatement, Declaration, Heading, Import, Comment)):
-        if hasattr(statement, "body"):
-            return replace(
-                statement,
-                body=[_clone_statement(item) for item in statement.body],
-            )
-        return replace(statement)
-
-    return statement
+    return _semantic_validation.clone_statement(sys.modules[__name__], statement)
 
 
 def _lower_condition_declaration_premise(
@@ -711,49 +550,11 @@ def _lower_condition_declaration_premise(
     premise_column: int,
     trailing_comment: str | None,
 ) -> Statement:
-    if declaration.head is None:
-        return declaration
-
-    call_args = _signature_expr_items(declaration.input_expr)
-    mapping_expr = ExpressionStatement(
-        expression=BinaryExpr(
-            left=declaration.output_expr,
-            operator="=",
-            right=CallExpr(
-                callee=declaration.head,
-                args=call_args,
-                separators=[","] * max(0, len(call_args) - 1),
-                delimiter="()",
-                line=declaration.line,
-                column=declaration.column,
-            ),
-            line=declaration.line,
-            column=declaration.column,
-        ),
-        body=[],
-        line=declaration.line,
-        column=declaration.column,
-    )
-    local_signature = replace(
+    return _semantic_validation.lower_condition_declaration_premise(
+        sys.modules[__name__],
         declaration,
-        body=[],
-        trailing_comment=None,
-    )
-    quantified_body = [mapping_expr, *[_clone_statement(item) for item in declaration.body]]
-    return Premise(
-        expression=declaration.head,
-        body=[
-            local_signature,
-            ExpandedCondition(
-                quantifier="∀",
-                body=quantified_body,
-                line=declaration.line,
-                column=declaration.column,
-                trailing_comment=None,
-            ),
-        ],
-        line=premise_line,
-        column=premise_column,
+        premise_line=premise_line,
+        premise_column=premise_column,
         trailing_comment=trailing_comment,
     )
 
@@ -795,6 +596,55 @@ def source_to_program(
     return parse_program_text(logic_program)
 
 
+_IMPORT_LATEX_ALIASES: Final[dict[str, str]] = {
+    "\\in": "∈",
+    "\\notin": "∉",
+    "\\subseteq": "⊆",
+    "\\subset_eq": "⊆",
+    "\\subseteqq": "⊆",
+    "\\included_in": "⊆",
+    "\\nsubseteq": "⊈",
+    "\\notincludedin": "⊈",
+    "\\not_included_in": "⊈",
+    "\\subset": "⊂",
+    "\\subsetneq": "⊂",
+    "\\nsubset": "⊄",
+    "\\notsubset": "⊄",
+}
+
+_IMPLICIT_DECLARE_OPERATORS: Final[frozenset[str]] = frozenset(
+    {"=", "∈", "∉", "⊆", "⊈", "⊂", "⊄", *_IMPORT_LATEX_ALIASES.keys()}
+)
+
+
+def _normalize_import_path_text(module_path: str) -> str:
+    return _semantic_index_builder.normalize_import_path_text(module_path)
+
+
+def validate_import_path(module_path: str) -> str | None:
+    return _semantic_index_builder.validate_import_path(module_path)
+
+
+def _iter_root_imports(program: Program) -> Iterator[Import]:
+    yield from _semantic_index_builder.iter_root_imports(sys.modules[__name__], program)
+
+
+def resolve_import_path(base_dir: Path, module_path: str) -> Path:
+    return _semantic_index_builder.resolve_import_path(
+        sys.modules[__name__],
+        base_dir,
+        module_path,
+    )
+
+
+def render_import_path(module_file: Path, imported_file: Path) -> str:
+    return _semantic_index_builder.render_import_path(module_file, imported_file)
+
+
+def load_module_closure(entry_file: str | Path) -> list[LoadedModule]:
+    return _semantic_index_builder.load_module_closure(sys.modules[__name__], entry_file)
+
+
 def parse_condition_text(condition_text: str) -> Condition:
     token_stream = tokenize_text(condition_text, source_name="<condition>")
     root = semantic_parser(token_stream)
@@ -814,10 +664,7 @@ def parse_condition_text(condition_text: str) -> Condition:
 
 
 def _build_semantic_index(root_node: Node) -> SemanticIndex:
-    semantic_index = SemanticIndex()
-    _seed_declared_entities(root_node, semantic_index, current_class=None)
-    _scan_semantic_relations(root_node, semantic_index, current_class=None)
-    return semantic_index
+    return _semantic_index_builder.build_semantic_index(sys.modules[__name__], root_node)
 
 
 def _seed_declared_entities(
@@ -826,97 +673,12 @@ def _seed_declared_entities(
     *,
     current_class: str | None,
 ) -> None:
-    if isinstance(node, Program):
-        items = node.items
-    elif isinstance(node, Statement):
-        items = node.body
-    else:
-        return
-
-    for item in items:
-        scoped_class = current_class
-
-        if isinstance(item, Declaration):
-            owner_class = _declaration_owner_class(item, current_class=current_class)
-            if owner_class is not None:
-                semantic_index.class_names.add(owner_class)
-                member_name = _extract_member_name(item.head)
-                if member_name is not None:
-                    _register_member_name(
-                        semantic_index,
-                        owner_class,
-                        member_name,
-                    )
-                elif item.head is None:
-                    _register_member_name(
-                        semantic_index,
-                        owner_class,
-                        "call",
-                    )
-            elif isinstance(item.head, IdentifierExpr):
-                semantic_index.function_names.add(item.head.name)
-                alias_name = _extract_alias_name(item.alias)
-                if alias_name is not None:
-                    semantic_index.function_names.add(alias_name)
-            elif isinstance(item.head, SymbolExpr):
-                semantic_index.function_names.add(item.head.value)
-                alias_name = _extract_alias_name(item.alias)
-                if alias_name is not None:
-                    semantic_index.function_names.add(alias_name)
-
-            _seed_signature_class_candidates(item.input_expr, semantic_index)
-            _seed_signature_class_candidates(item.output_expr, semantic_index)
-
-        if isinstance(item, ExpressionStatement):
-            if isinstance(item.expression, IdentifierExpr):
-                semantic_index.class_names.add(item.expression.name)
-            if isinstance(item.expression, BinaryExpr):
-                semantic_index.class_names.update(
-                    _extract_enum_class_names(item.expression)
-                )
-                semantic_index.symbol_inheritance_relations.update(
-                    _extract_enum_class_relations(item.expression)
-                )
-                if item.expression.operator == "~":
-                    left_name = _extract_relation_name(item.expression.left)
-                    if left_name is not None and left_name not in semantic_index.function_names:
-                        semantic_index.class_names.add(left_name)
-
-            if current_class is not None and isinstance(item.expression, AttributeExpr):
-                if item.expression.base is None:
-                    _register_member_name(
-                        semantic_index,
-                        current_class,
-                        item.expression.attribute,
-                    )
-
-            scoped_owner = _scoped_block_owner_class(
-                item.expression,
-                item.body,
-                semantic_index,
-            )
-            if scoped_owner is not None:
-                scoped_class = scoped_owner
-                semantic_index.class_names.add(scoped_owner)
-                if isinstance(item.expression, BinaryExpr) and item.expression.operator in {"::", "~"}:
-                    left_name = _extract_relation_name(item.expression.left)
-                    right_name = _extract_relation_name(item.expression.right)
-                    if left_name is not None:
-                        semantic_index.class_names.add(left_name)
-                    if right_name is not None:
-                        semantic_index.class_names.add(right_name)
-                    alias_symbol = _extract_relation_symbol_alias(item.expression.right)
-                    if right_name is not None and alias_symbol is not None:
-                        semantic_index.symbol_inheritance_relations.add(
-                            (right_name, alias_symbol)
-                        )
-
-        if isinstance(item, Statement) and item.body:
-            _seed_declared_entities(
-                item,
-                semantic_index,
-                current_class=scoped_class,
-            )
+    _semantic_index_builder.seed_declared_entities(
+        sys.modules[__name__],
+        node,
+        semantic_index,
+        current_class=current_class,
+    )
 
 
 def _scan_semantic_relations(
@@ -926,114 +688,24 @@ def _scan_semantic_relations(
     current_class: str | None,
     inside_declaration_body: bool = False,
 ) -> None:
-    if isinstance(node, Program):
-        items = node.items
-    elif isinstance(node, Statement):
-        items = node.body
-    else:
-        return
-
-    for item in items:
-        scoped_class = current_class
-
-        if isinstance(item, Declaration):
-            owner_class = _declaration_owner_class(item, current_class=current_class)
-            signature = _build_signature_spec(
-                item,
-                semantic_index=semantic_index,
-                owner_class=owner_class,
-            )
-            if signature is not None:
-                if owner_class is None:
-                    semantic_index.function_signatures_by_name.setdefault(
-                        signature.name, []
-                    ).append(signature)
-                else:
-                    semantic_index.member_signatures_by_key.setdefault(
-                        (owner_class, signature.name), []
-                    ).append(signature)
-                if _is_operator_alias(signature.name):
-                    semantic_index.operator_aliases.setdefault(
-                        signature.name, []
-                    ).append(signature)
-                if signature.alias is not None and _is_operator_alias(signature.alias):
-                    semantic_index.operator_aliases.setdefault(
-                        signature.alias, []
-                    ).append(signature)
-
-        if isinstance(item, ExpressionStatement) and isinstance(item.expression, BinaryExpr):
-            resolved = _resolve_relation_expression(item.expression, semantic_index)
-            if resolved is not None:
-                relation_kind, left_name, right_name = resolved
-                if (
-                    inside_declaration_body
-                    and item.expression.operator == "~"
-                    and not item.body
-                    and relation_kind == "class_inheritance"
-                ):
-                    relation_kind = "symbol_inheritance"
-                if relation_kind == "class_inheritance":
-                    semantic_index.class_inheritance_relations.add(
-                        (left_name, right_name)
-                    )
-                elif relation_kind == "function_inheritance":
-                    semantic_index.function_inheritance_relations.add(
-                        (left_name, right_name)
-                    )
-                elif relation_kind == "symbol_inheritance":
-                    semantic_index.symbol_inheritance_relations.add(
-                        (left_name, right_name)
-                    )
-                elif relation_kind == "function_to_class":
-                    semantic_index.function_class_relations.add(
-                        (left_name, right_name)
-                    )
-
-            semantic_index.symbol_inheritance_relations.update(
-                _extract_enum_class_relations(item.expression)
-            )
-
-            scoped_owner = _scoped_block_owner_class(
-                item.expression,
-                item.body,
-                semantic_index,
-            )
-            if scoped_owner is not None:
-                scoped_class = scoped_owner
-
-        elif isinstance(item, ExpressionStatement):
-            scoped_owner = _scoped_block_owner_class(
-                item.expression,
-                item.body,
-                semantic_index,
-            )
-            if scoped_owner is not None:
-                scoped_class = scoped_owner
-
-        if isinstance(item, Statement) and item.body:
-            _scan_semantic_relations(
-                item,
-                semantic_index,
-                current_class=scoped_class,
-                inside_declaration_body=inside_declaration_body
-                or isinstance(item, Declaration),
-            )
+    _semantic_index_builder.scan_semantic_relations(
+        sys.modules[__name__],
+        node,
+        semantic_index,
+        current_class=current_class,
+        inside_declaration_body=inside_declaration_body,
+    )
 
 
 def _seed_signature_class_candidates(
     expr: Expr | None,
     semantic_index: SemanticIndex,
 ) -> None:
-    for item in _signature_expr_items(expr):
-        if not isinstance(item, IdentifierExpr):
-            continue
-        class_name = _infer_symbol_class_name(
-            item.name,
-            semantic_index=semantic_index,
-            allow_uppercase_fallback=True,
-        )
-        if class_name is not None:
-            semantic_index.class_names.add(class_name)
+    _semantic_index_builder._seed_signature_class_candidates(
+        sys.modules[__name__],
+        expr,
+        semantic_index,
+    )
 
 
 def _scoped_block_owner_class(
@@ -1041,36 +713,16 @@ def _scoped_block_owner_class(
     body: list[Statement],
     semantic_index: SemanticIndex,
 ) -> str | None:
-    if not body:
-        return None
-
-    if isinstance(expr, IdentifierExpr):
-        return expr.name
-
-    if isinstance(expr, BinaryExpr) and expr.operator in {"::", "~"}:
-        left_name = _extract_relation_name(expr.left)
-        right_name = _extract_relation_name(expr.right)
-        if left_name is None or right_name is None:
-            return None
-        if _body_declares_members(body):
-            return right_name
-        resolved = _resolve_relation_expression(expr, semantic_index)
-        if resolved is not None and resolved[0] == "class_inheritance":
-            return right_name
-
-    return None
+    return _semantic_index_builder.scoped_block_owner_class(
+        sys.modules[__name__],
+        expr,
+        body,
+        semantic_index,
+    )
 
 
 def _body_declares_members(body: list[Statement]) -> bool:
-    for item in body:
-        if isinstance(item, Declaration):
-            owner_class = _declaration_owner_class(item, current_class=None)
-            if owner_class is not None:
-                return True
-        if isinstance(item, ExpressionStatement):
-            if isinstance(item.expression, AttributeExpr) and item.expression.base is None:
-                return True
-    return False
+    return _semantic_index_builder.body_declares_members(sys.modules[__name__], body)
 
 
 def _register_member_name(
@@ -1101,60 +753,24 @@ def _build_signature_spec(
     semantic_index: SemanticIndex,
     owner_class: str | None,
 ) -> SignatureSpec | None:
-    if statement.head is None:
-        if owner_class is None:
-            return None
-        name = "call"
-    elif owner_class is not None:
-        _, member_name = _extract_member_owner_and_name(
-            statement.head,
-            current_class=owner_class,
-        )
-        if member_name is None:
-            return None
-        name = member_name
-    elif isinstance(statement.head, IdentifierExpr):
-        name = statement.head.name
-    elif isinstance(statement.head, SymbolExpr):
-        name = statement.head.value
-    else:
-        return None
-
-    alias = _extract_alias_name(statement.alias)
-    return SignatureSpec(
-        name=name,
-        input_shape=_format_expr(statement.input_expr),
-        output_shape=_format_expr(statement.output_expr),
-        arity=_signature_expr_arity(statement.input_expr),
-        arg_classes=_signature_expr_classes(
-            statement.input_expr,
-            semantic_index=semantic_index,
-        ),
+    return _semantic_index_builder.build_signature_spec(
+        sys.modules[__name__],
+        statement,
+        semantic_index=semantic_index,
         owner_class=owner_class,
-        alias=alias,
-        line=statement.line,
-        column=statement.column,
     )
 
 
 def _extract_alias_name(expr: Expr | None) -> str | None:
-    if isinstance(expr, IdentifierExpr):
-        return expr.name
-    if isinstance(expr, SymbolExpr):
-        return expr.value
-    return None
+    return _semantic_index_builder.extract_alias_name(sys.modules[__name__], expr)
 
 
 def _is_operator_alias(alias: str) -> bool:
-    return (
-        alias in _LineExpressionParser._INFIX_PRECEDENCE
-        or _is_custom_operator_alias(alias)
-        or _is_latex_name(alias)
-    )
+    return _semantic_index_builder.is_operator_alias(sys.modules[__name__], alias)
 
 
 def _signature_expr_arity(expr: Expr | None) -> int:
-    return len(_signature_expr_items(expr))
+    return _semantic_index_builder.signature_expr_arity(sys.modules[__name__], expr)
 
 
 def _signature_expr_classes(
@@ -1162,138 +778,60 @@ def _signature_expr_classes(
     *,
     semantic_index: SemanticIndex,
 ) -> tuple[str | None, ...]:
-    return tuple(
-        _infer_expr_class(
-            item,
-            semantic_index=semantic_index,
-            allow_uppercase_fallback=True,
-        )
-        for item in _signature_expr_items(expr)
+    return _semantic_index_builder.signature_expr_classes(
+        sys.modules[__name__],
+        expr,
+        semantic_index=semantic_index,
     )
 
 
 def _signature_expr_items(expr: Expr | None) -> list[Expr]:
-    if expr is None:
-        return []
-    if isinstance(expr, (DelimitedExpr, SequenceExpr)):
-        return [item for item in expr.items if item is not None]
-    return [expr]
+    return _semantic_index_builder.signature_expr_items(sys.modules[__name__], expr)
 
 
 def _extract_enum_class_names(expr: BinaryExpr) -> set[str]:
-    definition = _extract_enum_definition(expr)
-    if definition is None:
-        return set()
-    enum_class_name, _ = definition
-    return {enum_class_name}
+    return _semantic_index_builder.extract_enum_class_names(sys.modules[__name__], expr)
 
 
 def _resolve_relation_expression(
     expr: BinaryExpr,
     semantic_index: SemanticIndex,
 ) -> tuple[str, str, str] | None:
-    if expr.operator == "::":
-        return _resolve_double_colon_expression(expr, semantic_index)
-    if expr.operator == "~":
-        return _resolve_tilde_expression(expr, semantic_index)
-    return None
+    return _semantic_index_builder.resolve_relation_expression(
+        sys.modules[__name__],
+        expr,
+        semantic_index,
+    )
 
 
 def _resolve_double_colon_expression(
     expr: BinaryExpr,
     semantic_index: SemanticIndex,
 ) -> tuple[str, str, str] | None:
-    if expr.operator != "::":
-        return None
-
-    left_name = _extract_relation_name(expr.left)
-    right_name = _extract_relation_name(expr.right)
-    if left_name is None or right_name is None:
-        return None
-
-    if right_name in semantic_index.member_names_by_class.get(left_name, set()):
-        return "member_extraction", left_name, right_name
-
-    if (
-        left_name in semantic_index.function_names
-        and right_name in semantic_index.function_names
-    ):
-        return "function_inheritance", left_name, right_name
-
-    if _looks_like_class_identifier(left_name, semantic_index) and _looks_like_class_identifier(
-        right_name, semantic_index
-    ):
-        return "class_inheritance", left_name, right_name
-
-    if _looks_like_class_identifier(left_name, semantic_index):
-        return "symbol_inheritance", left_name, right_name
-
-    return None
+    return _semantic_index_builder.resolve_double_colon_expression(
+        sys.modules[__name__],
+        expr,
+        semantic_index,
+    )
 
 
 def _resolve_tilde_expression(
     expr: BinaryExpr,
     semantic_index: SemanticIndex,
 ) -> tuple[str, str, str] | None:
-    if expr.operator != "~":
-        return None
-
-    left_name = _extract_relation_name(expr.left)
-    if left_name is None:
-        return None
-
-    class_call_owner = _extract_class_call_owner(expr.right)
-    if left_name in semantic_index.function_names and class_call_owner is not None:
-        return "function_to_class", left_name, class_call_owner
-
-    right_name = _extract_relation_name(expr.right)
-    if right_name is None:
-        return None
-
-    if (
-        left_name in semantic_index.function_names
-        and right_name in semantic_index.function_names
-    ):
-        return "function_inheritance", left_name, right_name
-
-    if _looks_like_class_identifier(left_name, semantic_index):
-        if (
-            isinstance(expr.right, CallExpr)
-            or right_name in semantic_index.class_names
-            or left_name in semantic_index.class_names
-        ):
-            return "class_inheritance", left_name, right_name
-        return "symbol_inheritance", left_name, right_name
-
-    return None
+    return _semantic_index_builder.resolve_tilde_expression(
+        sys.modules[__name__],
+        expr,
+        semantic_index,
+    )
 
 
 def _extract_relation_name(expr: Expr | None) -> str | None:
-    if isinstance(expr, IdentifierExpr):
-        return expr.name
-    if isinstance(expr, SymbolExpr):
-        return expr.value
-    if isinstance(expr, CallExpr) and isinstance(expr.callee, IdentifierExpr):
-        return expr.callee.name
-    if isinstance(expr, CallExpr) and isinstance(expr.callee, SymbolExpr):
-        return expr.callee.value
-    return None
+    return _semantic_index_builder.extract_relation_name(sys.modules[__name__], expr)
 
 
 def _extract_member_name(expr: Expr | None) -> str | None:
-    if isinstance(expr, AttributeExpr):
-        return expr.attribute
-    if isinstance(expr, IdentifierExpr):
-        return expr.name
-    if isinstance(expr, SymbolExpr):
-        return expr.value
-    if isinstance(expr, CallExpr) and isinstance(expr.callee, IdentifierExpr):
-        return expr.callee.name
-    if isinstance(expr, CallExpr) and isinstance(expr.callee, SymbolExpr):
-        return expr.callee.value
-    if isinstance(expr, BinaryExpr) and expr.operator == "::":
-        return _extract_member_name(expr.right)
-    return None
+    return _semantic_index_builder.extract_member_name(sys.modules[__name__], expr)
 
 
 def _extract_member_owner_and_name(
@@ -1301,50 +839,30 @@ def _extract_member_owner_and_name(
     *,
     current_class: str | None,
 ) -> tuple[str | None, str | None]:
-    if isinstance(expr, AttributeExpr):
-        if expr.base is None:
-            return current_class, expr.attribute
-        if isinstance(expr.base, IdentifierExpr):
-            return expr.base.name, expr.attribute
-        return None, None
-
-    if isinstance(expr, BinaryExpr) and expr.operator == "::":
-        owner_class = _extract_relation_name(expr.left)
-        member_name = _extract_member_name(expr.right)
-        return owner_class, member_name
-
-    return None, None
+    return _semantic_index_builder.extract_member_owner_and_name(
+        sys.modules[__name__],
+        expr,
+        current_class=current_class,
+    )
 
 
 def _extract_relation_symbol_alias(expr: Expr | None) -> str | None:
-    if not isinstance(expr, CallExpr) or not isinstance(expr.callee, IdentifierExpr):
-        return None
-    args = [arg for arg in expr.args if arg is not None]
-    if len(args) != 1 or not isinstance(args[0], IdentifierExpr):
-        return None
-    return args[0].name
+    return _semantic_index_builder.extract_relation_symbol_alias(sys.modules[__name__], expr)
 
 
 def _extract_class_call_owner(expr: Expr | None) -> str | None:
-    if not isinstance(expr, BinaryExpr) or expr.operator != "::":
-        return None
-    if not isinstance(expr.left, IdentifierExpr):
-        return None
-    right_name = _extract_relation_name(expr.right)
-    if right_name != "call":
-        return None
-    return expr.left.name
+    return _semantic_index_builder.extract_class_call_owner(sys.modules[__name__], expr)
 
 
 def _looks_like_class_identifier(
     name: str,
     semantic_index: SemanticIndex,
 ) -> bool:
-    if name in semantic_index.class_names:
-        return True
-    if any(char.isdigit() for char in name) or "_" in name:
-        return False
-    return bool(name[:1].isupper())
+    return _semantic_index_builder.looks_like_class_identifier(
+        sys.modules[__name__],
+        name,
+        semantic_index,
+    )
 
 
 def build_class_inheritance_graph(root_node: Node) -> ClassInheritanceGraph:
@@ -1374,50 +892,19 @@ def collect_class_inheritance_relations(root_node: Node) -> tuple[tuple[str, str
 
 
 def _extract_enum_class_relations(expr: BinaryExpr) -> tuple[tuple[str, str], ...]:
-    definition = _extract_enum_definition(expr)
-    if definition is None:
-        return ()
-    enum_class_name, member_names = definition
-    return tuple(sorted((enum_class_name, member_name) for member_name in member_names))
+    return _semantic_index_builder.extract_enum_class_relations(sys.modules[__name__], expr)
 
 
 def _extract_class_name(expr: Expr | None) -> str | None:
-    if isinstance(expr, IdentifierExpr):
-        return expr.name
-    return None
+    return _semantic_index_builder.extract_class_name(sys.modules[__name__], expr)
 
 
 def _extract_enum_definition(expr: BinaryExpr) -> tuple[str, set[str]] | None:
-    if expr.operator != "∈":
-        return None
-
-    member_names = _extract_enum_member_names(expr.left)
-    enum_class_name = _extract_class_name(expr.right)
-    if member_names and enum_class_name is not None:
-        return enum_class_name, member_names
-
-    enum_class_name = _extract_class_name(expr.left)
-    member_names = _extract_enum_member_names(expr.right)
-    if member_names and enum_class_name is not None:
-        return enum_class_name, member_names
-
-    return None
+    return _semantic_index_builder.extract_enum_definition(sys.modules[__name__], expr)
 
 
 def _extract_enum_member_names(expr: Expr | None) -> set[str]:
-    if not isinstance(expr, DelimitedExpr):
-        return set()
-    if expr.opener != "{" or expr.closer != "}":
-        return set()
-
-    members: set[str] = set()
-    for item in expr.items:
-        if item is None:
-            return set()
-        if not isinstance(item, IdentifierExpr):
-            return set()
-        members.add(item.name)
-    return members
+    return _semantic_index_builder.extract_enum_member_names(sys.modules[__name__], expr)
 
 
 def _reachable_class_relations(
@@ -1426,104 +913,29 @@ def _reachable_class_relations(
     *,
     transitive: bool,
 ) -> tuple[str, ...]:
-    if not transitive:
-        return adjacency.get(class_name, ())
-
-    visited: set[str] = set()
-    pending = list(adjacency.get(class_name, ()))
-    while pending:
-        related_class = pending.pop()
-        if related_class in visited:
-            continue
-        visited.add(related_class)
-        pending.extend(adjacency.get(related_class, ()))
-
-    return tuple(sorted(visited))
+    return _semantic_index_builder.reachable_class_relations(
+        sys.modules[__name__],
+        adjacency,
+        class_name,
+        transitive=transitive,
+    )
 
 
 def _condition_from_quantified_expr(expr: QuantifiedExpr) -> Condition:
-    segments = _split_condition_segments(expr.body)
-    premise_segments, target_segment = _canonicalize_pipe_segments(segments)
-    if target_segment is None or not target_segment:
-        raise ParserError("quantified condition must contain at least one target")
-    if any(not segment for segment in premise_segments):
-        raise ParserError("quantified condition contains an empty clause")
-
-    body: list[Statement] = []
-    for segment in premise_segments:
-        premise_expr = _merge_segment_expr(segment)
-        body.append(
-            Premise(
-                expression=premise_expr,
-                body=[],
-                line=premise_expr.line,
-                column=premise_expr.column,
-            )
-        )
-
-    for target_expr in target_segment:
-        body.append(
-            ExpressionStatement(
-                expression=target_expr,
-                body=[],
-                line=target_expr.line,
-                column=target_expr.column,
-            )
-        )
-
-    return Condition(
-        quantifier=expr.quantifier,
-        body=body,
-        line=expr.line,
-        column=expr.column,
+    return _semantic_index_builder.condition_from_quantified_expr(
+        sys.modules[__name__],
+        expr,
     )
 
 
 def _split_condition_segments(body: DelimitedExpr) -> list[list[Expr]]:
-    if not body.items and not body.separators:
-        return [[]]
-
-    segments: list[list[Expr]] = [[]]
-    for index, item in enumerate(body.items):
-        if item is not None:
-            segments[-1].append(item)
-        if index >= len(body.separators):
-            continue
-        separator = body.separators[index]
-        if separator == "|":
-            segments.append([])
-            continue
-        if separator != ",":
-            raise ParserError(
-                f"unsupported quantified-condition separator {separator!r}"
-            )
-
-    for separator in body.separators[len(body.items) :]:
-        if separator == "|":
-            segments.append([])
-            continue
-        if separator != ",":
-            raise ParserError(
-                f"unsupported quantified-condition separator {separator!r}"
-            )
-
-    return segments
+    return _semantic_index_builder.split_condition_segments(sys.modules[__name__], body)
 
 
 def _canonicalize_pipe_segments(
     segments: list[list[Expr]],
 ) -> tuple[list[list[Expr]], list[Expr] | None]:
-    if not segments:
-        return [], None
-
-    if not segments[0]:
-        if len(segments) == 1:
-            return [], None
-        if not segments[-1]:
-            return list(segments[1:-1]), None
-        return list(segments[1:-1]), list(segments[-1])
-
-    return list(reversed(segments[1:])), list(segments[0])
+    return _semantic_index_builder.canonicalize_pipe_segments(sys.modules[__name__], segments)
 
 
 def _build_canonical_pipe_delimited_expr(
@@ -1533,55 +945,25 @@ def _build_canonical_pipe_delimited_expr(
     line: int,
     column: int,
 ) -> DelimitedExpr:
-    items: list[Expr | None] = [None]
-    items.extend(_merge_segment_expr(segment) for segment in condition_segments)
-    if target_segment is not None and target_segment:
-        items.append(_merge_segment_expr(target_segment))
-        separators = ["|"] * (len(items) - 1)
-    else:
-        separators = ["|"] * len(items)
-    return DelimitedExpr(
-        opener="{",
-        items=items,
-        separators=separators,
-        closer="}",
+    return _semantic_index_builder.build_canonical_pipe_delimited_expr(
+        sys.modules[__name__],
+        condition_segments,
+        target_segment,
         line=line,
         column=column,
     )
 
 
 def _merge_segment_expr(items: list[Expr]) -> Expr:
-    if len(items) == 1:
-        return items[0]
-    line = items[0].line
-    column = items[0].column
-    return SequenceExpr(
-        items=list(items),
-        separators=[","] * (len(items) - 1),
-        line=line,
-        column=column,
-    )
+    return _semantic_index_builder.merge_segment_expr(sys.modules[__name__], items)
 
 
 def condition_to_source(condition: Condition) -> str:
-    lines = _format_condition_lines(condition, indent=0)
-    return "\n".join(lines)
+    return _semantic_format.condition_to_source(sys.modules[__name__], condition)
 
 
 def program_to_source(root_node: Node) -> str:
-    if isinstance(root_node, Program):
-        return "\n".join(_format_statement_block(root_node.items, indent=0))
-
-    if isinstance(root_node, Condition):
-        return condition_to_source(root_node)
-
-    if isinstance(root_node, Statement):
-        return "\n".join(_format_statement_lines(root_node, indent=0))
-
-    if isinstance(root_node, Expr):
-        return _format_expr(root_node)
-
-    raise TypeError(f"unsupported root node type: {type(root_node).__name__}")
+    return _semantic_format.program_to_source(sys.modules[__name__], root_node)
 
 
 def verify_semantic_parser(lp_path: str | Path) -> str:
@@ -1601,9 +983,7 @@ translate = program_to_source
 
 
 def _format_condition_lines(condition: Condition, *, indent: int) -> list[str]:
-    lines = [_indent_text(indent) + condition.quantifier]
-    lines.extend(_format_statement_block(condition.body, indent=indent + 4))
-    return lines
+    return _semantic_format._format_condition_lines(sys.modules[__name__], condition, indent=indent)
 
 
 def _format_statement_block(
@@ -1611,217 +991,35 @@ def _format_statement_block(
     *,
     indent: int,
 ) -> list[str]:
-    lines: list[str] = []
-    for item in items:
-        lines.extend(_format_statement_lines(item, indent=indent))
-    return lines
+    return _semantic_format._format_statement_block(sys.modules[__name__], items, indent=indent)
 
 
 def _format_statement_lines(statement: Statement, *, indent: int) -> list[str]:
-    prefix = _indent_text(indent)
-    trailing = _format_trailing_comment(statement.trailing_comment)
-
-    if isinstance(statement, Condition):
-        lines = [prefix + statement.quantifier + trailing]
-        lines.extend(_format_statement_block(statement.body, indent=indent + 4))
-        return lines
-
-    if isinstance(statement, Premise):
-        lines = [prefix + "| " + _format_expr(statement.expression) + trailing]
-        lines.extend(_format_statement_block(statement.body, indent=indent + 4))
-        return lines
-
-    if isinstance(statement, Branch):
-        lines = [prefix + "|- " + _format_expr(statement.expression) + trailing]
-        lines.extend(_format_statement_block(statement.body, indent=indent + 4))
-        return lines
-
-    if isinstance(statement, ExpressionStatement):
-        lines = [prefix + _format_expr(statement.expression) + trailing]
-        lines.extend(_format_statement_block(statement.body, indent=indent + 4))
-        return lines
-
-    if isinstance(statement, Declaration):
-        lines = [prefix + _format_declaration(statement) + trailing]
-        lines.extend(_format_statement_block(statement.body, indent=indent + 4))
-        return lines
-
-    if isinstance(statement, Heading):
-        lines = [prefix + "@" + statement.title + trailing]
-        lines.extend(_format_statement_block(statement.body, indent=indent + 4))
-        return lines
-
-    if isinstance(statement, Import):
-        lines = [prefix + "$import " + statement.module_path + trailing]
-        lines.extend(_format_statement_block(statement.body, indent=indent + 4))
-        return lines
-
-    if isinstance(statement, Comment):
-        return [prefix + "#" + (" " + statement.text if statement.text else "")]
-
-    return [prefix + repr(statement)]
+    return _semantic_format._format_statement_lines(sys.modules[__name__], statement, indent=indent)
 
 
 def _format_declaration(statement: Declaration) -> str:
-    if statement.head is None:
-        head = ""
-    else:
-        head = _format_expr(statement.head)
-
-    if statement.alias is not None:
-        head = f"{head}({_format_expr(statement.alias)})" if head else _format_expr(
-            statement.alias
-        )
-
-    input_expr = _format_expr(statement.input_expr) if statement.input_expr else ""
-    output_expr = _format_expr(statement.output_expr) if statement.output_expr else ""
-    return f"{head}: {input_expr} => {output_expr}".strip()
+    return _semantic_format._format_declaration(sys.modules[__name__], statement)
 
 
 def _format_expr(expr: Expr | None) -> str:
-    if expr is None:
-        return ""
-
-    if isinstance(expr, IdentifierExpr):
-        return expr.name
-
-    if isinstance(expr, NumberExpr):
-        return expr.value
-
-    if isinstance(expr, StringExpr):
-        escaped = (
-            expr.value.replace("\\", "\\\\")
-            .replace('"', '\\"')
-            .replace("\n", "\\n")
-            .replace("\r", "\\r")
-            .replace("\t", "\\t")
-        )
-        return f'"{escaped}"'
-
-    if isinstance(expr, SymbolExpr):
-        return expr.value
-
-    if isinstance(expr, UnaryExpr):
-        return f"{expr.operator}{_format_atom(expr.operand)}"
-
-    if isinstance(expr, BinaryExpr):
-        return (
-            f"{_format_binary_operand(expr.left)} {expr.operator} "
-            f"{_format_binary_operand(expr.right)}"
-        )
-
-    if isinstance(expr, SequenceExpr):
-        parts = [_format_expr(item) for item in expr.items]
-        return _join_with_separators(parts, expr.separators)
-
-    if isinstance(expr, DelimitedExpr):
-        if expr.opener == "{" and expr.closer == "}" and "|" in expr.separators:
-            return _format_pipe_delimited_expr(expr)
-        parts = [_format_expr(item) for item in expr.items]
-        inner = _join_with_separators(parts, expr.separators)
-        return f"{expr.opener}{inner}{expr.closer}"
-
-    if isinstance(expr, AttributeExpr):
-        if expr.base is None:
-            return f"::{expr.attribute}"
-        return f"{_format_atom(expr.base)}.{expr.attribute}"
-
-    if isinstance(expr, CallExpr):
-        if expr.delimiter == "{}":
-            if len(expr.args) == 1 and isinstance(expr.args[0], DelimitedExpr):
-                return f"{_format_atom(expr.callee)}{_format_expr(expr.args[0])}"
-            args = _join_with_separators(
-                [_format_expr(arg) for arg in expr.args],
-                expr.separators,
-            )
-            return f"{_format_atom(expr.callee)}{{{args}}}"
-
-        args = _join_with_separators(
-            [_format_expr(arg) for arg in expr.args],
-            expr.separators,
-        )
-        return f"{_format_atom(expr.callee)}({args})"
-
-    if isinstance(expr, IndexExpr):
-        return f"{_format_atom(expr.base)}{_format_expr(expr.index)}"
-
-    if isinstance(expr, QuantifiedExpr):
-        return f"{expr.quantifier}{_format_expr(expr.body)}"
-
-    return repr(expr)
+    return _semantic_format._format_expr(sys.modules[__name__], expr)
 
 
 def _format_pipe_delimited_expr(expr: DelimitedExpr) -> str:
-    segments = _split_condition_segments(expr)
-    condition_segments, target_segment = _canonicalize_pipe_segments(segments)
-
-    parts = [""]
-    parts.extend(
-        _format_expr(_merge_segment_expr(segment))
-        for segment in condition_segments
-        if segment
-    )
-
-    if target_segment is not None and target_segment:
-        parts.append(_format_expr(_merge_segment_expr(target_segment)))
-        separators = ["|"] * (len(parts) - 1)
-    else:
-        separators = ["|"] * len(parts)
-
-    inner = _join_with_separators(parts, separators)
-    return f"{expr.opener}{inner}{expr.closer}"
+    return _semantic_format._format_pipe_delimited_expr(sys.modules[__name__], expr)
 
 
 def _format_atom(expr: Expr) -> str:
-    if isinstance(
-        expr,
-        (
-            IdentifierExpr,
-            NumberExpr,
-            StringExpr,
-            SymbolExpr,
-            AttributeExpr,
-            CallExpr,
-            IndexExpr,
-            QuantifiedExpr,
-            DelimitedExpr,
-        ),
-    ):
-        return _format_expr(expr)
-    return f"({_format_expr(expr)})"
+    return _semantic_format._format_atom(sys.modules[__name__], expr)
 
 
 def _format_binary_operand(expr: Expr) -> str:
-    if isinstance(expr, BinaryExpr) and expr.operator == "->":
-        return _format_expr(expr)
-    if isinstance(expr, UnaryExpr):
-        return _format_expr(expr)
-    return _format_atom(expr)
+    return _semantic_format._format_binary_operand(sys.modules[__name__], expr)
 
 
 def _join_with_separators(parts: list[str], separators: list[str]) -> str:
-    if not parts:
-        return ""
-
-    text = parts[0]
-    for index, part in enumerate(parts[1:], start=1):
-        separator = separators[index - 1]
-        text += _format_separator_text(
-            separator,
-            has_left=bool(text),
-            has_right=bool(part),
-        )
-        text += part
-
-    if len(separators) >= len(parts):
-        for separator in separators[len(parts) - 1 :]:
-            text += _format_separator_text(
-                separator,
-                has_left=bool(text),
-                has_right=False,
-            )
-
-    return text
+    return _semantic_format._join_with_separators(parts, separators)
 
 
 def _format_separator_text(
@@ -1830,264 +1028,39 @@ def _format_separator_text(
     has_left: bool,
     has_right: bool,
 ) -> str:
-    if separator == ",":
-        return ", " if has_right else ","
-
-    if separator in {":", ";"}:
-        return f"{separator} " if has_right else separator
-
-    if separator == "|":
-        if has_left and has_right:
-            return " | "
-        if has_left:
-            return " |"
-        if has_right:
-            return "| "
-        return "|"
-
-    if has_left and has_right:
-        return f" {separator} "
-    if has_left:
-        return f" {separator}"
-    if has_right:
-        return f"{separator} "
-    return separator
+    return _semantic_format._format_separator_text(separator, has_left=has_left, has_right=has_right)
 
 
 def _format_trailing_comment(comment: str | None) -> str:
-    if comment is None:
-        return ""
-    if not comment:
-        return " #"
-    return f"  # {comment}"
+    return _semantic_format._format_trailing_comment(comment)
 
 
 def _indent_text(indent: int) -> str:
-    return " " * indent
+    return _semantic_format._indent_text(indent)
 
 
 def _normalize_semantic_tree(node: Node | None) -> Node | None:
-    if node is None:
-        return None
-
-    if isinstance(node, Program):
-        return Program(
-            items=_normalize_statement_block(node.items),
-            line=0,
-            column=0,
-        )
-
-    if isinstance(node, Comment):
-        return None
-
-    if isinstance(node, IdentifierExpr):
-        return IdentifierExpr(name=node.name, line=0, column=0)
-
-    if isinstance(node, NumberExpr):
-        return NumberExpr(value=node.value, line=0, column=0)
-
-    if isinstance(node, StringExpr):
-        return StringExpr(value=node.value, line=0, column=0)
-
-    if isinstance(node, SymbolExpr):
-        return SymbolExpr(value=node.value, line=0, column=0)
-
-    if isinstance(node, UnaryExpr):
-        return UnaryExpr(
-            operator=node.operator,
-            operand=_normalize_expr(node.operand),
-            line=0,
-            column=0,
-        )
-
-    if isinstance(node, BinaryExpr):
-        return BinaryExpr(
-            left=_normalize_expr(node.left),
-            operator=node.operator,
-            right=_normalize_expr(node.right),
-            line=0,
-            column=0,
-        )
-
-    if isinstance(node, SequenceExpr):
-        return SequenceExpr(
-            items=_normalize_expr_items(node.items),
-            separators=list(node.separators),
-            line=0,
-            column=0,
-        )
-
-    if isinstance(node, DelimitedExpr):
-        normalized = DelimitedExpr(
-            opener=node.opener,
-            items=_normalize_expr_items(node.items),
-            separators=list(node.separators),
-            closer=node.closer,
-            line=0,
-            column=0,
-        )
-        if normalized.opener == "{" and normalized.closer == "}" and "|" in normalized.separators:
-            condition_segments, target_segment = _canonicalize_pipe_segments(
-                _split_condition_segments(normalized)
-            )
-            return _build_canonical_pipe_delimited_expr(
-                condition_segments,
-                target_segment,
-                line=0,
-                column=0,
-            )
-        return normalized
-
-    if isinstance(node, AttributeExpr):
-        return AttributeExpr(
-            base=_normalize_expr(node.base) if node.base is not None else None,
-            attribute=node.attribute,
-            line=0,
-            column=0,
-        )
-
-    if isinstance(node, CallExpr):
-        return CallExpr(
-            callee=_normalize_expr(node.callee),
-            args=_normalize_expr_items(node.args),
-            separators=list(node.separators),
-            delimiter=node.delimiter,
-            line=0,
-            column=0,
-        )
-
-    if isinstance(node, IndexExpr):
-        return IndexExpr(
-            base=_normalize_expr(node.base),
-            index=_normalize_delimited_expr(node.index),
-            line=0,
-            column=0,
-        )
-
-    if isinstance(node, QuantifiedExpr):
-        return QuantifiedExpr(
-            quantifier=node.quantifier,
-            body=_normalize_delimited_expr(node.body),
-            line=0,
-            column=0,
-        )
-
-    if isinstance(node, Heading):
-        return Heading(
-            title=node.title,
-            body=_normalize_statement_block(node.body),
-            line=0,
-            column=0,
-            trailing_comment=None,
-        )
-
-    if isinstance(node, Import):
-        return Import(
-            module_path=node.module_path,
-            line=0,
-            column=0,
-            body=_normalize_statement_block(node.body),
-            trailing_comment=None,
-        )
-
-    if isinstance(node, ExpressionStatement):
-        return ExpressionStatement(
-            expression=_normalize_expr(node.expression),
-            body=_normalize_statement_block(node.body),
-            line=0,
-            column=0,
-            trailing_comment=None,
-        )
-
-    if isinstance(node, Declaration):
-        return Declaration(
-            head=_normalize_expr(node.head) if node.head is not None else None,
-            input_expr=(
-                _normalize_expr(node.input_expr) if node.input_expr is not None else None
-            ),
-            output_expr=(
-                _normalize_expr(node.output_expr)
-                if node.output_expr is not None
-                else None
-            ),
-            body=_normalize_statement_block(node.body),
-            line=0,
-            column=0,
-            alias=_normalize_expr(node.alias) if node.alias is not None else None,
-            trailing_comment=None,
-        )
-
-    if isinstance(node, Condition):
-        return Condition(
-            quantifier=node.quantifier,
-            body=_normalize_statement_block(node.body),
-            line=0,
-            column=0,
-            trailing_comment=None,
-        )
-
-    if isinstance(node, Premise):
-        return Premise(
-            expression=_normalize_expr(node.expression),
-            body=_normalize_statement_block(node.body),
-            line=0,
-            column=0,
-            trailing_comment=None,
-        )
-
-    if isinstance(node, Branch):
-        return Branch(
-            expression=_normalize_expr(node.expression),
-            body=_normalize_statement_block(node.body),
-            line=0,
-            column=0,
-            trailing_comment=None,
-        )
-
-    raise TypeError(f"unsupported node type: {type(node).__name__}")
+    return _semantic_format.normalize_semantic_tree(sys.modules[__name__], node)
 
 
 def _normalize_statement_block(items: list[Statement]) -> list[Statement]:
-    normalized_items: list[Statement] = []
-    for item in items:
-        normalized_item = _normalize_semantic_tree(item)
-        if isinstance(normalized_item, Statement):
-            normalized_items.append(normalized_item)
-    return normalized_items
+    return _semantic_format._normalize_statement_block(sys.modules[__name__], items)
 
 
 def _normalize_expr_items(items: list[Expr | None]) -> list[Expr | None]:
-    normalized_items: list[Expr | None] = []
-    for item in items:
-        normalized_items.append(_normalize_expr(item) if item is not None else None)
-    return normalized_items
+    return _semantic_format._normalize_expr_items(sys.modules[__name__], items)
 
 
 def _normalize_expr(expr: Expr) -> Expr:
-    normalized_expr = _normalize_semantic_tree(expr)
-    assert isinstance(normalized_expr, Expr)
-    if _is_redundant_grouped_expr(normalized_expr):
-        inner_expr = normalized_expr.items[0]
-        assert isinstance(inner_expr, Expr)
-        return inner_expr
-    return normalized_expr
+    return _semantic_format._normalize_expr(sys.modules[__name__], expr)
 
 
 def _normalize_delimited_expr(expr: DelimitedExpr) -> DelimitedExpr:
-    normalized_expr = _normalize_semantic_tree(expr)
-    assert isinstance(normalized_expr, DelimitedExpr)
-    return normalized_expr
+    return _semantic_format._normalize_delimited_expr(sys.modules[__name__], expr)
 
 
 def _is_redundant_grouped_expr(expr: Expr) -> bool:
-    return (
-        isinstance(expr, DelimitedExpr)
-        and expr.opener == "("
-        and expr.closer == ")"
-        and len(expr.items) == 1
-        and not expr.separators
-        and expr.items[0] is not None
-    )
+    return _semantic_format._is_redundant_grouped_expr(sys.modules[__name__], expr)
 
 
 @dataclass(slots=True)
@@ -2943,187 +1916,25 @@ def _validate_block(
     issues: list[SemanticIssue],
     *,
     allow_condition_clauses: bool,
+    allow_imports: bool,
     available_symbols: frozenset[str],
     non_premise_symbols: frozenset[str],
     semantic_index: SemanticIndex,
+    current_class: str | None = None,
 ) -> None:
-    current_symbols = set(available_symbols)
-
-    for item in items:
-        if isinstance(item, Heading):
-            if not item.body:
-                issues.append(
-                    SemanticIssue(
-                        message="heading must contain an indented body",
-                        line=item.line,
-                        column=item.column,
-                    )
-                )
-            _validate_block(
-                item.body,
-                issues,
-                allow_condition_clauses=False,
-                available_symbols=frozenset(current_symbols),
-                non_premise_symbols=non_premise_symbols,
-                semantic_index=semantic_index,
-            )
-            continue
-
-        if isinstance(item, Import):
-            if not item.module_path.strip():
-                issues.append(
-                    SemanticIssue(
-                        message="import path must not be empty",
-                        line=item.line,
-                        column=item.column,
-                    )
-                )
-            if item.body:
-                issues.append(
-                    SemanticIssue(
-                        message="import cannot have an indented body",
-                        line=item.line,
-                        column=item.column,
-                    )
-                )
-            continue
-
-        if isinstance(item, ExpandedCondition):
-            if not item.body:
-                issues.append(
-                    SemanticIssue(
-                        message="expanded condition must contain an indented body",
-                        line=item.line,
-                        column=item.column,
-                    )
-                )
-            _validate_condition_body(
-                item.body,
-                issues,
-                available_symbols=frozenset(current_symbols),
-                enforce_target_symbol_flow=item.quantifier == "∀",
-                non_premise_symbols=non_premise_symbols,
-                semantic_index=semantic_index,
-            )
-            continue
-
-        if isinstance(item, Branch):
-            if not allow_condition_clauses:
-                issues.append(
-                    SemanticIssue(
-                        message="branch clause '|-' is only valid inside an expanded condition",
-                        line=item.line,
-                        column=item.column,
-                    )
-                )
-            if not item.body:
-                issues.append(
-                    SemanticIssue(
-                        message="branch clause must contain an indented body",
-                        line=item.line,
-                        column=item.column,
-                    )
-                )
-            _validate_condition_body(
-                item.body,
-                issues,
-                available_symbols=frozenset(
-                    current_symbols
-                    | _statement_exposed_symbols(
-                        item, non_premise_symbols=non_premise_symbols
-                    )
-                ),
-                enforce_target_symbol_flow=False,
-                non_premise_symbols=non_premise_symbols,
-                semantic_index=semantic_index,
-            )
-            continue
-
-        if isinstance(item, Premise):
-            if not allow_condition_clauses:
-                issues.append(
-                    SemanticIssue(
-                        message="premise clause '|' is only valid inside an expanded condition",
-                        line=item.line,
-                        column=item.column,
-                    )
-                )
-            _validate_condition_body(
-                item.body,
-                issues,
-                available_symbols=frozenset(
-                    current_symbols
-                    | _statement_exposed_symbols(
-                        item, non_premise_symbols=non_premise_symbols
-                    )
-                ),
-                enforce_target_symbol_flow=False,
-                non_premise_symbols=non_premise_symbols,
-                semantic_index=semantic_index,
-            )
-            continue
-
-        if isinstance(item, Declaration):
-            if item.input_expr is None or item.output_expr is None:
-                issues.append(
-                    SemanticIssue(
-                        message="declaration signature must contain both input and output expressions",
-                        line=item.line,
-                        column=item.column,
-                    )
-                )
-            _validate_condition_body(
-                item.body,
-                issues,
-                available_symbols=frozenset(
-                    current_symbols
-                    | _statement_exposed_symbols(
-                        item, non_premise_symbols=non_premise_symbols
-                    )
-                ),
-                enforce_target_symbol_flow=False,
-                non_premise_symbols=non_premise_symbols,
-                semantic_index=semantic_index,
-            )
-            current_symbols.update(
-                _statement_exposed_symbols(item, non_premise_symbols=non_premise_symbols)
-            )
-            continue
-
-        if isinstance(item, ExpressionStatement):
-            _validate_block(
-                item.body,
-                issues,
-                allow_condition_clauses=False,
-                available_symbols=frozenset(
-                    current_symbols
-                    | _statement_exposed_symbols(
-                        item, non_premise_symbols=non_premise_symbols
-                    )
-                ),
-                non_premise_symbols=non_premise_symbols,
-                semantic_index=semantic_index,
-            )
-            current_symbols.update(
-                _statement_exposed_symbols(item, non_premise_symbols=non_premise_symbols)
-            )
-            continue
-
-        if isinstance(item, Comment):
-            if item.body:
-                issues.append(
-                    SemanticIssue(
-                        message="comment cannot have an indented body",
-                        line=item.line,
-                        column=item.column,
-                    )
-                )
-            continue
-
-        if isinstance(item, Statement):
-            current_symbols.update(
-                _statement_exposed_symbols(item, non_premise_symbols=non_premise_symbols)
-            )
+    _semantic_validation.validate_block(
+        sys.modules[__name__],
+        items,
+        _semantic_validation.ValidationContext(
+            issues=issues,
+            allow_condition_clauses=allow_condition_clauses,
+            allow_imports=allow_imports,
+            available_symbols=available_symbols,
+            non_premise_symbols=non_premise_symbols,
+            semantic_index=semantic_index,
+            current_class=current_class,
+        ),
+    )
 
 
 def _validate_condition_body(
@@ -3134,239 +1945,18 @@ def _validate_condition_body(
     enforce_target_symbol_flow: bool,
     non_premise_symbols: frozenset[str],
     semantic_index: SemanticIndex,
+    current_class: str | None = None,
 ) -> frozenset[str]:
-    current_symbols = set(available_symbols)
-    branch_end_symbols: list[frozenset[str]] = []
-    index = 0
-
-    while index < len(items):
-        item = items[index]
-        if isinstance(item, Comment):
-            if item.body:
-                issues.append(
-                    SemanticIssue(
-                        message="comment cannot have an indented body",
-                        line=item.line,
-                        column=item.column,
-                    )
-                )
-            index += 1
-            continue
-
-        if isinstance(item, Branch):
-            branches: list[Branch] = []
-            while index < len(items) and isinstance(items[index], Branch):
-                branches.append(items[index])
-                index += 1
-
-            _validate_branch_group(branches, issues)
-
-            prior_branch_exprs: list[Expr] = []
-            for branch in branches:
-                if not branch.body:
-                    issues.append(
-                        SemanticIssue(
-                            message="branch clause must contain an indented body",
-                            line=branch.line,
-                            column=branch.column,
-                        )
-                    )
-                branch_expr = _resolve_branch_premise_expr(branch, prior_branch_exprs)
-                branch_symbols = set(current_symbols) | _collect_expr_exposed_symbols(
-                    branch_expr,
-                    non_premise_symbols=non_premise_symbols,
-                )
-                branch_end_symbols.append(
-                    _validate_condition_body(
-                        branch.body,
-                        issues,
-                        available_symbols=frozenset(branch_symbols),
-                        enforce_target_symbol_flow=enforce_target_symbol_flow,
-                        non_premise_symbols=non_premise_symbols,
-                        semantic_index=semantic_index,
-                    )
-                )
-                if not _is_else_identifier(branch.expression):
-                    prior_branch_exprs.append(branch.expression)
-            continue
-
-        if branch_end_symbols:
-            current_symbols = _merge_branch_symbol_sets(
-                branch_end_symbols,
-                fallback=current_symbols,
-                )
-            branch_end_symbols.clear()
-
-        if isinstance(item, Premise):
-            if _statement_contains_reserved_else(item):
-                _append_reserved_else_issue(item, issues)
-            premise_symbols = set(current_symbols) | _statement_exposed_symbols(
-                item, non_premise_symbols=non_premise_symbols
-            )
-            if item.body:
-                _validate_condition_body(
-                    item.body,
-                    issues,
-                    available_symbols=frozenset(premise_symbols),
-                    enforce_target_symbol_flow=enforce_target_symbol_flow,
-                    non_premise_symbols=non_premise_symbols,
-                    semantic_index=semantic_index,
-                )
-            current_symbols = premise_symbols
-            index += 1
-            continue
-
-        if _statement_contains_reserved_else(item):
-            _append_reserved_else_issue(item, issues)
-
-        target_exprs = (
-            _split_expanded_target_exprs(item.expression)
-            if isinstance(item, ExpressionStatement)
-            else None
-        )
-
-        if enforce_target_symbol_flow:
-            if target_exprs is not None:
-                for target_expr in target_exprs:
-                    missing_symbols = (
-                        _collect_expanded_target_required_symbols(
-                            target_expr,
-                            non_premise_symbols=non_premise_symbols,
-                        )
-                        - current_symbols
-                    )
-                    if missing_symbols:
-                        issues.append(
-                            SemanticIssue(
-                                message=(
-                                    "expanded ∀ target uses symbols not available from prior premises: "
-                                    + ", ".join(sorted(missing_symbols))
-                                ),
-                                line=target_expr.line,
-                                column=target_expr.column,
-                            )
-                        )
-            else:
-                missing_symbols = (
-                    _statement_required_symbols(
-                        item, non_premise_symbols=non_premise_symbols
-                    )
-                    - current_symbols
-                )
-                if missing_symbols:
-                    issues.append(
-                        SemanticIssue(
-                            message=(
-                                "expanded ∀ target uses symbols not available from prior premises: "
-                                + ", ".join(sorted(missing_symbols))
-                            ),
-                            line=item.line,
-                            column=item.column,
-                        )
-                    )
-
-        next_symbols = set(current_symbols)
-        if target_exprs is None:
-            next_symbols.update(
-                _statement_exposed_symbols(item, non_premise_symbols=non_premise_symbols)
-            )
-        else:
-            for target_expr in target_exprs:
-                next_symbols.update(
-                    _collect_expr_exposed_symbols(
-                        target_expr,
-                        non_premise_symbols=non_premise_symbols,
-                    )
-                )
-
-        if isinstance(item, ExpandedCondition):
-            if not item.body:
-                issues.append(
-                    SemanticIssue(
-                        message="expanded condition must contain an indented body",
-                        line=item.line,
-                        column=item.column,
-                    )
-                )
-            _validate_condition_body(
-                item.body,
-                issues,
-                available_symbols=frozenset(next_symbols),
-                enforce_target_symbol_flow=item.quantifier == "∀",
-                non_premise_symbols=non_premise_symbols,
-                semantic_index=semantic_index,
-            )
-        elif isinstance(item, Declaration):
-            if item.input_expr is None or item.output_expr is None:
-                issues.append(
-                    SemanticIssue(
-                        message="declaration signature must contain both input and output expressions",
-                        line=item.line,
-                        column=item.column,
-                    )
-                )
-            _validate_condition_body(
-                item.body,
-                issues,
-                available_symbols=frozenset(next_symbols),
-                enforce_target_symbol_flow=False,
-                non_premise_symbols=non_premise_symbols,
-                semantic_index=semantic_index,
-            )
-        elif isinstance(item, ExpressionStatement):
-            _validate_condition_body(
-                item.body,
-                issues,
-                available_symbols=frozenset(next_symbols),
-                enforce_target_symbol_flow=enforce_target_symbol_flow,
-                non_premise_symbols=non_premise_symbols,
-                semantic_index=semantic_index,
-            )
-        elif isinstance(item, Heading):
-            if not item.body:
-                issues.append(
-                    SemanticIssue(
-                        message="heading must contain an indented body",
-                        line=item.line,
-                        column=item.column,
-                    )
-                )
-            _validate_block(
-                item.body,
-                issues,
-                allow_condition_clauses=False,
-                available_symbols=frozenset(next_symbols),
-                non_premise_symbols=non_premise_symbols,
-                semantic_index=semantic_index,
-            )
-        elif isinstance(item, Import):
-            if not item.module_path.strip():
-                issues.append(
-                    SemanticIssue(
-                        message="import path must not be empty",
-                        line=item.line,
-                        column=item.column,
-                    )
-                )
-            if item.body:
-                issues.append(
-                    SemanticIssue(
-                        message="import cannot have an indented body",
-                        line=item.line,
-                        column=item.column,
-                    )
-                )
-
-        current_symbols = next_symbols
-        index += 1
-
-    if branch_end_symbols:
-        current_symbols = _merge_branch_symbol_sets(
-            branch_end_symbols,
-            fallback=current_symbols,
-        )
-
-    return frozenset(current_symbols)
+    return _semantic_validation.validate_condition_body(
+        sys.modules[__name__],
+        items,
+        issues=issues,
+        available_symbols=available_symbols,
+        enforce_target_symbol_flow=enforce_target_symbol_flow,
+        non_premise_symbols=non_premise_symbols,
+        semantic_index=semantic_index,
+        current_class=current_class,
+    )
 
 
 def _merge_branch_symbol_sets(
@@ -3374,111 +1964,27 @@ def _merge_branch_symbol_sets(
     *,
     fallback: set[str],
 ) -> set[str]:
-    if not branch_sets:
-        return set(fallback)
-    merged = set(branch_sets[0])
-    for branch_set in branch_sets[1:]:
-        merged.intersection_update(branch_set)
-    return merged
+    return _semantic_validation.merge_branch_symbol_sets(branch_sets, fallback=fallback)
 
 
 def _validate_branch_group(branches: list[Branch], issues: list[SemanticIssue]) -> None:
-    else_indexes = [
-        index for index, branch in enumerate(branches) if _is_else_identifier(branch.expression)
-    ]
-    if else_indexes:
-        if len(branches) == 1:
-            issues.append(
-                SemanticIssue(
-                    message="'else' branch requires at least one preceding branch",
-                    line=branches[0].line,
-                    column=branches[0].column,
-                )
-            )
-        first_else = else_indexes[0]
-        if first_else != len(branches) - 1:
-            issues.append(
-                SemanticIssue(
-                    message="'else' branch must be the final branch in its group",
-                    line=branches[first_else].line,
-                    column=branches[first_else].column,
-                )
-            )
-        for extra_else in else_indexes[1:]:
-            issues.append(
-                SemanticIssue(
-                    message="only one 'else' branch is allowed in a branch group",
-                    line=branches[extra_else].line,
-                    column=branches[extra_else].column,
-                )
-            )
-
-    for branch in branches:
-        if _statement_contains_reserved_else(branch):
-            if not _is_else_identifier(branch.expression):
-                _append_reserved_else_issue(branch, issues)
+    _semantic_validation.validate_branch_group(sys.modules[__name__], branches, issues)
 
 
 def _statement_contains_reserved_else(statement: Statement) -> bool:
-    if isinstance(statement, Branch):
-        return _expr_contains_identifier(statement.expression, "else") and not _is_else_identifier(
-            statement.expression
-        )
-    if isinstance(statement, (ExpressionStatement, Premise)):
-        return _expr_contains_identifier(statement.expression, "else")
-    if isinstance(statement, Declaration):
-        return any(
-            _expr_contains_identifier(expr, "else")
-            for expr in (
-                statement.head,
-                statement.alias,
-                statement.input_expr,
-                statement.output_expr,
-            )
-        )
-    return False
+    return _semantic_validation.statement_contains_reserved_else(sys.modules[__name__], statement)
 
 
 def _append_reserved_else_issue(statement: Statement, issues: list[SemanticIssue]) -> None:
-    issues.append(
-        SemanticIssue(
-            message="'else' is reserved for the final branch guard '|- else'",
-            line=statement.line,
-            column=statement.column,
-        )
-    )
+    _semantic_validation.append_reserved_else_issue(sys.modules[__name__], statement, issues)
 
 
 def _expr_contains_identifier(expr: Expr | None, name: str) -> bool:
-    if expr is None:
-        return False
-    if isinstance(expr, IdentifierExpr):
-        return expr.name == name
-    if isinstance(expr, UnaryExpr):
-        return _expr_contains_identifier(expr.operand, name)
-    if isinstance(expr, BinaryExpr):
-        return _expr_contains_identifier(expr.left, name) or _expr_contains_identifier(
-            expr.right, name
-        )
-    if isinstance(expr, (SequenceExpr, DelimitedExpr)):
-        return any(_expr_contains_identifier(item, name) for item in expr.items)
-    if isinstance(expr, AttributeExpr):
-        return _expr_contains_identifier(expr.base, name)
-    if isinstance(expr, CallExpr):
-        return _expr_contains_identifier(expr.callee, name) or any(
-            _expr_contains_identifier(arg, name) for arg in expr.args
-        )
-    if isinstance(expr, IndexExpr):
-        return _expr_contains_identifier(expr.base, name) or _expr_contains_identifier(
-            expr.index, name
-        )
-    if isinstance(expr, QuantifiedExpr):
-        return _expr_contains_identifier(expr.body, name)
-    return False
+    return _semantic_validation.expr_contains_identifier(sys.modules[__name__], expr, name)
 
 
 def _is_else_identifier(expr: Expr) -> bool:
-    return isinstance(expr, IdentifierExpr) and expr.name == "else"
+    return _semantic_validation.is_else_identifier(sys.modules[__name__], expr)
 
 
 def _collect_expanded_target_required_symbols(
@@ -3486,9 +1992,8 @@ def _collect_expanded_target_required_symbols(
     *,
     non_premise_symbols: frozenset[str],
 ) -> set[str]:
-    if isinstance(expr, IdentifierExpr):
-        return set()
-    return _collect_expr_required_symbols(
+    return _semantic_symbols.collect_expanded_target_required_symbols(
+        sys.modules[__name__],
         expr,
         non_premise_symbols=non_premise_symbols,
     )
@@ -3499,32 +2004,51 @@ def _statement_required_symbols(
     *,
     non_premise_symbols: frozenset[str],
 ) -> set[str]:
-    if isinstance(statement, (ExpressionStatement, Premise, Branch)):
-        return _collect_expr_required_symbols(
-            statement.expression,
-            non_premise_symbols=non_premise_symbols,
-        )
+    return _semantic_symbols.statement_required_symbols(
+        sys.modules[__name__],
+        statement,
+        non_premise_symbols=non_premise_symbols,
+    )
 
-    if isinstance(statement, Declaration):
-        symbols: set[str] = set()
-        symbols.update(
-            _collect_expr_required_symbols(
-                statement.alias, non_premise_symbols=non_premise_symbols
-            )
-        )
-        symbols.update(
-            _collect_expr_required_symbols(
-                statement.input_expr, non_premise_symbols=non_premise_symbols
-            )
-        )
-        symbols.update(
-            _collect_expr_required_symbols(
-                statement.output_expr, non_premise_symbols=non_premise_symbols
-            )
-        )
-        return symbols
 
-    return set()
+def _canonical_declared_name(
+    expr: Expr | None,
+    *,
+    current_class: str | None,
+) -> str | None:
+    return _semantic_symbols.canonical_declared_name(
+        sys.modules[__name__],
+        expr,
+        current_class=current_class,
+    )
+
+
+def _declared_symbols_for_expression(
+    expr: Expr,
+    *,
+    current_class: str | None,
+    non_premise_symbols: frozenset[str],
+) -> set[str]:
+    return _semantic_symbols.declared_symbols_for_expression(
+        sys.modules[__name__],
+        expr,
+        current_class=current_class,
+        non_premise_symbols=non_premise_symbols,
+    )
+
+
+def _statement_declared_symbols(
+    statement: Statement,
+    *,
+    current_class: str | None,
+    non_premise_symbols: frozenset[str],
+) -> set[str]:
+    return _semantic_symbols.statement_declared_symbols(
+        sys.modules[__name__],
+        statement,
+        current_class=current_class,
+        non_premise_symbols=non_premise_symbols,
+    )
 
 
 def _statement_exposed_symbols(
@@ -3532,37 +2056,11 @@ def _statement_exposed_symbols(
     *,
     non_premise_symbols: frozenset[str],
 ) -> set[str]:
-    if isinstance(statement, (ExpressionStatement, Premise, Branch)):
-        return _collect_expr_exposed_symbols(
-            statement.expression,
-            non_premise_symbols=non_premise_symbols,
-        )
-
-    if isinstance(statement, Declaration):
-        symbols: set[str] = set()
-        symbols.update(
-            _collect_expr_exposed_symbols(
-                statement.head, non_premise_symbols=non_premise_symbols
-            )
-        )
-        symbols.update(
-            _collect_expr_exposed_symbols(
-                statement.alias, non_premise_symbols=non_premise_symbols
-            )
-        )
-        symbols.update(
-            _collect_expr_exposed_symbols(
-                statement.input_expr, non_premise_symbols=non_premise_symbols
-            )
-        )
-        symbols.update(
-            _collect_expr_exposed_symbols(
-                statement.output_expr, non_premise_symbols=non_premise_symbols
-            )
-        )
-        return symbols
-
-    return set()
+    return _semantic_symbols.statement_exposed_symbols(
+        sys.modules[__name__],
+        statement,
+        non_premise_symbols=non_premise_symbols,
+    )
 
 
 _STATIC_NON_PREMISE_SYMBOLS: Final[frozenset[str]] = frozenset(
@@ -3578,6 +2076,82 @@ _STATIC_NON_PREMISE_SYMBOLS: Final[frozenset[str]] = frozenset(
 _OPAQUE_FUNCTION_NAMES: Final[frozenset[str]] = frozenset({"sum", "condition"})
 
 
+def _collect_module_named_symbols(
+    items: list[Statement],
+    *,
+    semantic_index: SemanticIndex,
+    non_premise_symbols: frozenset[str],
+    current_class: str | None = None,
+) -> list[str]:
+    return _semantic_symbols.collect_module_named_symbols(
+        sys.modules[__name__],
+        items,
+        semantic_index=semantic_index,
+        non_premise_symbols=non_premise_symbols,
+        current_class=current_class,
+    )
+
+
+def collect_semantic_issues_for_file(logic_program: str | Path) -> tuple[Program, list[SemanticIssue]]:
+    modules = load_module_closure(logic_program)
+    non_premise_symbols_by_path: dict[Path, frozenset[str]] = {}
+    semantic_index_by_path: dict[Path, SemanticIndex] = {}
+    named_symbols_by_path: dict[Path, tuple[str, ...]] = {}
+
+    for module in modules:
+        semantic_index = _build_semantic_index(module.program)
+        semantic_index_by_path[module.path] = semantic_index
+        non_premise_symbols = (
+            _STATIC_NON_PREMISE_SYMBOLS
+            | frozenset(semantic_index.class_names)
+            | _collect_enum_symbols(module.program.children())
+        )
+        non_premise_symbols_by_path[module.path] = non_premise_symbols
+        named_symbols_by_path[module.path] = tuple(
+            _collect_module_named_symbols(
+                module.program.items,
+                semantic_index=semantic_index,
+                non_premise_symbols=non_premise_symbols,
+            )
+        )
+
+    full_named_symbols_by_path: dict[Path, frozenset[str]] = {}
+    for module in modules:
+        visible = set(named_symbols_by_path[module.path])
+        for import_stmt in _iter_root_imports(module.program):
+            imported_file = resolve_import_path(module.path.parent, import_stmt.module_path)
+            visible.update(full_named_symbols_by_path.get(imported_file, frozenset()))
+        full_named_symbols_by_path[module.path] = frozenset(visible)
+
+    all_issues: list[SemanticIssue] = []
+    for module in modules:
+        semantic_index = semantic_index_by_path[module.path]
+        non_premise_symbols = non_premise_symbols_by_path[module.path]
+        direct_import_visible: set[str] = set()
+        for import_stmt in _iter_root_imports(module.program):
+            imported_file = resolve_import_path(module.path.parent, import_stmt.module_path)
+            direct_import_visible.update(full_named_symbols_by_path.get(imported_file, frozenset()))
+
+        _validate_block(
+            module.program.children(),
+            all_issues,
+            allow_condition_clauses=False,
+            allow_imports=True,
+            available_symbols=frozenset(direct_import_visible),
+            non_premise_symbols=non_premise_symbols,
+            semantic_index=semantic_index,
+            current_class=None,
+        )
+        _validate_program_semantics(
+            module.program,
+            all_issues,
+            non_premise_symbols=non_premise_symbols,
+            semantic_index=semantic_index,
+        )
+
+    return modules[-1].program, all_issues
+
+
 def _validate_program_semantics(
     root_node: Node,
     issues: list[SemanticIssue],
@@ -3585,25 +2159,13 @@ def _validate_program_semantics(
     non_premise_symbols: frozenset[str],
     semantic_index: SemanticIndex,
 ) -> None:
-    _validate_function_inheritance_relations(issues, semantic_index=semantic_index)
-
-    for statement, in_condition in _walk_statements(root_node, in_condition=False):
-        if not in_condition and _statement_contains_reserved_else(statement):
-            _append_reserved_else_issue(statement, issues)
-
-        for expr in _walk_exprs(statement):
-            if isinstance(expr, BinaryExpr) and _is_custom_operator_alias(expr.operator):
-                _validate_custom_operator_usage(
-                    expr,
-                    issues,
-                    semantic_index=semantic_index,
-                )
-            if isinstance(expr, CallExpr):
-                _validate_call_expression(
-                    expr,
-                    issues,
-                    semantic_index=semantic_index,
-                )
+    _semantic_validation.validate_program_semantics(
+        sys.modules[__name__],
+        root_node,
+        issues,
+        non_premise_symbols=non_premise_symbols,
+        semantic_index=semantic_index,
+    )
 
 
 def _walk_statements(
@@ -3611,26 +2173,11 @@ def _walk_statements(
     *,
     in_condition: bool,
 ) -> Iterator[tuple[Statement, bool]]:
-    if isinstance(node, Program):
-        for item in node.items:
-            yield from _walk_statements(item, in_condition=in_condition)
-        return
-
-    if not isinstance(node, Statement):
-        return
-
-    yield node, in_condition
-
-    child_in_condition = in_condition or isinstance(node, (Condition, Premise, Branch))
-    for child in node.body:
-        yield from _walk_statements(child, in_condition=child_in_condition)
+    yield from _semantic_validation.walk_statements(sys.modules[__name__], node, in_condition=in_condition)
 
 
 def _walk_exprs(node: Node) -> Iterator[Expr]:
-    if isinstance(node, Expr):
-        yield node
-    for child in node.children():
-        yield from _walk_exprs(child)
+    yield from _semantic_validation.walk_exprs(sys.modules[__name__], node)
 
 
 def _validate_function_inheritance_relations(
@@ -3638,34 +2185,11 @@ def _validate_function_inheritance_relations(
     *,
     semantic_index: SemanticIndex,
 ) -> None:
-    for parent_name, child_name in sorted(semantic_index.function_inheritance_relations):
-        parent_shapes = {
-            (signature.input_shape, signature.output_shape)
-            for signature in semantic_index.function_signatures_by_name.get(parent_name, [])
-        }
-        child_shapes = {
-            (signature.input_shape, signature.output_shape)
-            for signature in semantic_index.function_signatures_by_name.get(child_name, [])
-        }
-        if parent_shapes and child_shapes and not parent_shapes.isdisjoint(child_shapes):
-            continue
-
-        line = 1
-        column = 1
-        if semantic_index.function_signatures_by_name.get(child_name):
-            signature = semantic_index.function_signatures_by_name[child_name][0]
-            line = signature.line
-            column = signature.column
-        issues.append(
-            SemanticIssue(
-                message=(
-                    "function inheritance requires matching signatures between "
-                    f"{parent_name} and {child_name}"
-                ),
-                line=line,
-                column=column,
-            )
-        )
+    _semantic_validation.validate_function_inheritance_relations(
+        sys.modules[__name__],
+        issues,
+        semantic_index=semantic_index,
+    )
 
 
 def _validate_custom_operator_usage(
@@ -3674,15 +2198,11 @@ def _validate_custom_operator_usage(
     *,
     semantic_index: SemanticIndex,
 ) -> None:
-    alias_specs = semantic_index.operator_aliases.get(expr.operator, [])
-    if any(signature.call_arity() == 1 or signature.arity == 2 for signature in alias_specs):
-        return
-    issues.append(
-        SemanticIssue(
-            message=f"custom operator {expr.operator!r} has no matching alias declaration",
-            line=expr.line,
-            column=expr.column,
-        )
+    _semantic_validation.validate_custom_operator_usage(
+        sys.modules[__name__],
+        expr,
+        issues,
+        semantic_index=semantic_index,
     )
 
 
@@ -3692,92 +2212,20 @@ def _validate_call_expression(
     *,
     semantic_index: SemanticIndex,
 ) -> None:
-    signatures = _candidate_call_signatures(expr.callee, semantic_index=semantic_index)
-    if not signatures:
-        return
-
-    arg_counts = _call_arg_count_options(expr)
-    if arg_counts is None:
-        matching_signatures = list(signatures)
-    else:
-        matching_signatures = [
-            signature
-            for signature in signatures
-            if signature.call_arity() in arg_counts
-        ]
-    if not matching_signatures:
-        if isinstance(expr.callee, AttributeExpr) and any(
-            signature.call_arity() == 0 for signature in signatures
-        ):
-            return
-        actual_count = len([arg for arg in expr.args if arg is not None])
-        issues.append(
-            SemanticIssue(
-                message=(
-                    f"call arity mismatch: expected "
-                    f"{_format_expected_arities(signatures)}, got {actual_count}"
-                ),
-                line=expr.line,
-                column=expr.column,
-            )
-        )
-        return
-
-    if arg_counts is None:
-        return
-
-    for signature in matching_signatures:
-        violation = _find_subclass_dispatch_violation(
-            expr,
-            signature=signature,
-            semantic_index=semantic_index,
-        )
-        if violation is None:
-            return
-
-    expected_parent_class, actual_child_class = _find_subclass_dispatch_violation(
+    _semantic_validation.validate_call_expression(
+        sys.modules[__name__],
         expr,
-        signature=matching_signatures[0],
+        issues,
         semantic_index=semantic_index,
-    ) or (None, None)
-    if expected_parent_class is None or actual_child_class is None:
-        return
-
-    issues.append(
-        SemanticIssue(
-            message=(
-                "direct subclass-to-parent call dispatch is not allowed; "
-                f"rebind {actual_child_class}-typed symbols to {expected_parent_class}-typed "
-                "symbols before the call"
-            ),
-            line=expr.line,
-            column=expr.column,
-        )
     )
 
 
 def _call_arg_count_options(expr: CallExpr) -> set[int] | None:
-    total = 0
-    for arg in expr.args:
-        if arg is None:
-            continue
-        expanded = _expanded_arg_width(arg)
-        if expanded is None:
-            return None
-        total += expanded
-    return {total}
+    return _semantic_validation.call_arg_count_options(sys.modules[__name__], expr)
 
 
 def _expanded_arg_width(expr: Expr) -> int | None:
-    if (
-        isinstance(expr, UnaryExpr)
-        and expr.operator == "*"
-    ):
-        operand = expr.operand
-        if isinstance(operand, (DelimitedExpr, SequenceExpr)):
-            return len([item for item in operand.items if item is not None])
-        return None
-    return 1
+    return _semantic_validation.expanded_arg_width(sys.modules[__name__], expr)
 
 
 def _candidate_call_signatures(
@@ -3785,57 +2233,15 @@ def _candidate_call_signatures(
     *,
     semantic_index: SemanticIndex,
 ) -> list[SignatureSpec]:
-    if isinstance(callee, IdentifierExpr):
-        if callee.name in _OPAQUE_FUNCTION_NAMES:
-            return []
-        signatures = list(semantic_index.function_signatures_by_name.get(callee.name, []))
-        if _looks_like_class_identifier(callee.name, semantic_index):
-            owner_candidates = [
-                callee.name,
-                *_parent_classes_for(callee.name, semantic_index),
-            ]
-            for owner_class in owner_candidates:
-                signatures.extend(
-                    semantic_index.member_signatures_by_key.get(
-                        (owner_class, "call"),
-                        [],
-                    )
-                )
-        return signatures
-
-    if isinstance(callee, AttributeExpr):
-        receiver_class = _infer_expr_class(
-            callee.base,
-            semantic_index=semantic_index,
-            allow_uppercase_fallback=True,
-        )
-        if receiver_class is not None:
-            signatures: list[SignatureSpec] = []
-            owner_candidates = [receiver_class, *_parent_classes_for(receiver_class, semantic_index)]
-            for owner_class in owner_candidates:
-                signatures.extend(
-                    semantic_index.member_signatures_by_key.get(
-                        (owner_class, callee.attribute),
-                        [],
-                    )
-                )
-            if signatures:
-                return signatures
-
-        fallback_signatures: list[SignatureSpec] = []
-        for (owner_class, member_name), member_signatures in (
-            semantic_index.member_signatures_by_key.items()
-        ):
-            if member_name != callee.attribute:
-                continue
-            fallback_signatures.extend(member_signatures)
-        return fallback_signatures
-
-    return []
+    return _semantic_validation.candidate_call_signatures(
+        sys.modules[__name__],
+        callee,
+        semantic_index=semantic_index,
+    )
 
 
 def _format_expected_arities(signatures: list[SignatureSpec]) -> str:
-    return ", ".join(str(arity) for arity in sorted({sig.call_arity() for sig in signatures}))
+    return _semantic_validation.format_expected_arities(signatures)
 
 
 def _find_subclass_dispatch_violation(
@@ -3844,41 +2250,22 @@ def _find_subclass_dispatch_violation(
     signature: SignatureSpec,
     semantic_index: SemanticIndex,
 ) -> tuple[str, str] | None:
-    expected_classes = signature.call_arg_classes()
-    call_args = [arg for arg in expr.args if arg is not None]
-    for expected_class, arg in zip(expected_classes, call_args):
-        if expected_class is None:
-            continue
-        actual_class = _infer_expr_class(
-            arg,
-            semantic_index=semantic_index,
-            allow_uppercase_fallback=True,
-        )
-        if actual_class is None or actual_class == expected_class:
-            continue
-        if _is_subclass_of(
-            expected_class,
-            actual_class,
-            semantic_index=semantic_index,
-        ):
-            return expected_class, actual_class
-    return None
+    return _semantic_validation.find_subclass_dispatch_violation(
+        sys.modules[__name__],
+        expr,
+        signature=signature,
+        semantic_index=semantic_index,
+    )
 
 
 def _parent_classes_for(
     class_name: str,
     semantic_index: SemanticIndex,
 ) -> tuple[str, ...]:
-    parents_by_child: dict[str, tuple[str, ...]] = {}
-    for parent_class, child_class in semantic_index.class_inheritance_relations:
-        parents_by_child.setdefault(child_class, ())
-        parents_by_child[child_class] = tuple(
-            sorted(set(parents_by_child[child_class]) | {parent_class})
-        )
-    return _reachable_class_relations(
-        parents_by_child,
+    return _semantic_validation.parent_classes_for(
+        sys.modules[__name__],
         class_name,
-        transitive=True,
+        semantic_index,
     )
 
 
@@ -3888,9 +2275,12 @@ def _is_subclass_of(
     *,
     semantic_index: SemanticIndex,
 ) -> bool:
-    if parent_class == child_class:
-        return False
-    return parent_class in _parent_classes_for(child_class, semantic_index)
+    return _semantic_validation.is_subclass_of(
+        sys.modules[__name__],
+        parent_class,
+        child_class,
+        semantic_index=semantic_index,
+    )
 
 
 def _infer_expr_class(
@@ -3899,13 +2289,12 @@ def _infer_expr_class(
     semantic_index: SemanticIndex,
     allow_uppercase_fallback: bool,
 ) -> str | None:
-    if isinstance(expr, IdentifierExpr):
-        return _infer_symbol_class_name(
-            expr.name,
-            semantic_index=semantic_index,
-            allow_uppercase_fallback=allow_uppercase_fallback,
-        )
-    return None
+    return _semantic_validation.infer_expr_class(
+        sys.modules[__name__],
+        expr,
+        semantic_index=semantic_index,
+        allow_uppercase_fallback=allow_uppercase_fallback,
+    )
 
 
 def _infer_symbol_class_name(
@@ -3914,61 +2303,16 @@ def _infer_symbol_class_name(
     semantic_index: SemanticIndex,
     allow_uppercase_fallback: bool,
 ) -> str | None:
-    explicit_classes = {
-        parent_class
-        for parent_class, symbol_name in semantic_index.symbol_inheritance_relations
-        if symbol_name == name
-    }
-    if len(explicit_classes) == 1:
-        return next(iter(explicit_classes))
-
-    candidates = _class_candidates_from_name(name)
-    for candidate in candidates:
-        if candidate in semantic_index.class_names:
-            return candidate
-
-    if allow_uppercase_fallback:
-        for candidate in candidates:
-            if _looks_like_class_identifier(candidate, semantic_index):
-                return candidate
-
-    return None
+    return _semantic_validation.infer_symbol_class_name(
+        sys.modules[__name__],
+        name,
+        semantic_index=semantic_index,
+        allow_uppercase_fallback=allow_uppercase_fallback,
+    )
 
 
 def _class_candidates_from_name(name: str) -> tuple[str, ...]:
-    seen: set[str] = set()
-    pending = [name]
-    candidates: list[str] = []
-
-    while pending:
-        current = pending.pop(0)
-        if not current or current in seen:
-            continue
-        seen.add(current)
-        candidates.append(current)
-
-        trimmed = current.rstrip("'")
-        if trimmed != current:
-            pending.append(trimmed)
-            continue
-
-        digit_trimmed = current.rstrip("0123456789")
-        if digit_trimmed and digit_trimmed != current:
-            pending.append(digit_trimmed)
-
-        if current.endswith("_list") and len(current) > len("_list"):
-            pending.append(current[: -len("_list")])
-
-        if current.endswith("s") and len(current) > 1:
-            pending.append(current[:-1])
-
-        if "_" in current:
-            parts = [part for part in current.split("_") if part]
-            if parts:
-                pending.append(parts[-1])
-                pending.append(parts[0])
-
-    return tuple(candidates)
+    return _semantic_validation.class_candidates_from_name(name)
 
 
 def _collect_expr_required_symbols(
@@ -3976,109 +2320,11 @@ def _collect_expr_required_symbols(
     *,
     non_premise_symbols: frozenset[str],
 ) -> set[str]:
-    if expr is None:
-        return set()
-
-    if isinstance(expr, IdentifierExpr):
-        if expr.name in non_premise_symbols:
-            return set()
-        return {expr.name}
-
-    if isinstance(expr, (NumberExpr, StringExpr, SymbolExpr)):
-        return set()
-
-    if isinstance(expr, UnaryExpr):
-        return _collect_expr_required_symbols(
-            expr.operand, non_premise_symbols=non_premise_symbols
-        )
-
-    if isinstance(expr, BinaryExpr):
-        if expr.operator == "->":
-            bound_symbols = _collect_lambda_bound_symbols(expr.left)
-            return (
-                _collect_expr_required_symbols(
-                    expr.left, non_premise_symbols=non_premise_symbols
-                )
-                - bound_symbols
-            ) | (
-                _collect_expr_required_symbols(
-                    expr.right,
-                    non_premise_symbols=non_premise_symbols | bound_symbols,
-                )
-                - bound_symbols
-            )
-        if expr.operator == "=":
-            return _collect_assignment_target_required_symbols(
-                expr.left, non_premise_symbols=non_premise_symbols
-            ) | _collect_expr_required_symbols(
-                expr.right, non_premise_symbols=non_premise_symbols
-            )
-        return _collect_expr_required_symbols(
-            expr.left, non_premise_symbols=non_premise_symbols
-        ) | _collect_expr_required_symbols(
-            expr.right, non_premise_symbols=non_premise_symbols
-        )
-
-    if isinstance(expr, SequenceExpr):
-        symbols: set[str] = set()
-        for item in expr.items:
-            symbols.update(
-                _collect_expr_required_symbols(
-                    item, non_premise_symbols=non_premise_symbols
-                )
-            )
-        return symbols
-
-    if isinstance(expr, DelimitedExpr):
-        if "|" in expr.separators:
-            return _collect_pipe_delimited_required_symbols(
-                expr, non_premise_symbols=non_premise_symbols
-            )
-        symbols: set[str] = set()
-        for item in expr.items:
-            symbols.update(
-                _collect_expr_required_symbols(
-                    item, non_premise_symbols=non_premise_symbols
-                )
-            )
-        return symbols
-
-    if isinstance(expr, AttributeExpr):
-        if expr.base is None:
-            return set()
-        return _collect_expr_required_symbols(
-            expr.base, non_premise_symbols=non_premise_symbols
-        )
-
-    if isinstance(expr, CallExpr):
-        symbols: set[str] = set()
-        if not isinstance(expr.callee, IdentifierExpr):
-            symbols.update(
-                _collect_expr_required_symbols(
-                    expr.callee, non_premise_symbols=non_premise_symbols
-                )
-            )
-        for arg in expr.args:
-            symbols.update(
-                _collect_expr_required_symbols(
-                    arg, non_premise_symbols=non_premise_symbols
-                )
-            )
-        return symbols
-
-    if isinstance(expr, IndexExpr):
-        return _collect_expr_required_symbols(
-            expr.base, non_premise_symbols=non_premise_symbols
-        ) | _collect_expr_required_symbols(
-            expr.index, non_premise_symbols=non_premise_symbols
-        )
-
-    if isinstance(expr, QuantifiedExpr):
-        return _collect_expr_required_symbols(
-            expr.body, non_premise_symbols=non_premise_symbols
-        )
-
-    return set()
+    return _semantic_symbols.collect_expr_required_symbols(
+        sys.modules[__name__],
+        expr,
+        non_premise_symbols=non_premise_symbols,
+    )
 
 
 def _collect_expr_exposed_symbols(
@@ -4086,107 +2332,11 @@ def _collect_expr_exposed_symbols(
     *,
     non_premise_symbols: frozenset[str],
 ) -> set[str]:
-    if expr is None:
-        return set()
-
-    if isinstance(expr, IdentifierExpr):
-        if expr.name in non_premise_symbols:
-            return set()
-        return {expr.name}
-
-    if isinstance(expr, (NumberExpr, StringExpr, SymbolExpr)):
-        return set()
-
-    if isinstance(expr, UnaryExpr):
-        return _collect_expr_exposed_symbols(
-            expr.operand, non_premise_symbols=non_premise_symbols
-        )
-
-    if isinstance(expr, BinaryExpr):
-        if expr.operator == "->":
-            bound_symbols = _collect_lambda_bound_symbols(expr.left)
-            return (
-                _collect_expr_exposed_symbols(
-                    expr.left, non_premise_symbols=non_premise_symbols
-                )
-                - bound_symbols
-            ) | (
-                _collect_expr_exposed_symbols(
-                    expr.right,
-                    non_premise_symbols=non_premise_symbols | bound_symbols,
-                )
-                - bound_symbols
-            )
-        if expr.operator == "=":
-            return _collect_assignment_target_exposed_symbols(
-                expr.left, non_premise_symbols=non_premise_symbols
-            ) | _collect_expr_exposed_symbols(
-                expr.right, non_premise_symbols=non_premise_symbols
-            )
-        return _collect_expr_exposed_symbols(
-            expr.left, non_premise_symbols=non_premise_symbols
-        ) | _collect_expr_exposed_symbols(
-            expr.right, non_premise_symbols=non_premise_symbols
-        )
-
-    if isinstance(expr, SequenceExpr):
-        symbols: set[str] = set()
-        for item in expr.items:
-            symbols.update(
-                _collect_expr_exposed_symbols(
-                    item, non_premise_symbols=non_premise_symbols
-                )
-            )
-        return symbols
-
-    if isinstance(expr, DelimitedExpr):
-        symbols: set[str] = set()
-        for item in expr.items:
-            symbols.update(
-                _collect_expr_exposed_symbols(
-                    item, non_premise_symbols=non_premise_symbols
-                )
-            )
-        return symbols
-
-    if isinstance(expr, AttributeExpr):
-        if expr.base is None:
-            return set()
-        return _collect_expr_exposed_symbols(
-            expr.base, non_premise_symbols=non_premise_symbols
-        )
-
-    if isinstance(expr, CallExpr):
-        symbols: set[str] = set()
-        if isinstance(expr.callee, IdentifierExpr):
-            symbols.add(expr.callee.name)
-        else:
-            symbols.update(
-                _collect_expr_exposed_symbols(
-                    expr.callee, non_premise_symbols=non_premise_symbols
-                )
-            )
-        for arg in expr.args:
-            symbols.update(
-                _collect_expr_exposed_symbols(
-                    arg, non_premise_symbols=non_premise_symbols
-                )
-            )
-        return symbols
-
-    if isinstance(expr, IndexExpr):
-        return _collect_expr_exposed_symbols(
-            expr.base, non_premise_symbols=non_premise_symbols
-        ) | _collect_expr_exposed_symbols(
-            expr.index, non_premise_symbols=non_premise_symbols
-        )
-
-    if isinstance(expr, QuantifiedExpr):
-        return _collect_expr_exposed_symbols(
-            expr.body, non_premise_symbols=non_premise_symbols
-        )
-
-    return set()
+    return _semantic_symbols.collect_expr_exposed_symbols(
+        sys.modules[__name__],
+        expr,
+        non_premise_symbols=non_premise_symbols,
+    )
 
 
 def _collect_assignment_target_required_symbols(
@@ -4194,55 +2344,11 @@ def _collect_assignment_target_required_symbols(
     *,
     non_premise_symbols: frozenset[str],
 ) -> set[str]:
-    if isinstance(expr, IdentifierExpr):
-        return set()
-
-    if isinstance(expr, AttributeExpr):
-        if expr.base is None:
-            return set()
-        return _collect_expr_required_symbols(
-            expr.base, non_premise_symbols=non_premise_symbols
-        )
-
-    if isinstance(expr, CallExpr):
-        symbols: set[str] = set()
-        if not isinstance(expr.callee, IdentifierExpr):
-            symbols.update(
-                _collect_expr_required_symbols(
-                    expr.callee, non_premise_symbols=non_premise_symbols
-                )
-            )
-        for arg in expr.args:
-            symbols.update(
-                _collect_expr_required_symbols(
-                    arg, non_premise_symbols=non_premise_symbols
-                )
-            )
-        return symbols
-
-    if isinstance(expr, IndexExpr):
-        return _collect_expr_required_symbols(
-            expr.base, non_premise_symbols=non_premise_symbols
-        ) | _collect_expr_required_symbols(
-            expr.index, non_premise_symbols=non_premise_symbols
-        )
-
-    if isinstance(expr, BinaryExpr) and expr.operator == "->":
-        bound_symbols = _collect_lambda_bound_symbols(expr.left)
-        return (
-            _collect_assignment_target_required_symbols(
-                expr.left, non_premise_symbols=non_premise_symbols
-            )
-            - bound_symbols
-        ) | (
-            _collect_expr_required_symbols(
-                expr.right,
-                non_premise_symbols=non_premise_symbols | bound_symbols,
-            )
-            - bound_symbols
-        )
-
-    return _collect_expr_required_symbols(expr, non_premise_symbols=non_premise_symbols)
+    return _semantic_symbols.collect_assignment_target_required_symbols(
+        sys.modules[__name__],
+        expr,
+        non_premise_symbols=non_premise_symbols,
+    )
 
 
 def _collect_assignment_target_exposed_symbols(
@@ -4250,59 +2356,25 @@ def _collect_assignment_target_exposed_symbols(
     *,
     non_premise_symbols: frozenset[str],
 ) -> set[str]:
-    if isinstance(expr, IdentifierExpr):
-        if expr.name in non_premise_symbols:
-            return set()
-        return {expr.name}
+    return _semantic_symbols.collect_assignment_target_exposed_symbols(
+        sys.modules[__name__],
+        expr,
+        non_premise_symbols=non_premise_symbols,
+    )
 
-    if isinstance(expr, AttributeExpr):
-        if expr.base is None:
-            return set()
-        return _collect_expr_exposed_symbols(
-            expr.base, non_premise_symbols=non_premise_symbols
-        )
 
-    if isinstance(expr, CallExpr):
-        symbols: set[str] = set()
-        if isinstance(expr.callee, IdentifierExpr):
-            symbols.add(expr.callee.name)
-        else:
-            symbols.update(
-                _collect_expr_exposed_symbols(
-                    expr.callee, non_premise_symbols=non_premise_symbols
-                )
-            )
-        for arg in expr.args:
-            symbols.update(
-                _collect_expr_exposed_symbols(
-                    arg, non_premise_symbols=non_premise_symbols
-                )
-            )
-        return symbols
-
-    if isinstance(expr, IndexExpr):
-        return _collect_expr_exposed_symbols(
-            expr.base, non_premise_symbols=non_premise_symbols
-        ) | _collect_expr_exposed_symbols(
-            expr.index, non_premise_symbols=non_premise_symbols
-        )
-
-    if isinstance(expr, BinaryExpr) and expr.operator == "->":
-        bound_symbols = _collect_lambda_bound_symbols(expr.left)
-        return (
-            _collect_assignment_target_exposed_symbols(
-                expr.left, non_premise_symbols=non_premise_symbols
-            )
-            - bound_symbols
-        ) | (
-            _collect_expr_exposed_symbols(
-                expr.right,
-                non_premise_symbols=non_premise_symbols | bound_symbols,
-            )
-            - bound_symbols
-        )
-
-    return _collect_expr_exposed_symbols(expr, non_premise_symbols=non_premise_symbols)
+def _collect_assignment_target_declared_symbols(
+    expr: Expr,
+    *,
+    current_class: str | None,
+    non_premise_symbols: frozenset[str],
+) -> set[str]:
+    return _semantic_symbols.collect_assignment_target_declared_symbols(
+        sys.modules[__name__],
+        expr,
+        current_class=current_class,
+        non_premise_symbols=non_premise_symbols,
+    )
 
 
 def _collect_pipe_delimited_required_symbols(
@@ -4310,38 +2382,11 @@ def _collect_pipe_delimited_required_symbols(
     *,
     non_premise_symbols: frozenset[str],
 ) -> set[str]:
-    required: set[str] = set()
-    available: set[str] = set()
-    condition_segments, target_segment = _canonicalize_pipe_segments(
-        _split_condition_segments(expr)
+    return _semantic_symbols.collect_pipe_delimited_required_symbols(
+        sys.modules[__name__],
+        expr,
+        non_premise_symbols=non_premise_symbols,
     )
-
-    for segment in condition_segments:
-        if not segment:
-            continue
-        item = _merge_segment_expr(segment)
-        required.update(
-            _collect_premise_required_symbols(
-                item, non_premise_symbols=non_premise_symbols
-            )
-            - available
-        )
-        available.update(
-            _collect_expr_exposed_symbols(
-                item, non_premise_symbols=non_premise_symbols
-            )
-        )
-
-    if target_segment:
-        item = _merge_segment_expr(target_segment)
-        required.update(
-            _collect_premise_required_symbols(
-                item, non_premise_symbols=non_premise_symbols
-            )
-            - available
-        )
-
-    return required
 
 
 def _collect_premise_required_symbols(
@@ -4349,107 +2394,11 @@ def _collect_premise_required_symbols(
     *,
     non_premise_symbols: frozenset[str],
 ) -> set[str]:
-    if expr is None:
-        return set()
-
-    if isinstance(expr, IdentifierExpr):
-        return set()
-
-    if isinstance(expr, (NumberExpr, StringExpr, SymbolExpr)):
-        return set()
-
-    if isinstance(expr, UnaryExpr):
-        return _collect_premise_required_symbols(
-            expr.operand, non_premise_symbols=non_premise_symbols
-        )
-
-    if isinstance(expr, BinaryExpr):
-        if expr.operator == "->":
-            bound_symbols = _collect_lambda_bound_symbols(expr.left)
-            return (
-                _collect_premise_target_required_symbols(
-                    expr.left, non_premise_symbols=non_premise_symbols
-                )
-                - bound_symbols
-            ) | (
-                _collect_premise_required_symbols(
-                    expr.right,
-                    non_premise_symbols=non_premise_symbols | bound_symbols,
-                )
-                - bound_symbols
-            )
-        if expr.operator in {"=", "∈", "∉", "!∈", "!∉", "is", "~"}:
-            return _collect_premise_target_required_symbols(
-                expr.left, non_premise_symbols=non_premise_symbols
-            ) | _collect_premise_required_symbols(
-                expr.right, non_premise_symbols=non_premise_symbols
-            )
-        return _collect_premise_required_symbols(
-            expr.left, non_premise_symbols=non_premise_symbols
-        ) | _collect_premise_required_symbols(
-            expr.right, non_premise_symbols=non_premise_symbols
-        )
-
-    if isinstance(expr, SequenceExpr):
-        symbols: set[str] = set()
-        for item in expr.items:
-            symbols.update(
-                _collect_premise_required_symbols(
-                    item, non_premise_symbols=non_premise_symbols
-                )
-            )
-        return symbols
-
-    if isinstance(expr, DelimitedExpr):
-        if "|" in expr.separators:
-            return _collect_pipe_delimited_required_symbols(
-                expr, non_premise_symbols=non_premise_symbols
-            )
-        symbols: set[str] = set()
-        for item in expr.items:
-            symbols.update(
-                _collect_premise_required_symbols(
-                    item, non_premise_symbols=non_premise_symbols
-                )
-            )
-        return symbols
-
-    if isinstance(expr, AttributeExpr):
-        if expr.base is None:
-            return set()
-        return _collect_premise_required_symbols(
-            expr.base, non_premise_symbols=non_premise_symbols
-        )
-
-    if isinstance(expr, CallExpr):
-        symbols: set[str] = set()
-        if not isinstance(expr.callee, IdentifierExpr):
-            symbols.update(
-                _collect_premise_required_symbols(
-                    expr.callee, non_premise_symbols=non_premise_symbols
-                )
-            )
-        for arg in expr.args:
-            symbols.update(
-                _collect_premise_required_symbols(
-                    arg, non_premise_symbols=non_premise_symbols
-                )
-            )
-        return symbols
-
-    if isinstance(expr, IndexExpr):
-        return _collect_premise_required_symbols(
-            expr.base, non_premise_symbols=non_premise_symbols
-        ) | _collect_premise_required_symbols(
-            expr.index, non_premise_symbols=non_premise_symbols
-        )
-
-    if isinstance(expr, QuantifiedExpr):
-        return _collect_premise_required_symbols(
-            expr.body, non_premise_symbols=non_premise_symbols
-        )
-
-    return set()
+    return _semantic_symbols.collect_premise_required_symbols(
+        sys.modules[__name__],
+        expr,
+        non_premise_symbols=non_premise_symbols,
+    )
 
 
 def _collect_premise_target_required_symbols(
@@ -4457,87 +2406,23 @@ def _collect_premise_target_required_symbols(
     *,
     non_premise_symbols: frozenset[str],
 ) -> set[str]:
-    if isinstance(expr, IdentifierExpr):
-        return set()
-
-    if isinstance(expr, AttributeExpr):
-        if expr.base is None:
-            return set()
-        return _collect_premise_target_required_symbols(
-            expr.base, non_premise_symbols=non_premise_symbols
-        )
-
-    if isinstance(expr, CallExpr):
-        symbols: set[str] = set()
-        if not isinstance(expr.callee, IdentifierExpr):
-            symbols.update(
-                _collect_premise_target_required_symbols(
-                    expr.callee, non_premise_symbols=non_premise_symbols
-                )
-            )
-        for arg in expr.args:
-            symbols.update(
-                _collect_premise_required_symbols(
-                    arg, non_premise_symbols=non_premise_symbols
-                )
-            )
-        return symbols
-
-    if isinstance(expr, IndexExpr):
-        return _collect_premise_target_required_symbols(
-            expr.base, non_premise_symbols=non_premise_symbols
-        ) | _collect_premise_required_symbols(
-            expr.index, non_premise_symbols=non_premise_symbols
-        )
-
-    if isinstance(expr, BinaryExpr) and expr.operator == "->":
-        bound_symbols = _collect_lambda_bound_symbols(expr.left)
-        return (
-            _collect_premise_target_required_symbols(
-                expr.left, non_premise_symbols=non_premise_symbols
-            )
-            - bound_symbols
-        ) | (
-            _collect_premise_required_symbols(
-                expr.right,
-                non_premise_symbols=non_premise_symbols | bound_symbols,
-            )
-            - bound_symbols
-        )
-
-    return _collect_premise_required_symbols(
-        expr, non_premise_symbols=non_premise_symbols
+    return _semantic_symbols.collect_premise_target_required_symbols(
+        sys.modules[__name__],
+        expr,
+        non_premise_symbols=non_premise_symbols,
     )
 
 
 def _collect_enum_symbols(items: list[Node]) -> frozenset[str]:
-    enum_symbols: set[str] = set()
-    for item in items:
-        enum_symbols.update(_collect_node_enum_symbols(item))
-    return frozenset(enum_symbols)
+    return _semantic_symbols.collect_enum_symbols(sys.modules[__name__], items)
 
 
 def _collect_node_enum_symbols(node: Node) -> set[str]:
-    enum_symbols: set[str] = set()
-
-    if isinstance(node, ExpressionStatement):
-        enum_symbols.update(_extract_enum_members(node.expression))
-
-    for child in node.children():
-        enum_symbols.update(_collect_node_enum_symbols(child))
-
-    return enum_symbols
+    return _semantic_symbols._collect_node_enum_symbols(sys.modules[__name__], node)
 
 
 def _extract_enum_members(expr: Expr | None) -> set[str]:
-    if not isinstance(expr, BinaryExpr):
-        return set()
-
-    definition = _extract_enum_definition(expr)
-    if definition is None:
-        return set()
-    _, member_names = definition
-    return member_names
+    return _semantic_symbols.extract_enum_members(sys.modules[__name__], expr)
 
 
 def semantic_parser(token_stream: TokenStream) -> Program:
@@ -4556,15 +2441,12 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     try:
-        token_stream = tokenizer(args.logic_program)
-        root_node = semantic_parser(token_stream)
-    except (TokenizerError, ParserError) as exc:
+        root_node, issues = collect_semantic_issues_for_file(args.logic_program)
+    except (OSError, ValueError, TokenizerError, ParserError) as exc:
         print(exc, file=sys.stderr)
         return 1
 
     pprint.pp(root_node)
-
-    issues = root_node.collect_semantic_issues()
     if issues:
         print(f"semantic check: failed ({len(issues)} issues)", file=sys.stderr)
         for issue in issues:
