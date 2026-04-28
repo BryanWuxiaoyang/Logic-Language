@@ -70,7 +70,7 @@ for the logic language skill in this repo, I want to ground the logic-language t
 # Describe `module-signature`
 - introduce `module-signature` as the module-file-level validation environment for modules parsed from a `module-file`.
 - The `module-signature` includes
-  - `intrinsic-syms`: `tuple`, `set`, `function`, `value`, `null`, `true`, `false`, `bool`
+  - `intrinsic-syms`: `tuple`, `set`, `function`, `value`, `true`, `false`, `bool`
   - `function-syms`
   - `built-in-forms` includes form categories accepted by `module-text`.
     - literal forms: set-comprehension, tuple-comprehension, set-literals, tuple-literals, numeric-literals
@@ -556,27 +556,69 @@ for the logic language skill in this repo, I want to ground the logic-language t
 - introduce `latex-translation` that translates all `latex-code` into symbols
     - full rules are in `./logic-language-latex.json`
 
-- introduce `null` as an intrinsic symbol
-    `F(sym) = null` represents a `predicate-statement` on `sym` that `sym` doesn't satisfy any input-constraint declared on `F` 
+- introduce `null` as a syntax-sugar
+    - `F(args) = null` is a `predicate-statement`, not a normal output value.
+    - it means `args` is outside every declared input domain of `F`.
+    - declared input domain uses each `F` declaration's input class constraints and `PSs`; it does not use output constraints or `TSs`.
+    - all declarations named `F` contribute to the domain check.
     M(
     "
-    F: sym1_c~sym1 => sym2_c~sym2
-        | sym1 = sym3
-    F: sym1_c'~sym1 => sym2_c'~sym2
-        | sym1 = sym4
-    | sym'
-    F(sym') = null
-    "      
+    F: in_c~in => out_c~out
+        | PS
+        TS
+    | arg
+    F(arg) = null
+    "
     ) = M(
     "
-    F: sym1_c~sym1 => sym2_c~sym2
-        | sym1 = sym3
-    F: sym1_c'~sym1 => sym2_c'~sym2
-        | sym1 = sym4
-    | sym'
-    !((sym1_c~sym1 ^ sym1 = sym3) || (sym1_c'~sym1 ^ sym1 = sym4))
+    F: in_c~in => out_c~out
+        | PS
+        TS
+    | arg
+    ¬∃{| in | in = arg, in_c~in, PS}
     "
     )
+    M(
+    "
+    F: in_c~in => out_c~out
+        | PS
+        TS
+    F: in_c'~in' => out_c'~out'
+        | PS'
+        TS'
+    | arg
+    F(arg) = null
+    "
+    ) = M(
+    "
+    F: in_c~in => out_c~out
+        | PS
+        TS
+    F: in_c'~in' => out_c'~out'
+        | PS'
+        TS'
+    | arg
+    ¬(
+        ∃{| in | in = arg, in_c~in, PS}
+        ||
+        ∃{| in' | in' = arg, in_c'~in', PS'}
+    )
+    "
+    )
+    M(
+    "
+    F: in_c~in => out_c~out
+        | PS
+        out = null
+    "
+    ) = M(
+    "
+    F: in_c~in => out_c~out
+        | PS
+        F(in) = null
+    "
+    )
+    `null` does not imply any output class predicate such as `out_c~null`.
 
 # Describe module-file
 - introduce `module-file`. Each `.lp` is a `module-file`.
