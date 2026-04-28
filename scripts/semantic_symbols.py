@@ -33,7 +33,7 @@ def statement_required_symbols(lp, statement, *, non_premise_symbols: frozenset[
 
     if isinstance(statement, lp.Declaration):
         symbols: set[str] = set()
-        for expr in (statement.alias, statement.input_expr, statement.output_expr):
+        for expr in (statement.input_expr, statement.output_expr):
             symbols.update(collect_expr_required_symbols(lp, expr, non_premise_symbols=non_premise_symbols))
         return symbols
 
@@ -104,9 +104,6 @@ def statement_declared_symbols(
         head_name = canonical_declared_name(lp, statement.head, current_class=current_class)
         if head_name is not None and head_name not in lp._STATIC_NON_PREMISE_SYMBOLS:
             declared.add(head_name)
-        alias_name = lp._extract_alias_name(statement.alias)
-        if alias_name is not None and alias_name not in lp._STATIC_NON_PREMISE_SYMBOLS:
-            declared.add(alias_name)
         return declared
 
     if isinstance(statement, lp.ExpressionStatement):
@@ -126,7 +123,7 @@ def statement_exposed_symbols(lp, statement, *, non_premise_symbols: frozenset[s
 
     if isinstance(statement, lp.Declaration):
         symbols: set[str] = set()
-        for expr in (statement.head, statement.alias, statement.input_expr, statement.output_expr):
+        for expr in (statement.head, statement.input_expr, statement.output_expr):
             symbols.update(collect_expr_exposed_symbols(lp, expr, non_premise_symbols=non_premise_symbols))
         return symbols
 
@@ -188,17 +185,7 @@ def collect_module_named_symbols(
                     )
                 )
         elif isinstance(item, lp.Declaration):
-            child_class = lp._declaration_owner_class(item, current_class=current_class) or current_class
-            if child_class is not None and item.body:
-                append_names(
-                    collect_module_named_symbols(
-                        lp,
-                        item.body,
-                        semantic_index=semantic_index,
-                        non_premise_symbols=non_premise_symbols,
-                        current_class=child_class,
-                    )
-                )
+            continue
 
     return ordered_names
 

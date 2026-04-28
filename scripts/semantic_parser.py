@@ -1119,7 +1119,7 @@ class SemanticParser:
     branch             ::= "|-" expression
     premise            ::= "|" expression
     declaration        ::= declaration_head ":" signature
-    declaration_head   ::= ε | expression [ "(" expression ")" ]  # alias form
+    declaration_head   ::= ε | expression
     signature          ::= expression "=>" expression
     expression_statement ::= expression
 
@@ -1375,16 +1375,24 @@ class SemanticParser:
         head_expr = _LineExpressionParser(head_tokens).parse_optional()
         input_expr = _LineExpressionParser(input_tokens).parse_optional()
         output_expr = _LineExpressionParser(output_tokens).parse_optional()
-        base_head, alias = _split_declaration_head(head_expr)
+        if _is_declaration_alias_head_syntax(head_expr):
+            self._raise_error(
+                start,
+                (
+                    "declaration alias syntax is no longer supported; "
+                    "rewrite `func(alias): in => out` as `func: in => out` "
+                    "followed by `alias = func`"
+                ),
+            )
 
         return Declaration(
-            head=base_head,
+            head=head_expr,
             input_expr=input_expr,
             output_expr=output_expr,
             body=body,
             line=start.line,
             column=start.column,
-            alias=alias,
+            alias=None,
             trailing_comment=trailing_comment,
         )
 
@@ -1723,6 +1731,15 @@ class _LineExpressionParser:
                 expecting_item = True
                 next_item_pipe_prefixed = False
                 continue
+            if (
+                "," in separators
+                and previous is not None
+                and token.line > previous.line
+            ):
+                seen_separators.append(",")
+                expecting_item = True
+                next_item_pipe_prefixed = False
+                continue
             self._raise_error(token, f"expected separator or closing {closer!r}")
 
     def _parse_sequence(self, first: Expr) -> SequenceExpr:
@@ -1873,16 +1890,22 @@ def _find_top_level_symbol(tokens: list[Token], value: str) -> int | None:
     return None
 
 
-def _split_declaration_head(head: Expr | None) -> tuple[Expr | None, Expr | None]:
-    if not isinstance(head, CallExpr):
-        return head, None
-    if head.delimiter != "()":
-        return head, None
-    if len(head.args) != 1:
-        return head, None
-    if not isinstance(head.callee, (IdentifierExpr, AttributeExpr, SymbolExpr)):
-        return head, None
-    return head.callee, head.args[0]
+def _is_declaration_alias_head_syntax(head: Expr | None) -> bool:
+    def is_alias_call(expr: Expr | None) -> bool:
+        return (
+            isinstance(expr, CallExpr)
+            and expr.delimiter == "()"
+            and len(expr.args) == 1
+            and isinstance(expr.callee, (IdentifierExpr, AttributeExpr, SymbolExpr))
+        )
+
+    if is_alias_call(head):
+        return True
+    return (
+        isinstance(head, BinaryExpr)
+        and head.operator == "::"
+        and is_alias_call(head.right)
+    )
 
 
 def _collect_lambda_bound_symbols(expr: Expr | None) -> frozenset[str]:

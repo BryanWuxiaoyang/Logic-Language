@@ -77,12 +77,6 @@ def _format_statement_lines(lp, statement, *, indent: int) -> list[str]:
 
 def _format_declaration(lp, statement) -> str:
     head = "" if statement.head is None else _format_expr(lp, statement.head)
-    if statement.alias is not None:
-        head = (
-            f"{head}({_format_expr(lp, statement.alias)})"
-            if head
-            else _format_expr(lp, statement.alias)
-        )
 
     input_expr = _format_expr(lp, statement.input_expr) if statement.input_expr else ""
     output_expr = _format_expr(lp, statement.output_expr) if statement.output_expr else ""

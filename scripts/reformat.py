@@ -561,11 +561,6 @@ def _format_declaration(statement: lp_parser.Declaration) -> str:
     else:
         head = _format_expr(statement.head)
 
-    if statement.alias is not None:
-        head = f"{head}({_format_expr(statement.alias)})" if head else _format_expr(
-            statement.alias
-        )
-
     input_expr = _format_expr(statement.input_expr) if statement.input_expr else ""
     output_expr = _format_expr(statement.output_expr) if statement.output_expr else ""
     return f"{head}: {input_expr} => {output_expr}".strip()
@@ -581,11 +576,6 @@ def _format_declaration_lines(
         head = ""
     else:
         head = _format_expr(statement.head)
-
-    if statement.alias is not None:
-        head = f"{head}({_format_expr(statement.alias)})" if head else _format_expr(
-            statement.alias
-        )
 
     input_expr = _format_expr(statement.input_expr) if statement.input_expr else ""
     output_lines = _format_expr_lines(statement.output_expr, indent=indent)

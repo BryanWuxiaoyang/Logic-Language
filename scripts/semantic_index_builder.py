@@ -122,14 +122,8 @@ def seed_declared_entities(lp, node, semantic_index, *, current_class: str | Non
                     lp._register_member_name(semantic_index, owner_class, "call")
             elif isinstance(item.head, lp.IdentifierExpr):
                 semantic_index.function_names.add(item.head.name)
-                alias_name = lp._extract_alias_name(item.alias)
-                if alias_name is not None:
-                    semantic_index.function_names.add(alias_name)
             elif isinstance(item.head, lp.SymbolExpr):
                 semantic_index.function_names.add(item.head.value)
-                alias_name = lp._extract_alias_name(item.alias)
-                if alias_name is not None:
-                    semantic_index.function_names.add(alias_name)
 
             _seed_signature_class_candidates(lp, item.input_expr, semantic_index)
             _seed_signature_class_candidates(lp, item.output_expr, semantic_index)
@@ -178,8 +172,6 @@ def scan_semantic_relations(
                     semantic_index.member_signatures_by_key.setdefault((owner_class, signature.name), []).append(signature)
                 if lp._is_operator_alias(signature.name):
                     semantic_index.operator_aliases.setdefault(signature.name, []).append(signature)
-                if signature.alias is not None and lp._is_operator_alias(signature.alias):
-                    semantic_index.operator_aliases.setdefault(signature.alias, []).append(signature)
 
         if isinstance(item, lp.ExpressionStatement):
             state = _scan_expression_statement(lp, item, semantic_index, state)
@@ -338,7 +330,6 @@ def build_signature_spec(lp, statement, *, semantic_index, owner_class):
     else:
         return None
 
-    alias = extract_alias_name(lp, statement.alias)
     return lp.SignatureSpec(
         name=name,
         input_shape=lp._format_expr(statement.input_expr),
@@ -350,7 +341,7 @@ def build_signature_spec(lp, statement, *, semantic_index, owner_class):
             semantic_index=semantic_index,
         ),
         owner_class=owner_class,
-        alias=alias,
+        alias=None,
         line=statement.line,
         column=statement.column,
     )

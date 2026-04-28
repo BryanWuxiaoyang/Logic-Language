@@ -1127,28 +1127,35 @@ is identical to:
 
 ## 7.1 Alias Function Name
 
-A function may have an alias name or operator.
-The alias is wrapped in parentheses after the full name.
+Alias syntax in declaration heads is invalid.
 
-Example:
+The following form is no longer supported:
 
 ```text
 full_name_function(short_name_f): in_arg => out_arg
 ```
 
-Then both the full name and the alias may be used to refer to the function.
+Use an explicit equality alias instead:
 
-Operator characters may also be used as function names, overloading an
-intrinsic operator.
+```text
+full_name_function: in_arg => out_arg
+short_name_f = full_name_function
+```
 
-Example:
+Operator aliasing follows the same rule.
 
 ```text
 A
-    ::add(+): (A, A1) => A2
+    ::add: (A, A1) => A2
+    ::+ = ::add
 ```
 
-This overloads `+`, so `A + A1` may be used to refer to `A.add(A1)`.
+Equivalent top-level member form:
+
+```text
+A::add: (A, A1) => A2
+A::+ = A::add
+```
 
 
 ## 7.2 Lambda Function

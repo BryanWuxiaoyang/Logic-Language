@@ -161,8 +161,17 @@ def _declaration_symbol_name(
     return _expr_symbol_name(declaration.head)
 
 
-def _condition_from_quantified_expression(expr: QuantifiedExpr) -> Condition:
+def _is_quantified_condition_expr(expr: Expr) -> bool:
+    if isinstance(expr, QuantifiedExpr):
+        return True
+    text = program_to_source(expr).lstrip()
+    return text.startswith(("∀{", "∃{", r"\all{", r"\exists{"))
+
+
+def _condition_from_quantified_expression(expr: Expr) -> Condition:
     text = program_to_source(expr)
+    text = re.sub(r"^\\all(?=\{)", "∀", text)
+    text = re.sub(r"^\\exists(?=\{)", "∃", text)
     return parse_condition_text(text)
 
 
@@ -261,6 +270,20 @@ def _expand_condition_items(
             continue
 
         if isinstance(item, ExpressionStatement):
+            if _is_quantified_condition_expr(item.expression):
+                quantified_condition = _condition_from_quantified_expression(item.expression)
+                nested_emitted, _ = _expand_condition_items(
+                    quantified_condition.body,
+                    states=active_states,
+                    quantifier=quantified_condition.quantifier,
+                )
+                emitted_conditions.extend(nested_emitted)
+                active_states = [
+                    state + [copy.deepcopy(quantified_condition)] for state in active_states
+                ]
+                index += 1
+                continue
+
             next_states: list[list[Statement]] = []
             target_exprs = _split_expanded_target_exprs(item.expression)
             for state in active_states:
@@ -444,7 +467,21 @@ def _expand_declaration_conditions(
 
 def _append_conditions(target: list[str], conditions: list[Condition]) -> None:
     for condition in conditions:
+        if _condition_is_member_declaration_only(condition):
+            continue
         target.append(program_to_source(condition))
+
+
+def _condition_is_member_declaration_only(condition: Condition) -> bool:
+    if not condition.body:
+        return False
+    target = condition.body[-1]
+    if not isinstance(target, ExpressionStatement) or target.body:
+        return False
+    expr = target.expression
+    if isinstance(expr, AttributeExpr):
+        return expr.base is None
+    return isinstance(expr, BinaryExpr) and expr.operator == "::"
 
 
 def _statement_is_declaration_only(
@@ -527,8 +564,8 @@ def _analyze_module(module: LoadedModule) -> tuple[list[str], list[str], list[st
             _append_conditions(conds, conditions)
             return
 
-        if isinstance(statement, ExpressionStatement) and isinstance(
-            statement.expression, QuantifiedExpr
+        if isinstance(statement, ExpressionStatement) and _is_quantified_condition_expr(
+            statement.expression
         ):
             quantified_condition = _condition_from_quantified_expression(statement.expression)
             conditions, _ = _expand_condition_items(
@@ -556,9 +593,6 @@ def _analyze_module(module: LoadedModule) -> tuple[list[str], list[str], list[st
             if isinstance(item, Declaration):
                 append_named_symbols(item, current_class=current_class)
                 append_statement_conditions(item, current_class=current_class)
-                child_class = _declaration_owner_class(item, current_class=current_class) or current_class
-                if item.body:
-                    walk_block(item.body, current_class=child_class)
                 continue
             if isinstance(item, Condition):
                 append_statement_conditions(item, current_class=current_class)
@@ -590,37 +624,96 @@ def _render_lines(section_name: str, values: list[str]) -> list[str]:
     return lines
 
 
-def render_direct_module(module: LoadedModule) -> str:
-    direct_imports, named_syms, conds = _analyze_module(module)
+def _sorted_named_symbols(named_syms: list[str]) -> list[str]:
+    return sorted(set(named_syms))
+
+
+def render_expanded_module(
+    named_syms: list[str],
+    conds: list[str],
+    *,
+    import_paths: list[str] | None = None,
+) -> str:
     lines: list[str] = []
-    for import_path in direct_imports:
+    for import_path in import_paths or []:
         lines.append(f"$import {import_path}")
-    if direct_imports:
+    if import_paths:
         lines.append("")
-    lines.extend(_render_lines("@named_syms", named_syms))
+    lines.extend(_render_lines("@named_syms", _sorted_named_symbols(named_syms)))
     lines.append("")
     lines.extend(_render_lines("@conds", conds))
     return "\n".join(lines).rstrip() + "\n"
 
 
-def render_full_module(modules: list[LoadedModule]) -> str:
+def is_expanded_module(program: Program) -> bool:
+    saw_section = False
+    for item in program.items:
+        if isinstance(item, Comment):
+            continue
+        if not isinstance(item, Heading):
+            return False
+        if item.title not in {"named_syms", "conds"}:
+            return False
+        saw_section = True
+    return saw_section
+
+
+def parse_expanded_module(program: Program) -> tuple[list[str], list[str]]:
+    named_syms: list[str] = []
+    conds: list[str] = []
+
+    for item in program.items:
+        if isinstance(item, Comment):
+            continue
+        if not isinstance(item, Heading):
+            raise ValueError("expanded module must contain only @named_syms/@conds headings")
+
+        if item.title == "named_syms":
+            for child in item.body:
+                if isinstance(child, Comment):
+                    continue
+                if not isinstance(child, ExpressionStatement) or child.body:
+                    raise ValueError("@named_syms entries must be bare symbol statements")
+                named_syms.append(_normalize_symbol_name(program_to_source(child.expression)))
+            continue
+
+        if item.title == "conds":
+            for child in item.body:
+                if isinstance(child, Comment):
+                    continue
+                if isinstance(child, (Heading, Import)):
+                    raise ValueError("@conds entries must be statements, not headings or imports")
+                conds.append(program_to_source(child).strip())
+            continue
+
+        raise ValueError(f"unsupported expanded module section: @{item.title}")
+
+    return _sorted_named_symbols(named_syms), conds
+
+
+def collect_direct_module_sections(module: LoadedModule) -> tuple[list[str], list[str], list[str]]:
+    direct_imports, named_syms, conds = _analyze_module(module)
+    return direct_imports, _sorted_named_symbols(named_syms), conds
+
+
+def collect_full_module_sections(modules: list[LoadedModule]) -> tuple[list[str], list[str]]:
     full_named_syms: list[str] = []
-    seen_named_syms: set[str] = set()
     full_conds: list[str] = []
     for module in modules:
         _, named_syms, conds = _analyze_module(module)
-        for symbol_name in named_syms:
-            if symbol_name in seen_named_syms:
-                continue
-            seen_named_syms.add(symbol_name)
-            full_named_syms.append(symbol_name)
+        full_named_syms.extend(named_syms)
         full_conds.extend(conds)
+    return _sorted_named_symbols(full_named_syms), full_conds
 
-    lines: list[str] = []
-    lines.extend(_render_lines("@full_named_syms", full_named_syms))
-    lines.append("")
-    lines.extend(_render_lines("@full_conds", full_conds))
-    return "\n".join(lines).rstrip() + "\n"
+
+def render_direct_module(module: LoadedModule) -> str:
+    direct_imports, named_syms, conds = collect_direct_module_sections(module)
+    return render_expanded_module(named_syms, conds, import_paths=direct_imports)
+
+
+def render_full_module(modules: list[LoadedModule]) -> str:
+    full_named_syms, full_conds = collect_full_module_sections(modules)
+    return render_expanded_module(full_named_syms, full_conds)
 
 
 def expand_module_file(
