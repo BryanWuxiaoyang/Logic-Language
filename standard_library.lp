@@ -1,5 +1,15 @@
-
+sym
 value
+set
+tuple
+list = tuple
+bool
+true
+false
+function
+func = function
+f = func
+
 val = value
 v = val
 val ~ max_val
@@ -7,26 +17,22 @@ val ~ max_val
 val ~ min_val
 ∀{| val1 | val1 ≥ min_val}
 
-max
-min
+max: (val1, val2) => val
+max: vals => val
+min: (val1, val2) => val
+min: vals => val
 size = val
-
-function
-func = function
-f = func
-
+cnt = val
 id = val
 i = id
 size = val
-list = tuple
 list
     ::size: list => size
     ::[]: (list, i) => sym
-    ::append: (list, sym) => list1
+    ::push_back: (list, sym) => list1
         list1.size = (list.size + 1)
         ∀{| (0 ≤ i) < list.size | list1[i] = list[i]}
         list1[list.size] = sym
-    ::push_back = list.append
     ::+: (list, list1) => list2
         list2.size = (list.size + list1.size)
         ∀{| (0 ≤ i) < list.size | list2[i] = list[i]}
@@ -35,7 +41,24 @@ set ~ list
     : (list, sym) => bool
         bool = ∃{| i | list[i] = sym}
 set::lists: set => lists
-    lists = {| list | ((list ∀ {| sym ∈ list | sym ∈ set}) ∀ {| sym ∈ set | sym ∈ list}) ∀ {| ((0 ≤ i) < j) < list.size | list[i] ≠ list[j]}}
+    lists = {
+        | list1
+        ∀{
+            | sym ∈ list1
+            sym ∈ set
+        }
+        ∀{
+            | sym ∈ set
+            sym ∈ list1
+        }
+        ∀{
+            | i, j
+            | 0 ≤ i
+            | i < j
+            | j < list1.size
+            list1[i] ≠ list1[j]
+        }
+    }
 list::sum: (list, merge_f) => sym
     merge_f: (sym1, sym2) => sym
     ∀
@@ -44,12 +67,12 @@ list::sum: (list, merge_f) => sym
         |- list.size = 1
             sym = list[0]
         |- list.size > 1
-            sym = merge_f(list[0], list[1:].sum(merge_f))
+            sym = merge_f(list[0], list[1: list.size].sum(merge_f))
 list::sum: list => sym
     sym = list.sum(+)
 set::sum: (set, merge_f) => sym
     merge_f: (sym1, sym2) => sym
-    syms = {| list ∈ set.lists | sum(list, merge_f)}
+    syms = {| list1 ∈ set.lists => sum(list1, merge_f)}
     sym = *syms
 set::sum: set => sym
     sym = set.sum(+)
@@ -71,15 +94,15 @@ set::min: set => sym
     sym = set.min(min)
 set::argmax: (set, mapping_f, max_f) => sym
     mapping_f: sym => sym1
-    max_map_sym = max({| sym ∈ set | mapping_f(sym)}, max_f)
-    max_syms = {| mapping_f(sym) = max_map_sym | sym ∈ set}
+    max_map_sym = max({| sym ∈ set => mapping_f(sym)}, max_f)
+    max_syms = {| sym | sym \in set, mapping_f(sym) = max_map_sym}
     sym = *max_syms
 set::argmax: (set, mapping_f) => sym
     sym = set.argmax(mapping_f, max)
 set::argmin: (set, mapping_f, min_f) => sym
     mapping_f: sym => sym1
-    min_map_sym = min({| sym ∈ set | mapping_f(sym)}, min_f)
-    min_syms = {| mapping_f(sym) = min_map_sym | sym ∈ set}
+    min_map_sym = min({| sym ∈ set => mapping_f(sym)}, min_f)
+    min_syms = {| sym | sym ∈ set, mapping_f(sym) = min_map_sym}
     sym = *min_syms
 set::argmin: (set, mapping_f) => sym
     sym = set.argmin(mapping_f, min)

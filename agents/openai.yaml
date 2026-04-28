@@ -1,4 +1,0 @@
-interface:
-  display_name: "Logic Language"
-  short_description: "Generate, validate, and translate .lp specs"
-  default_prompt: "Use $logic-language to write .lp and translate it to Python or C++."
