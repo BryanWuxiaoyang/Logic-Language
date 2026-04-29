@@ -1,4 +1,4 @@
-sym
+symbol
 value
 set
 tuple

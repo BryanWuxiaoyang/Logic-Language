@@ -36,41 +36,41 @@ for the logic language skill in this repo, I want to ground the logic-language t
 - introduce `set-module`/`SM`.
     - It includes
         - `syms`
-        - `PSs`
+        - `PSs`: premise-statements, if empty, default as `true`
+        - `TSs`: target-statements
         - `bound-syms = {syms}` as local binders introduced by current `SM`
-        - `all-bound-syms = bound-syms ∪ (^PSs).all-bound-syms`
-        - `free-syms = (^PSs).free-syms - bound-syms`
-    - `logic(SM) = {syms | ^PSs -> ^TSs}`
-    - `SM.syms` must be non-empty. `SM("{| sym}")` is valid, `SM("{| PS}")` is invalid
-    - if `syms = (sym)`, `logic(SM) = λ sym. ^PSs`
-    - if `syms = (sym1, sym2, ...)`, `logic(SM) = λ t. ^PSs` where `t` denotes the tuple `(sym1, sym2, ...)`
-    - as set-style sugar, `logic(SM)` may also be written as `{syms | ^PSs}`
+        - `all-bound-syms = bound-syms ∪ (&&PSs).all-bound-syms ∪ (&&TSs).all-bound-syms`
+        - `free-syms = (&&PSs -> &&TSs).free-syms - bound-syms`
+    - `logic(SM) = {syms | &&PSs -> &&TSs}`
+    - `SM.syms` must be non-empty. `SM("{| sym | TS}")` is valid, `SM("{| TS}")` is invalid
+    - if `syms = (sym)`, `logic(SM) = λ sym. &&PSs -> &&TSs`
+    - if `syms = (sym1, sym2, ...)`, `logic(SM) = λ t. &&PSs -> &&TSs` where `t` denotes the tuple `(sym1, sym2, ...)`
 
 - introduce `quantified-module`/`QM`.
     - It includes
         - `quantifier`
         - `syms`
-        - `PSs`
-        - `TSs`
+        - `PSs`: premise-statements, if empty, default as `true`
+        - `TSs`: target-statements
         - `bound-syms = {syms}` as local binders introduced by current `QM`
-        - `all-bound-syms = bound-syms ∪ (^PSs).all-bound-syms ∪ (^TSs).all-bound-syms`
-        - `free-syms = (^PSs -> ^TSs).free-syms - bound-syms`
-    - `logic(QM) = quantifier{syms | ^PSs -> ^TSs}`
-    - `QM.PSs` can be empty. `QM("quantifier{| TS1, TS2}") = QM("quantifier{TS1, TS2}") = TS1^TS2`
-    - `QM.TSs` must be non-empty. `QM("\all{| sym}") = QM("\all{| sym | true}")`
-    - e.g. `M(QMT("∀{| sym1, sym2 | PS1, PS2 | TS1}")) = {QM}` with `quantifier=∀`, `syms=(sym1, sym2)`, `PSs=(PS1, PS2)`, `TSs=(TS1)`
+        - `all-bound-syms = bound-syms ∪ (&&PSs).all-bound-syms ∪ (&&TSs).all-bound-syms`
+        - `free-syms = (&&PSs -> &&TSs).free-syms - bound-syms`
+    - `logic(QM) = quantifier{syms | &&PSs -> &&TSs}`
+    - `QM.PSs` can be empty. `QM("quantifier{| TS1, TS2}") = QM("quantifier{TS1, TS2}") = TS1 && TS2`
+    - `QM.TSs` must be non-empty. `QM("\all{| TS}") = QM("\all{TS}") = TS`
+    - e.g. `M(QMT("∀{| sym1, sym2 | PS1, PS2 | TS1}")) = QM` with `quantifier=∀`, `syms=(sym1, sym2)`, `PSs=(PS1, PS2)`, `TSs=(TS1)`
 
 - more precisely, `bound-syms`, `all-bound-syms`, and `free-syms` are determined from free/bound symbol occurrences in `logic(module)`.
 
-- `logic(modules)` is defined only when every `module ∈ modules` is statement-valued.
-    - `logic(modules) = ^{| module ∈ modules | logic(module)}`
+- `logic(module-list)` is defined only when every `module ∈ module-list` is statement-valued.
+    - `logic(module-list) = &&{| module ∈ module-list | logic(module)}`
 
 - if `sym` is in a `module`, it shouldn't appear in any of its `nested-modules`
 
 # Describe `module-signature`
 - introduce `module-signature` as the module-file-level validation environment for modules parsed from a `module-file`.
 - The `module-signature` includes
-  - `intrinsic-syms`: `tuple`, `set`, `function`, `value`, `true`, `false`, `bool`
+  - `intrinsic-syms`: `tuple`, `set`, `function`, `value`, `true`, `false`, `bool`, `symbol`
   - `function-syms`
   - `built-in-forms` includes form categories accepted by `module-text`.
     - literal forms: set-comprehension, tuple-comprehension, set-literals, tuple-literals, numeric-literals
@@ -80,31 +80,36 @@ for the logic language skill in this repo, I want to ground the logic-language t
 
 # Describe `module-text`
 - introduce `module-text` as the written syntax of `logic-language`.
-    - `M(module-text)` translates `module-text` to a deduplicated unordered set of `module`s
+    - `M(module-text)` translates `module-text` to a module
     - `M("...") = M("...")` denotes reduction between equivalent surface forms.
 
 - introduce `nested-module-text`/`NMT` as a `module-text` written inside a `module-text`, with indentation added by 1 level. All rules applied on `module-text` applies to `nested-module-text`.
 
 - introduce `set-module-text`/`SMT` as a `module-text` whose parsed `module` is a `set-module`/`SM`.
-    - `M(SMT) = {SM}`
+    - `M(SMT) = SM`
     - `SMT` is always wrapped by `{}`
-    - `SMT` parses sections in this order:
-        - first section = `syms`
-        - all later sections = `PSs`
+    - `SMT` parses sections by priority:
+        - right-to-left section = `TSs`
+        - left-to-right section = `syms`
+        - remaining middle sections = `PSs`
     - `SMT` requires non-empty `syms`
-    - e.g. `SMT("{| sym1, sym2 | PS1, PS2}")` is an `SMT`
+    - e.g. `SMT("{| sym1, sym3 | PS1, PS2 | TS1, TS2}")` is an `SMT`
 
 - introduce `quantified-module-text`/`QMT` as a `module-text` whose parsed `module` is a `quantified-module`/`QM`.
-    - `M(QMT) = {QM}`
-    - `QMT` parses sections in this order:
-        - first section = `syms`
-        - last section = `TSs`
-        - middle sections = `PSs`
+    - `M(QMT) = QM`
+    - `QMT` parses sections by priority:
+        - right-to-left section = `TSs`
+        - left-to-right section = `syms`
+        - remaining middle sections = `PSs`
     - `QMT` requires final non-empty `TSs`
     - `QMT` may have empty `syms`
     - e.g. `QMT("∀{| sym1, sym2 | PS1, PS2 | TS1}")` is a `QMT`
-    - e.g. `M("∀{TS1, TS2}") = M("TS1 ^ TS2")`
-    - e.g. `M("∀{| PS | TS}") = M("PS => TS")`
+    - e.g. `M("∀{TS1, TS2}") = M("TS1 && TS2")`
+    - e.g. `M("∀{| sym | TS}") = M("∀{| sym | true | TS}")`
+
+- introduce `~` as intrinsic `binary-operator`
+    - every declared-sym implicitly inherits itself
+    `M("| sym | TS") = M("| sym | sym~sym | TS")`
 
 - introduce `tuple` as an intrinsic sym in `module-text`.
     M("| sym1, sym2, sym3 | (sym1, sym2) = sym3 | TS") = M("
@@ -137,6 +142,11 @@ for the logic language skill in this repo, I want to ground the logic-language t
     "
     )
 
+- introduce `symbol` as an intrinsic sym in `module-text`
+    - all `declared-syms` inherit `symbol`
+    `M("| sym1, sym2 | PS | TS") = M("| sym1, sym2 | symbol~sym1 | symbol~sym2 | PS | TS")`
+    - Induction: all `syms` in `module` will have at least `symbol` as inheriting `class-sym`, except `symbol` itself
+
 - a `module-text` includes text-replacement rules for translation. Below are `M("...") = M("...")` rules that translate `module-text` to more reduced `normal-module-text`
 
 - non-braced `module-text` is implicitly wrapped by `∀`
@@ -144,8 +154,8 @@ for the logic language skill in this repo, I want to ground the logic-language t
     `M("∃ | sym | PS | TS") = M("∃{| sym | PS | TS}")`
 
 
-- `SMT` with only `syms` is universal-set sugar
-    `M("{| syms}") = M("{| syms | true}")`
+- `SMT` requires both `syms` and `TSs`
+    `M("{| syms}")` is invalid because the only section is parsed as `TSs`, leaving `syms` empty.
 
 - multi-line `module-text` can be inlined
     M(
@@ -308,7 +318,8 @@ for the logic language skill in this repo, I want to ground the logic-language t
 
 - introduce `class` as a `sym` that appears in first parameter in any `sym ~ sym1`
 
-- selected binary-operator `PSs` can implicitly add `syms` to current `SMT`/`QMT`.
+- introduce `implicit-sym-declaration` rule
+    - selected binary-operator `PSs` implicitly add `syms` to current `SMT`/`QMT`.
     - this rule applies only to `PSs`, not final `TSs`.
     - this rule only infers a plain sym or tuple of plain syms.
     - inferred `syms` follow the existing deduplication and outer-scope override rules.
@@ -320,48 +331,37 @@ for the logic language skill in this repo, I want to ground the logic-language t
     - e.g. `M("value~x | P(x)") = M("| x | value~x | P(x)")` because `value` is intrinsic.
     - e.g. `foo~x` is invalid when `foo` is not declared or intrinsic.
 
-- introduce `function-declaration` as form `sym: (sym1~sym2, sym3~sym4, ...) => (sym5~sym6, sym7~sym8)`
+- introduce `function-declaration` as form `sym: (sym1, ...) => (sym2, ...)`
     - `"sym(sym1)"` is a `function-statement`
     M(
     "
-    | free-sym1, free-sym2
-    sym: free-sym1~bound-sym1 => free-sym2~bound-sym2
+    sym: sym1 => sym2
         | PS
         TS
     "
     ) = M("
-    | free-sym1, free-sym2
     ∀
-        | bound-sym1, bound-sym2
-        | bound-sym2 = sym(bound-sym1)
-        | free-sym1 ~ bound-sym1
+        | sym1, sym2
+        | sym2 = sym(sym1)
         | PS
-        free-sym2 ~ bound-sym2
         TS
     ")
 
     M(
     "
-    | free-sym1, free-sym2
-    sym: (free-sym1~bound-sym1, free-sym2~bound-sym2) => (free-sym3~bound-sym3, free-sym4~bound-sym4)
+    sym: (sym1, sym2) => (sym3, sym4)
         | PS
         TS
     "
     ) = M("
-    | free-sym1, free-sym2
     ∀
-        | bound-sym1, bound-sym2, bound-sym3, bound-sym4
-        | (bound-sym3, bound-sym4) = sym(bound-sym1, bound-sym2)
-        | free-sym1 ~ bound-sym1
-        | free-sym2 ~ bound-sym2
+        | sym1, sym2, sym3, sym4
+        | (sym3, sym4) = sym(sym1, sym2)
         | PS
-        free-sym3 ~ bound-sym3
-        free-sym4 ~ bound-sym4
         TS
     ")
     
-    - function `parameters` must be `bound-sym` in current-scope. So it cannot have same name as `syms` in outer-scopes. function `parameter-classes`(i.e. `free-sym1, free-sym2,...`) must be `free-sym`
-
+    - function `parameters` must be `bound-sym` in current-scope. So it cannot have same name as `syms` in outer-scopes, otherwise according to scope-override rule, it will be referring to outer-scope `sym`, which is unexpected
     - Induction: `function`'s arity is not fixed, so multiple `function-declarations` for the same `sym` add quantified constraints to the same function-sym.
 
 - introduce `function-assign`
@@ -372,15 +372,15 @@ for the logic language skill in this repo, I want to ground the logic-language t
     "
     )
 
-- The `function-declaration`'s `parameter` may not explicitly write `parameter-class`. In that case, the parameter uses class-inheritance naming rules, and class-name aliasing applies in `function-declaration` only.
-    - when a parameter name is exactly a class name, it implicitly translates to another name; otherwise it will not be a `bound-sym`.
+- The `function-declaration`'s `parameter` uses class-inheritance naming rules, and class-name aliasing applies in `function-declaration` only.
     - when a param-name is `class` name, this `class` itself will not be able to be used as `free-sym` inside the `function-declaration` scope.
-
-    `M("sym: (value, value1) => out_value") = M("sym: (value~value', value~value1) => value~out_value")`
-    Note that `value'` is implicitly introduced as `bound-sym` representing `value` in `function-declaration`, so that real free-sym `value`-class can be used in nested-scope as `free-sym`
+    - when a param-name is outer-scope declared-sym, it implicitly translates to another name; otherwise it will not be a `bound-sym`.
+    - when a param-name does not imply a base-class by naming rules, it does not add any inherit predicate-statement.
+    `M("sym: (value, value1) => out_value") = M("sym: (value', value1) => out_value")`
+    Note that `value'` is implicitly introduced as `bound-sym` inheriting `value` in `function-declaration`, So as to avoid sym-scope-override
 
 - introduce `predicate-declaration`
-    `preidicate` follow same rule as `function-declaration`, but `sym(...)` is a `predicate-statement`, not `function-statement`
+    `predicate` follows the same rule as `function-declaration`, but `sym(...)` is a `predicate-statement`, not `function-statement`
     M(
     "
     sym: sym1~sym1' => bool
@@ -493,18 +493,19 @@ for the logic language skill in this repo, I want to ground the logic-language t
     "
     )
 
-- introduce `class-field-assign`
+- introduce `class-field-assign` as sugar
     `M("sym::sym1 = sym2") = M("sym::sym1: sym -> sym2")`
 
-- introduce `class-method-call`
+- introduce `class-method-call` as sugar
     `M("sym1.sym2(sym3)") = M("sym2(sym1, sym3)")`
+    `M("sym1.sym2") = M("sym2(sym1)")`
 
 - introduce `section`: `M("@...") = M("∀")`
 
 - introduce `comment`: `M("#...") = M("")`
 
 - introduce comparator concatenation
-    `M("sym1 < sym2 < sym3") = M("sym1 < sym2 ^ sym2 < sym3")`
+    `M("sym1 < sym2 < sym3") = M("sym1 < sym2 && sym2 < sym3")`
 
 - introduce `[]` as identical to `()` tuple
     `M("[x, y]") = M("(x, y)")`
@@ -554,7 +555,9 @@ for the logic language skill in this repo, I want to ground the logic-language t
     `[sym1: sym2] := [sym1: sym2: class(sym1)]`
 
 - introduce `latex-translation` that translates all `latex-code` into symbols
-    - full rules are in `./logic-language-latex.json`
+    - `\land` translates to `∧`; `\and` translates to `&&`
+    - `\lor` translates to `∨`; `\or` translates to `||`
+    - full rules are in `./latex-tokens.json`
 
 - introduce `null` as a syntax-sugar
     - `F(args) = null` is a `predicate-statement`, not a normal output value.
@@ -629,8 +632,13 @@ for the logic language skill in this repo, I want to ground the logic-language t
 - introduce `expand-imports(module-text)`
     - `expand-imports(module-text)` macro-expands all `$import` inside `module-text`
 
+- introduce `reformat-module(module-text)` that converts `latex-code` to `identifiers`
+    - use `scripts/format-module.py`
+
 - introduce `compile-module-text`
-    - `compile-module-text(module-text) = M(expand-imports(module-text))`
+    - `compile-module-text(module-text) = M(reformat-module(expand-imports(module-text)))`
+    - `compile-module-text(module-text)` returns one JSON-serializable `module`
+    - a statement contains normalized `text` and `sub_modules`; nested module text is replaced by `$module{index}` placeholders in `text`
 
 - introduce `module-signature(M)` that returns the valid-signature-syms from `M` parsed from `compile-module-text`
   - `module-signature(M).function-syms` are `M.free-syms` that have `function~sym`
@@ -640,16 +648,18 @@ for the logic language skill in this repo, I want to ground the logic-language t
 
 - introduce `compile-module-file`
     - `compile-module-file(file-path) = compile-module-text(file-text(file-path))`
-    - `compile-module-file(file-path)` returns a deduplicated unordered `module-set`
-    - `compile-module-file(file-path)` is valid only when every `module ∈ compile-module-file(file-path)` is a `QM`
-    - `compile-module-file(file-path)` is valid only when every `module ∈ compile-module-file(file-path)` satisfies `module.free-syms ⊆ module-file.module-signature.free-syms`
+    - `compile-module-file(file-path)` returns one `module`
+    - `compile-module-file(file-path)` is valid only when the returned `module` is a `QM`
+    - `compile-module-file(file-path)` is valid only when the returned `module` satisfies `module.free-syms ⊆ module-file.module-signature.free-syms`
     - therefore a `module-file` cannot have root-scope `{...}` after translation
 
 - introduce `compile-module-files`
-    - `compile-module-files(file-paths) = ⋃{| file-path ∈ file-paths | compile-module-file(file-path)}`
+    - `compile-module-files(file-paths)` returns a list of modules, one from each `compile-module-file(file-path)`
 
 - introduce `module-files(folder-path)`
     - `module-files(folder-path)` is the set of `.lp` files inside `folder-path`
 
 - introduce `compile-module-folder`
     - `compile-module-folder(folder-path) = compile-module-files(module-files(folder-path))`
+
+- introduce `compile-module` which dispatch to proper compile-function given input-path
