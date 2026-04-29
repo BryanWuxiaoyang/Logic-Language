@@ -40,6 +40,16 @@ class Statement:
             "sub_modules": [module.to_json(output_tokens) for module in self.sub_modules],
         }
 
+    def to_readable_json(self, output_tokens: dict[str, str] | None = None) -> Any:
+        text = encode_output_text(self.text, output_tokens)
+        if not self.sub_modules:
+            return text
+        data: dict[str, Any] = {
+            "text": text,
+            "sub_modules": [module.to_readable_json(output_tokens) for module in self.sub_modules],
+        }
+        return data
+
 
 @dataclass
 class Module:
@@ -52,12 +62,31 @@ class Module:
     def to_json(self, output_tokens: dict[str, str] | None = None) -> dict[str, Any]:
         data: dict[str, Any] = {
             "type": self.type,
-            "syms": [encode_output_text(sym, output_tokens) for sym in self.syms],
-            "predicate_statements": [statement.to_json(output_tokens) for statement in self.predicate_statements],
-            "target_statements": [statement.to_json(output_tokens) for statement in self.target_statements],
         }
         if self.quantifier is not None:
             data["quantifier"] = encode_output_text(self.quantifier, output_tokens)
+        data.update(
+            {
+                "syms": [encode_output_text(sym, output_tokens) for sym in self.syms],
+                "predicate_statements": [statement.to_json(output_tokens) for statement in self.predicate_statements],
+                "target_statements": [statement.to_json(output_tokens) for statement in self.target_statements],
+            }
+        )
+        return data
+
+    def to_readable_json(self, output_tokens: dict[str, str] | None = None) -> dict[str, Any]:
+        data: dict[str, Any] = {
+            "type": self.type,
+        }
+        if self.quantifier is not None:
+            data["quantifier"] = encode_output_text(self.quantifier, output_tokens)
+        data.update(
+            {
+                "syms": [encode_output_text(sym, output_tokens) for sym in self.syms],
+                "predicate_statements": [statement.to_readable_json(output_tokens) for statement in self.predicate_statements],
+                "target_statements": [statement.to_readable_json(output_tokens) for statement in self.target_statements],
+            }
+        )
         return data
 
 
@@ -189,9 +218,11 @@ class ModuleCompiler:
         except UnexpectedInput as error:
             raise CompileError(format_lark_error(error)) from error
         body = text[body_start + 1 : close]
+        if quantifier is not None:
+            return self.build_module("quantifier", quantifier, body)
         if self.is_image_set_body(body):
             return self.parse_image_set(body)
-        return self.build_module("quantifier" if quantifier else "set", quantifier, body)
+        return self.build_module("set", None, body)
 
     def parse_line_module(self, text: str, quantifier: str) -> Module:
         lines = logical_lines(text)
@@ -701,6 +732,7 @@ def main() -> int:
     parser.add_argument("--text", help="module text to compile; defaults to stdin")
     parser.add_argument("--base-dir", type=Path, default=Path.cwd(), help="base directory for $import")
     parser.add_argument("--pretty", action="store_true", help="pretty-print JSON output")
+    parser.add_argument("--readable", action="store_true", help="emit compact readable JSON output")
     args = parser.parse_args()
 
     source = args.text if args.text is not None else sys.stdin.read()
@@ -710,7 +742,9 @@ def main() -> int:
     except (CompileError, OSError) as error:
         print(error, file=sys.stderr)
         return 1
-    json.dump(module.to_json(make_output_tokens(tokens)), sys.stdout, ensure_ascii=False, indent=2 if args.pretty else None)
+    output_tokens = make_output_tokens(tokens)
+    output = module.to_readable_json(output_tokens) if args.readable else module.to_json(output_tokens)
+    json.dump(output, sys.stdout, ensure_ascii=False, indent=2 if args.pretty else None)
     sys.stdout.write("\n")
     return 0
 

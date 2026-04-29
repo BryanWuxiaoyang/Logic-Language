@@ -27,6 +27,8 @@ from compile_module_text import (
     remove_comments,
     skill_dir,
     strip_outer_blank_lines,
+    tuple_or_single,
+    call_text,
 )
 
 
@@ -52,7 +54,7 @@ def expand_module_text(text: str, base_dir: Path | str = ".") -> str:
     if not body:
         return "\n".join(output_imports) + "\n"
 
-    compiler = ModuleCompiler(load_lark_parser())
+    compiler = AliasModuleCompiler(load_lark_parser(), visible_syms)
     module = compiler.compile(body)
     expander = ModuleExpander(visible_syms)
     expanded_body = expander.render_module(module, outer_syms=set(), indent=0)
@@ -104,26 +106,81 @@ def collect_visible_syms(text: str) -> set[str]:
                 syms.update(binders)
         declaration = parse_declaration(stripped)
         if declaration is not None:
-            name, inputs, outputs, _ = declaration
+            name, _, _, _ = declaration
             syms.add(name)
-            syms.update(term for term in inputs + outputs if is_plain_sym(term))
         if "::" in stripped:
             left = stripped.split("::", 1)[0].strip()
             if is_plain_sym(left):
                 syms.add(left)
-        if "=" in stripped:
-            left, right = stripped.split("=", 1)
-            for term in (left.strip(), right.strip()):
-                if is_plain_sym(term):
-                    syms.add(term)
         if "~" in stripped:
-            left, right = stripped.split("~", 1)
-            for term in (left.strip(), right.strip()):
-                if is_plain_sym(term):
-                    syms.add(term)
+            left, _ = stripped.split("~", 1)
+            if is_plain_sym(left.strip()):
+                syms.add(left.strip())
         if is_plain_sym(stripped):
             syms.add(stripped)
     return syms
+
+
+class AliasModuleCompiler(ModuleCompiler):
+    def __init__(self, parser: object, visible_syms: set[str]) -> None:
+        super().__init__(parser)
+        self.visible_syms = set(visible_syms) | set(INTRINSIC_SYMS)
+
+    def lower_header_with_block(self, header: str, block: str) -> list[str]:
+        if header.startswith("@") or header.startswith("|-"):
+            return super().lower_header_with_block(header, block)
+        declaration = parse_declaration(header)
+        if declaration is None:
+            return super().lower_header_with_block(header, block)
+
+        name, inputs, outputs, arrow = declaration
+        inputs, outputs, aliases = self.alias_signature(inputs, outputs)
+        block = replace_symbols(block, aliases)
+        if arrow == "->":
+            outputs = [replace_symbols(output, aliases) for output in outputs]
+            call = call_text(name, inputs)
+            target = f"{tuple_or_single(outputs)} = {call}"
+            return [f"{name}: {tuple_or_single(inputs)} => {tuple_or_single(outputs)}", "∀{\n" + target + "\n" + block + "\n}"]
+        call = call_text(name, inputs)
+        target = f"{tuple_or_single(outputs)} = {call}" if outputs != ["bool"] else call
+        return ["function~" + name, "∀{\n| " + ", ".join(inputs + outputs) + "\n| " + target + "\n" + block + "\n}"]
+
+    def alias_signature(self, inputs: list[str], outputs: list[str]) -> tuple[list[str], list[str], dict[str, str]]:
+        aliases: dict[str, str] = {}
+        reserved = set(inputs + outputs) | self.visible_syms
+
+        def alias_term(term: str) -> str:
+            if not is_plain_sym(term) or term not in self.visible_syms or self.class_for_alias(term) is not None:
+                return term
+            if term not in aliases:
+                aliases[term] = self.fresh_alias(term, reserved)
+                reserved.add(aliases[term])
+            return aliases[term]
+
+        return [alias_term(term) for term in inputs], [alias_term(term) for term in outputs], aliases
+
+    def class_for_alias(self, sym: str) -> str | None:
+        classes = sorted(self.visible_syms, key=len, reverse=True)
+        for class_sym in classes:
+            if class_sym == sym:
+                continue
+            if re.fullmatch(re.escape(class_sym) + r"\d+", sym):
+                return class_sym
+            if sym.endswith("_" + class_sym):
+                return class_sym
+            if sym == class_sym + "_class":
+                return class_sym
+        return None
+
+    def fresh_alias(self, sym: str, reserved: set[str]) -> str:
+        preferred = "__" + sym
+        candidate = preferred
+        suffix = 1
+        while candidate in reserved:
+            candidate = f"{preferred}{suffix}"
+            suffix += 1
+        self.visible_syms.add(candidate)
+        return candidate
 
 
 class ModuleExpander:
@@ -181,6 +238,11 @@ class ModuleExpander:
 
     def class_for_sym(self, sym: str) -> str | None:
         classes = sorted(self.visible_syms, key=len, reverse=True)
+        for class_sym in classes:
+            if class_sym.startswith("__"):
+                continue
+            if re.fullmatch("__" + re.escape(class_sym) + r"\d*", sym):
+                return class_sym
         for class_sym in classes:
             if class_sym == sym:
                 continue
@@ -289,6 +351,34 @@ def set_module_literals(text: str) -> list[str]:
     return dedupe(literals)
 
 
+def replace_symbols(text: str, replacements: dict[str, str]) -> str:
+    if not replacements:
+        return text
+    output: list[str] = []
+    index = 0
+    in_string = False
+    while index < len(text):
+        char = text[index]
+        if char == '"':
+            in_string = not in_string
+            output.append(char)
+            index += 1
+            continue
+        if in_string:
+            output.append(char)
+            index += 1
+            continue
+        match = re.match(r"[^\W\d]\w*'?", text[index:], flags=re.UNICODE)
+        if match is None:
+            output.append(char)
+            index += 1
+            continue
+        token = match.group(0)
+        output.append(replacements.get(token, token))
+        index += len(token)
+    return "".join(output)
+
+
 def matching_close(text: str, start: int, open_char: str, close_char: str) -> int:
     depth = 0
     in_string = False
@@ -314,4 +404,3 @@ def format_section_line(text: str, indent: str, prefix: str) -> list[str]:
     output = [indent + prefix + lines[0]]
     output.extend(indent + line for line in lines[1:])
     return output
-
