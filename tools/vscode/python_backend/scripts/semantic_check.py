@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from compile_module_text import FRESH_PREFIX, INTRINSIC_SYMS, CompileError, parse_declaration
+from compile_module_text import FRESH_PREFIX, CompileError, parse_declaration
 from syntax_check_common import (
     STDIN_FILE,
     Binder,
@@ -50,19 +50,10 @@ class VisibleDeclaration:
     name: str
     position: SourcePosition
     scope_id: int | None
-    intrinsic: bool = False
 
-    def kinds_for_scope(self, current_scope_id: int, ancestors: set[int]) -> set[str]:
-        kinds: set[str] = set()
-        if self.intrinsic:
-            kinds.add("intrinsic")
-        if self.position.import_origin:
-            kinds.add("import-origin")
-        if self.scope_id == current_scope_id:
-            kinds.add("same-scope")
-        elif self.scope_id in ancestors:
-            kinds.add("ancestor")
-        return kinds or {"same-scope"}
+    @property
+    def is_imported(self) -> bool:
+        return self.position.import_origin or self.scope_id is None
 
 
 @dataclass
@@ -72,13 +63,19 @@ class ScopeContext:
 
 
 class SemanticChecker:
-    def __init__(self, import_declarations: list[Declaration]) -> None:
+    def __init__(
+        self,
+        import_declarations: list[Declaration],
+        *,
+        source_text: str | None = None,
+        source_file: str | None = None,
+    ) -> None:
         self.diagnostics: list[Diagnostic] = []
         self.visible: dict[str, list[VisibleDeclaration]] = {}
-        self.warned_names: set[str] = set()
         self.next_scope_id = 0
-        for sym in sorted(INTRINSIC_SYMS):
-            self.add_visible(VisibleDeclaration(sym, SourcePosition("<intrinsic>", 1, 1), None, intrinsic=True))
+        self.source_lines_by_file: dict[str, list[str]] = {}
+        if source_text is not None and source_file is not None:
+            self.source_lines_by_file[source_file] = source_text.splitlines()
         for declaration in import_declarations:
             self.add_visible(VisibleDeclaration(declaration.name, declaration.position, None))
 
@@ -95,7 +92,7 @@ class SemanticChecker:
         current_declarations: list[VisibleDeclaration] = []
         ancestor_set = set(context.ancestors)
         for binder in module.binders:
-            self.check_binder(binder, context.scope_id, ancestor_set)
+            self.check_binder(binder, ancestor_set)
             declaration = VisibleDeclaration(binder.text, binder.position, context.scope_id)
             current_declarations.append(declaration)
             self.add_visible(declaration)
@@ -106,50 +103,67 @@ class SemanticChecker:
         for declaration in current_declarations:
             self.visible[declaration.name].remove(declaration)
 
-    def check_binder(self, binder: Binder, current_scope_id: int, ancestors: set[int]) -> None:
-        if binder.text in self.warned_names:
-            return
+    def check_binder(self, binder: Binder, ancestors: set[int]) -> None:
         if binder.text.startswith(FRESH_PREFIX):
-            return
-        if is_function_declaration_formal(binder.position):
             return
         conflicts = [
             conflict
             for conflict in self.visible.get(binder.text, [])
-            if conflict.scope_id in ancestors and not is_function_declaration_formal(conflict.position)
+            if conflict.is_imported or conflict.scope_id in ancestors
         ]
         if not conflicts:
             return
-        kinds: set[str] = set()
-        prior_locations: list[str] = []
-        for conflict in conflicts:
-            kinds.update(conflict.kinds_for_scope(current_scope_id, ancestors))
-            prior_locations.append(format_prior_location(conflict.position))
-        message = (
-            f"declare-sym '{binder.text}' has name collision "
-            f"({', '.join(sorted(kinds))}); previous declaration at {dedupe_join(prior_locations)}"
-        )
+        is_formal = self.is_function_declaration_formal(binder.position)
+        message = format_conflict_message(binder.text, conflicts, formal=is_formal)
         self.diagnostics.append(
             Diagnostic(
                 file=binder.position.file,
                 lineno=max(binder.position.line - 1, 0),
                 col_start_no=max(binder.position.column - 1, 0),
                 col_end_no=max(binder.position.column - 1 + len(binder.text), 1),
-                type="warning",
-                code="name_conflict",
+                type="information" if is_formal else "warning",
+                code="formal_name_override" if is_formal else "name_conflict",
                 reason=message,
             )
         )
-        self.warned_names.add(binder.text)
 
     def add_visible(self, declaration: VisibleDeclaration) -> None:
         self.visible.setdefault(declaration.name, []).append(declaration)
 
+    def is_function_declaration_formal(self, position: SourcePosition) -> bool:
+        try:
+            line = self.line_text(position)
+        except (OSError, IndexError, ValueError):
+            return False
+        return parse_declaration(line.strip()) is not None
+
+    def line_text(self, position: SourcePosition) -> str:
+        if position.file in self.source_lines_by_file:
+            return self.source_lines_by_file[position.file][position.line - 1]
+        lines = Path(position.file).read_text(encoding="utf-8").splitlines()
+        self.source_lines_by_file[position.file] = lines
+        return lines[position.line - 1]
+
 
 def format_prior_location(position: SourcePosition) -> str:
-    if position.file == "<intrinsic>":
-        return "<intrinsic>"
     return f"{position.file}:{position.line}"
+
+
+def format_conflict_message(name: str, conflicts: list[VisibleDeclaration], *, formal: bool) -> str:
+    imported = dedupe_join([format_prior_location(conflict.position) for conflict in conflicts if conflict.is_imported])
+    ancestors = dedupe_join([format_prior_location(conflict.position) for conflict in conflicts if not conflict.is_imported])
+    locations: list[str] = []
+    if imported:
+        locations.append(f"imported declaration at {imported}")
+    if ancestors:
+        locations.append(f"outer declaration at {ancestors}")
+    joined = " and ".join(locations)
+    if formal:
+        return (
+            f"formal parameter '{name}' intentionally overrides {joined} "
+            "due to the class-name-alias rule"
+        )
+    return f"declare-sym '{name}' conflicts with {joined}"
 
 
 def dedupe_join(values: list[str]) -> str:
@@ -163,23 +177,23 @@ def dedupe_join(values: list[str]) -> str:
     return ", ".join(output)
 
 
-def is_function_declaration_formal(position: SourcePosition) -> bool:
-    try:
-        line = Path(position.file).read_text(encoding="utf-8").splitlines()[position.line - 1]
-    except (OSError, IndexError, ValueError):
-        return False
-    return parse_declaration(line.strip()) is not None
-
-
 def collect_semantic_diagnostics_from_text(text: str) -> list[dict[str, object]]:
     result = analyze_module_text(text, file_path=None)
-    diagnostics = SemanticChecker(result.import_declarations).check(result.ast)
+    diagnostics = SemanticChecker(
+        result.import_declarations,
+        source_text=result.source_text,
+        source_file=result.file,
+    ).check(result.ast)
     return [diagnostic.to_json() for diagnostic in diagnostics]
 
 
 def collect_semantic_diagnostics_from_file(file_path: Path) -> list[dict[str, object]]:
     result = analyze_module_file(file_path)
-    diagnostics = SemanticChecker(result.import_declarations).check(result.ast)
+    diagnostics = SemanticChecker(
+        result.import_declarations,
+        source_text=result.source_text,
+        source_file=result.file,
+    ).check(result.ast)
     return [diagnostic.to_json() for diagnostic in diagnostics]
 
 

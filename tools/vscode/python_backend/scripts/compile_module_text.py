@@ -20,9 +20,21 @@ except ModuleNotFoundError:  # pragma: no cover - exercised by CLI environments.
 
 LATEX_CODE_RE = re.compile(r"\\[A-Za-z_][A-Za-z0-9_]*")
 IMPORT_RE = re.compile(r"^(?P<indent>[ \t]*)\$import\s+(?P<path>.+?)\s*$")
-INTRINSIC_SYMS = {"tuple", "set", "function", "value", "true", "false", "bool", "sym", "char", "string"}
 INFER_OPERATORS = ("=", ">", "<", ">=", "<=", "≤", "≥", "∈", "∉", "⊂", "⊄", "⊆", "⊈", "≠")
 FRESH_PREFIX = "__logic_language_out"
+INTRINSIC_SYMS = (
+    "tuple",
+    "set",
+    "function",
+    "value",
+    "true",
+    "false",
+    "bool",
+    "sym",
+    "char",
+    "string",
+    "list",
+)
 BASIC_ESCAPES = {
     "n": "\n",
     "r": "\r",
@@ -332,7 +344,7 @@ class ModuleCompiler:
             generated_syms.extend(lowered.generated_syms)
             predicate_statements.extend(lowered.generated_predicate_statements)
             target_statements.extend(lowered.output_statements)
-        syms = dedupe([sym for sym in [*syms, *generated_syms] if sym not in INTRINSIC_SYMS])
+        syms = dedupe([*syms, *generated_syms])
         if module_type == "set" and not syms:
             raise CompileError("set module requires non-empty syms")
         if not target_statements:
@@ -769,6 +781,7 @@ def declaration_colon_index(text: str) -> int | None:
             previous_char = text[index - 1] if index > 0 else ""
             next_char = text[index + 1] if index + 1 < len(text) else ""
             if previous_char == ":" or next_char == ":":
+                index += 1
                 continue
             return index
         index += 1

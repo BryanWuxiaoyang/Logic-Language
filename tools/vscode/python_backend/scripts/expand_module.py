@@ -229,11 +229,11 @@ class ModuleExpander:
         if class_sym is not None and class_sym != sym:
             predicates.append(f"{class_sym}~{sym}")
 
-        element_class = self.element_class_for_collection(sym)
-        if element_class is not None:
+        collection = self.collection_inheritance(sym)
+        if collection is not None:
             item = self.fresh_sym(f"{sym}_item")
-            predicates.append(f"tuple~{sym}")
-            predicates.append(f"∀{{| {item} | {item} ∈ {sym} | {element_class}~{item}}}")
+            predicates.append(f"{collection[0]}~{sym}")
+            predicates.append(f"∀{{| {item} | {item} ∈ {sym} | {collection[1]}~{item}}}")
         return predicates
 
     def class_for_sym(self, sym: str) -> str | None:
@@ -254,13 +254,13 @@ class ModuleExpander:
                 return class_sym
         return None
 
-    def element_class_for_collection(self, sym: str) -> str | None:
+    def collection_inheritance(self, sym: str) -> tuple[str, str] | None:
         classes = sorted(self.visible_syms, key=len, reverse=True)
         for class_sym in classes:
             if sym.endswith("_" + class_sym + "_list"):
-                return class_sym
+                return ("tuple", class_sym)
             if sym.endswith("_" + class_sym + "s"):
-                return class_sym
+                return ("set", class_sym)
         return None
 
     def local_wrapper_predicates(self, texts: list[str]) -> list[str]:

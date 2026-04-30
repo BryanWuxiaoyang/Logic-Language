@@ -42,8 +42,8 @@
       "properties": {
         "logicLanguage.pythonPath": {
           "type": "string",
-          "default": "python3",
-          "description": "Python executable used to run the bundled logic-language checkers."
+          "default": "",
+          "description": "Python executable used to run the bundled logic-language checkers. Leave empty to use the platform default (`py` on Windows, `python3` elsewhere)."
         }
       }
     }

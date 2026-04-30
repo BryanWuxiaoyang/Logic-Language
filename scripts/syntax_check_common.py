@@ -10,7 +10,6 @@ from typing import Iterable
 
 from compile_module_text import (
     IMPORT_RE,
-    INTRINSIC_SYMS,
     LATEX_CODE_RE,
     CompileError,
     brace_delta,
@@ -133,14 +132,7 @@ def analyze_module_text(source_text: str, *, file_path: Path | None = None) -> C
         raise CheckError("$import is not supported when semantic_check reads module text from stdin")
 
     expanded = expand_for_checking(normalized, base_dir=file_path.parent if file_path else Path.cwd(), seen=set())
-    stdlib = (
-        expand_standard_library(tokens)
-        if file_path is not None and not is_standard_library_file(file_path)
-        else LocatedText("", tuple())
-    )
-    import_declarations = []
-    if stdlib:
-        import_declarations.extend(collect_top_level_declarations(stdlib, import_origin_only=True))
+    import_declarations = collect_import_declarations(expanded, tokens, file_path)
     cleaned = strip_outer_blank_lines_located(remove_comments_located(expanded))
     if not cleaned.text.strip():
         raise CheckError("empty module text")
@@ -157,6 +149,16 @@ def analyze_module_text(source_text: str, *, file_path: Path | None = None) -> C
 def analyze_module_file(file_path: Path) -> CheckResult:
     absolute = file_path.resolve()
     return analyze_module_text(absolute.read_text(encoding="utf-8"), file_path=absolute)
+
+
+def collect_import_declarations(expanded: LocatedText, tokens: dict[str, str], file_path: Path | None) -> list[Declaration]:
+    declarations = collect_top_level_declarations(expanded, import_origin_only=True)
+    if file_path is not None and is_standard_library_file(file_path):
+        return declarations
+    stdlib = expand_standard_library(tokens)
+    if not stdlib:
+        return declarations
+    return dedupe_declarations([*collect_top_level_declarations(stdlib, import_origin_only=True), *declarations])
 
 
 def make_located_text(text: str, file_name: str, *, import_origin: bool) -> LocatedText:
@@ -322,12 +324,20 @@ def collect_top_level_declarations(located: LocatedText, *, import_origin_only: 
             continue
         if import_origin_only and not any(position.import_origin for position in stripped.positions):
             continue
-        binders = parse_top_level_binders(stripped)
+        scan_target = import_header_located(stripped) if import_origin_only else stripped
+        binders = parse_top_level_binders(scan_target)
         if binders is not None:
             declarations.extend(Declaration(binder.text, binder.position) for binder in binders)
             continue
-        declarations.extend(scan_line_declarations(stripped, import_origin_only=import_origin_only))
+        declarations.extend(scan_line_declarations(scan_target, import_origin_only=import_origin_only))
     return dedupe_declarations(declarations)
+
+
+def import_header_located(located: LocatedText) -> LocatedText:
+    lines = split_lines_located(located)
+    if not lines:
+        return located
+    return lines[0].strip()
 
 
 def logical_lines_for_declaration_scan(located: LocatedText) -> list[LocatedText]:
@@ -354,9 +364,11 @@ def scan_line_declarations(line: LocatedText, *, import_origin_only: bool) -> li
     if declaration is not None:
         name, inputs, outputs, _ = declaration
         declarations.append(declaration_at_text(stripped, name, import_origin_only=import_origin_only))
-        for term in inputs + outputs:
-            if is_plain_sym(term):
-                declarations.append(declaration_at_text(stripped, term, import_origin_only=import_origin_only))
+        if not import_origin_only:
+            for term in inputs + outputs:
+                if is_plain_sym(term):
+                    declarations.append(declaration_at_text(stripped, term, import_origin_only=import_origin_only))
+        return [declaration for declaration in declarations if declaration is not None]
 
     for separator in ("=", "~", "::"):
         if separator in stripped.text:

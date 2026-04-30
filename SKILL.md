@@ -117,7 +117,8 @@ logic-language module-text semantics, compilation, and diagnostics
     - every declared-sym implicitly inherits itself
     `M("| sym | TS") = M("| sym | sym~sym | TS")`
 
-- introduce `tuple-literal`
+- introduce `tuple` intrinsic-sym
+    - `set~tuple`
     - `(sym1, sym2, ...)` is a tuple-literal.
     - `[sym1, sym2, ...]` is identical to `(sym1, sym2, ...)`
     - tuple-literals are ordinary HOL tuple expressions.
@@ -319,11 +320,17 @@ logic-language module-text semantics, compilation, and diagnostics
         `out_sym` infers `sym~out_sym` only if `sym` is visible.
         `merge_out` infers `out~merge_out` only if `out` is visible.
     - `{class}_class` inherits `{class}` only when `{class}` is visible.
-    - `{prefix}_{class}_list` and `{prefix}_{class}s` inherit `tuple`, and their elements inherit `{class}`, only when `{class}` is visible.
+    - `{prefix}_{class}_list` inherits `tuple`, and its elements inherit `{class}`, only when `{class}` is visible.
+    - `{prefix}_{class}s` inherits `set`, and its elements inherit `{class}`, only when `{class}` is visible.
     - `{class}{digit}` and `{prefix}_{class}` and `{class}_class` syms inherit `{class}`.
         M("| prefix_object1") = M("| prefix_object1 | object~prefix_object1")
-    - `{prefix}_{class}_list` and `{prefix}_{class}s` inherit `tuple`. and all its elements inherit `{class}`
-        M("| prefix_objects") = M("| prefix_objects | tuple~prefix_objects | \all{sym \in prefix_objects | object~sym }")
+    - `{prefix}_{class}_list` inherits `tuple`. and all its elements inherit `{class}`
+        M("| prefix_object_list") = M("| prefix_object_list | tuple~prefix_object_list | \all{sym \in prefix_object_list | object~sym }")
+    - `{prefix}_{class}s` inherits `set`. and all its elements inherit `{class}`
+        M("| prefix_objects") = M("| prefix_objects | set~prefix_objects | \all{sym \in prefix_objects | object~sym }")
+
+- when `set-literal` is the only parameter in `statement`, it can ignore `()`
+    `M("\union({sym1, sym2})") = M("\union{sym1, sym2}")`
 
 - introduce `|-`/`branch` in multi-line form.
 - introduce a group of `|-` as `switch`. It translates to one `module-text` with nested `QMT`s.

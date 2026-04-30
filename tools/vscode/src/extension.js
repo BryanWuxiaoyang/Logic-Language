@@ -4,6 +4,7 @@ const vscode = require("vscode");
 
 const DIAGNOSTIC_DELAY_MS = 350;
 const DIAGNOSTIC_SOURCE = "logic-language";
+const DEFAULT_PYTHON_PATH = process.platform === "win32" ? "py" : "python3";
 
 function activate(context) {
   const diagnostics = vscode.languages.createDiagnosticCollection(DIAGNOSTIC_SOURCE);
@@ -31,11 +32,13 @@ function activate(context) {
   }
 
   function getPythonPath(document) {
-    return (
-      vscode.workspace
-        .getConfiguration("logicLanguage", document.uri)
-        .get("pythonPath") || "python3"
-    );
+    const configuredPath = vscode.workspace
+      .getConfiguration("logicLanguage", document.uri)
+      .get("pythonPath");
+    if (typeof configuredPath === "string" && configuredPath.trim()) {
+      return configuredPath.trim();
+    }
+    return DEFAULT_PYTHON_PATH;
   }
 
   function getDocumentLabel(document) {
@@ -142,10 +145,14 @@ function activate(context) {
     const line = Math.max(0, Number(entry.lineno) || 0);
     const start = Math.max(0, Number(entry.col_start_no) || 0);
     const end = Math.max(start + 1, Number(entry.col_end_no) || start + 1);
-    const severity =
-      entry.type === "warning"
-        ? vscode.DiagnosticSeverity.Warning
-        : vscode.DiagnosticSeverity.Error;
+    let severity = vscode.DiagnosticSeverity.Error;
+    if (entry.type === "warning") {
+      severity = vscode.DiagnosticSeverity.Warning;
+    } else if (entry.type === "information") {
+      severity = vscode.DiagnosticSeverity.Information;
+    } else if (entry.type === "hint") {
+      severity = vscode.DiagnosticSeverity.Hint;
+    }
     const diagnostic = new vscode.Diagnostic(
       new vscode.Range(line, start, line, end),
       entry.reason || entry.code || "logic-language syntax issue",

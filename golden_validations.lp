@@ -55,3 +55,29 @@
         | sym1
         | sym1 \ne x
         P(sym1)
+
+# collection implicit-inheritance
+\all
+    object
+    # original plural collection
+    \all
+        prefix_objects
+    # expanded plural collection target
+    \all
+        | prefix_objects
+        | sym~prefix_objects
+        | prefix_objects~prefix_objects
+        | set~prefix_objects
+        \all{| prefix_objects_item | prefix_objects_item \in prefix_objects | object~prefix_objects_item}
+
+    # original list collection
+    \all
+        prefix_object_list
+    # expanded list collection target
+    \all
+        | prefix_object_list
+        | sym~prefix_object_list
+        | prefix_object_list~prefix_object_list
+        | list~prefix_object_list
+        | tuple~prefix_object_list
+        \all{| prefix_object_list_item | prefix_object_list_item \in prefix_object_list | object~prefix_object_list_item}

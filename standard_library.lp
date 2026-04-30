@@ -3,6 +3,7 @@ sym = symbol
 value
 set
 tuple
+set~tuple
 list = tuple
 char
 string
