@@ -16,6 +16,8 @@ from compile_module_text import (
     IMPORT_RE,
     LATEX_CODE_RE,
     ModuleCompiler,
+    find_quoted_literal_end,
+    is_literal_quote_start,
     load_lark_parser,
     load_tokens,
     normalize_latex,
@@ -187,15 +189,14 @@ def latex_errors(text: str, file_label: str, tokens: dict[str, str]) -> list[Dia
 def brace_errors(text: str, file_label: str) -> list[Diagnostic]:
     diagnostics: list[Diagnostic] = []
     stack: list[tuple[int, int]] = []
-    in_string = False
     for line_index, line in enumerate(text.splitlines()):
         code = strip_comment_for_scan(line)
-        for column, char in enumerate(code):
-            if char == '"':
-                in_string = not in_string
+        column = 0
+        while column < len(code):
+            if is_literal_quote_start(code, column):
+                column = find_quoted_literal_end(code, column) + 1
                 continue
-            if in_string:
-                continue
+            char = code[column]
             if char == "{":
                 stack.append((line_index, column))
             elif char == "}":
@@ -213,6 +214,7 @@ def brace_errors(text: str, file_label: str) -> list[Diagnostic]:
                             "unmatched closing brace",
                         )
                     )
+            column += 1
     for line_index, column in stack:
         diagnostics.append(
             make_diagnostic(
@@ -229,17 +231,14 @@ def brace_errors(text: str, file_label: str) -> list[Diagnostic]:
 
 
 def strip_comment_for_scan(line: str) -> str:
-    in_string = False
-    escaped = False
-    for index, char in enumerate(line):
-        if char == "\\" and in_string:
-            escaped = not escaped
+    index = 0
+    while index < len(line):
+        if is_literal_quote_start(line, index):
+            index = find_quoted_literal_end(line, index) + 1
             continue
-        if char == '"' and not escaped:
-            in_string = not in_string
-        escaped = False
-        if char == "#" and not in_string:
+        if line[index] == "#":
             return line[:index]
+        index += 1
     return line
 
 

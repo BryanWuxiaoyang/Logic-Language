@@ -18,7 +18,9 @@ from compile_module_text import (
     collect_indented_block,
     dedupe,
     find_matching,
+    find_quoted_literal_end,
     has_top_level,
+    is_literal_quote_start,
     is_plain_sym,
     load_tokens,
     parse_declaration,
@@ -656,22 +658,21 @@ def split_terms_located(located: LocatedText) -> list[LocatedText]:
     terms: list[LocatedText] = []
     start = 0
     stack: list[str] = []
-    in_string = False
     index = 0
     while index < len(located.text):
         char = located.text[index]
-        if char == '"':
-            in_string = not in_string
-        elif not in_string:
-            if char in "({[":
-                stack.append({"(": ")", "{": "}", "[": "]"}[char])
-            elif stack and char == stack[-1]:
-                stack.pop()
-            elif not stack and char in {",", "\n"}:
-                term = located.slice(start, index).strip()
-                if term.text:
-                    terms.append(term)
-                start = index + 1
+        if is_literal_quote_start(located.text, index):
+            index = find_quoted_literal_end(located.text, index) + 1
+            continue
+        if char in "({[":
+            stack.append({"(": ")", "{": "}", "[": "]"}[char])
+        elif stack and char == stack[-1]:
+            stack.pop()
+        elif not stack and char in {",", "\n"}:
+            term = located.slice(start, index).strip()
+            if term.text:
+                terms.append(term)
+            start = index + 1
         index += 1
     term = located.slice(start).strip()
     if term.text:
@@ -683,22 +684,21 @@ def split_top_level_located(located: LocatedText, separator: str) -> list[Locate
     parts: list[LocatedText] = []
     start = 0
     stack: list[str] = []
-    in_string = False
     index = 0
     while index < len(located.text):
         char = located.text[index]
-        if char == '"':
-            in_string = not in_string
-        elif not in_string:
-            if char in "({[":
-                stack.append({"(": ")", "{": "}", "[": "]"}[char])
-            elif stack and char == stack[-1]:
-                stack.pop()
-            elif not stack and located.text.startswith(separator, index):
-                parts.append(located.slice(start, index))
-                index += len(separator)
-                start = index
-                continue
+        if is_literal_quote_start(located.text, index):
+            index = find_quoted_literal_end(located.text, index) + 1
+            continue
+        if char in "({[":
+            stack.append({"(": ")", "{": "}", "[": "]"}[char])
+        elif stack and char == stack[-1]:
+            stack.pop()
+        elif not stack and located.text.startswith(separator, index):
+            parts.append(located.slice(start, index))
+            index += len(separator)
+            start = index
+            continue
         index += 1
     parts.append(located.slice(start))
     return parts

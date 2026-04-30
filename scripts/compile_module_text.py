@@ -20,9 +20,24 @@ except ModuleNotFoundError:  # pragma: no cover - exercised by CLI environments.
 
 LATEX_CODE_RE = re.compile(r"\\[A-Za-z_][A-Za-z0-9_]*")
 IMPORT_RE = re.compile(r"^(?P<indent>[ \t]*)\$import\s+(?P<path>.+?)\s*$")
-INTRINSIC_SYMS = {"tuple", "set", "function", "value", "true", "false", "bool", "sym"}
+INTRINSIC_SYMS = {"tuple", "set", "function", "value", "true", "false", "bool", "sym", "char", "string"}
 INFER_OPERATORS = ("=", ">", "<", ">=", "<=", "≤", "≥", "∈", "∉", "⊂", "⊄", "⊆", "⊈", "≠")
 FRESH_PREFIX = "__logic_language_out"
+BASIC_ESCAPES = {
+    "n": "\n",
+    "r": "\r",
+    "t": "\t",
+    "\\": "\\",
+    '"': '"',
+    "'": "'",
+}
+ESCAPE_OUTPUTS = {
+    "\n": r"\n",
+    "\r": r"\r",
+    "\t": r"\t",
+    "\\": r"\\",
+    "'": r"\'",
+}
 
 
 class CompileError(Exception):
@@ -88,6 +103,20 @@ class Module:
             }
         )
         return data
+
+
+@dataclass(frozen=True)
+class LiteralValue:
+    kind: str
+    value: str
+    raw: str
+
+
+@dataclass
+class LoweredTerm:
+    generated_syms: list[str] = field(default_factory=list)
+    generated_predicate_statements: list[Statement] = field(default_factory=list)
+    output_statements: list[Statement] = field(default_factory=list)
 
 
 def skill_dir() -> Path:
@@ -290,13 +319,24 @@ class ModuleCompiler:
         if not syms:
             inferred = infer_syms(predicate_texts)
             syms = inferred
-        syms = dedupe([sym for sym in syms if sym not in INTRINSIC_SYMS])
+        predicate_statements: list[Statement] = []
+        target_statements: list[Statement] = []
+        generated_syms: list[str] = []
+        for term in predicate_texts:
+            lowered = self.lower_term(term, target_section=False)
+            generated_syms.extend(lowered.generated_syms)
+            predicate_statements.extend(lowered.generated_predicate_statements)
+            predicate_statements.extend(lowered.output_statements)
+        for term in target_texts:
+            lowered = self.lower_term(term, target_section=True)
+            generated_syms.extend(lowered.generated_syms)
+            predicate_statements.extend(lowered.generated_predicate_statements)
+            target_statements.extend(lowered.output_statements)
+        syms = dedupe([sym for sym in [*syms, *generated_syms] if sym not in INTRINSIC_SYMS])
         if module_type == "set" and not syms:
             raise CompileError("set module requires non-empty syms")
-        if not target_texts:
+        if not target_statements:
             raise CompileError("module requires non-empty target_statements")
-        predicate_statements = [self.compile_statement(term) for term in predicate_texts]
-        target_statements = [self.compile_statement(term) for term in target_texts]
         return Module(
             type=module_type,
             quantifier=quantifier if module_type == "quantifier" else None,
@@ -317,10 +357,30 @@ class ModuleCompiler:
             target_statements=[Statement(text="$module0", sub_modules=[submodule])],
         )
 
-    def compile_statement(self, text: str) -> Statement:
+    def lower_term(self, text: str, *, target_section: bool) -> LoweredTerm:
+        text = text.strip()
+        rewritten, sub_modules = self.extract_sub_modules(text)
+        direct_assignment = self.parse_direct_literal_assignment(rewritten)
+        if direct_assignment is not None:
+            sym, literal = direct_assignment
+            lowered = [self.compile_statement_text(statement_text) for statement_text in self.lower_literal_assignment(sym, literal)]
+            return LoweredTerm(output_statements=lowered)
+        rewritten, generated_syms, generated_predicates = self.lift_literals_in_text(rewritten)
+        if not rewritten:
+            raise CompileError("literal cannot be used as a standalone statement")
+        return LoweredTerm(
+            generated_syms=generated_syms,
+            generated_predicate_statements=[self.compile_statement_text(statement_text) for statement_text in generated_predicates],
+            output_statements=[self.compile_statement_text(rewritten, sub_modules=sub_modules)],
+        )
+
+    def compile_statement_text(self, text: str, *, sub_modules: list[Module] | None = None) -> Statement:
         text = text.strip()
         text = lower_member_calls(text)
-        rewritten, sub_modules = self.extract_sub_modules(text)
+        if sub_modules is None:
+            rewritten, sub_modules = self.extract_sub_modules(text)
+        else:
+            rewritten = text
         return Statement(text=rewritten, sub_modules=sub_modules)
 
     def extract_sub_modules(self, text: str) -> tuple[str, list[Module]]:
@@ -353,6 +413,46 @@ class ModuleCompiler:
             if sym not in seed:
                 return sym
 
+    def parse_direct_literal_assignment(self, text: str) -> tuple[str, LiteralValue] | None:
+        assignment_index = top_level_assignment_index(text)
+        if assignment_index is None:
+            return None
+        left = text[:assignment_index].strip()
+        right = text[assignment_index + 1 :].strip()
+        if is_literal_text(left):
+            raise CompileError("literal cannot appear on assignment left-hand side")
+        literal = parse_literal_text(right)
+        if literal is None or not is_plain_sym(left):
+            return None
+        return left, literal
+
+    def lower_literal_assignment(self, sym: str, literal: LiteralValue) -> list[str]:
+        if literal.kind == "char":
+            return [f"char~{sym}", f"{sym} = {encode_char_literal(literal.value)}"]
+        statements = [f"string~{sym}", f"{sym}.size = {len(literal.value)}"]
+        statements.extend(f"{sym}[{index}] = {encode_char_literal(char)}" for index, char in enumerate(literal.value))
+        return statements
+
+    def lift_literals_in_text(self, text: str) -> tuple[str, list[str], list[str]]:
+        output: list[str] = []
+        generated_syms: list[str] = []
+        generated_predicates: list[str] = []
+        index = 0
+        while index < len(text):
+            if is_literal_quote_start(text, index):
+                literal = parse_literal_text(text[index : find_quoted_literal_end(text, index) + 1])
+                if literal is None:
+                    raise CompileError("invalid literal")
+                fresh = self.fresh_sym(text)
+                generated_syms.append(fresh)
+                generated_predicates.extend(self.lower_literal_assignment(fresh, literal))
+                output.append(fresh)
+                index += len(literal.raw)
+                continue
+            output.append(text[index])
+            index += 1
+        return "".join(output).strip(), generated_syms, generated_predicates
+
 
 def remove_comments(text: str) -> str:
     lines = []
@@ -362,17 +462,14 @@ def remove_comments(text: str) -> str:
 
 
 def strip_comment(line: str) -> str:
-    in_string = False
-    escaped = False
-    for index, char in enumerate(line):
-        if char == "\\" and in_string:
-            escaped = not escaped
+    index = 0
+    while index < len(line):
+        if is_literal_quote_start(line, index):
+            index = find_quoted_literal_end(line, index) + 1
             continue
-        if char == '"' and not escaped:
-            in_string = not in_string
-        escaped = False
-        if char == "#" and not in_string:
+        if line[index] == "#":
             return line[:index]
+        index += 1
     return line
 
 
@@ -406,16 +503,17 @@ def logical_lines(text: str) -> list[str]:
 
 def brace_delta(line: str) -> int:
     delta = 0
-    in_string = False
-    for char in line:
-        if char == '"':
-            in_string = not in_string
-        if in_string:
+    index = 0
+    while index < len(line):
+        char = line[index]
+        if is_literal_quote_start(line, index):
+            index = find_quoted_literal_end(line, index) + 1
             continue
         if char == "{":
             delta += 1
         elif char == "}":
             delta -= 1
+        index += 1
     return delta
 
 
@@ -499,22 +597,21 @@ def split_terms(text: str) -> list[str]:
     terms: list[str] = []
     start = 0
     stack: list[str] = []
-    in_string = False
     index = 0
     while index < len(text):
         char = text[index]
-        if char == '"':
-            in_string = not in_string
-        elif not in_string:
-            if char in "({[":
-                stack.append({"(": ")", "{": "}", "[": "]"}[char])
-            elif stack and char == stack[-1]:
-                stack.pop()
-            elif not stack and char in {",", "\n"}:
-                term = text[start:index].strip()
-                if term:
-                    terms.append(term)
-                start = index + 1
+        if is_literal_quote_start(text, index):
+            index = find_quoted_literal_end(text, index) + 1
+            continue
+        if char in "({[":
+            stack.append({"(": ")", "{": "}", "[": "]"}[char])
+        elif stack and char == stack[-1]:
+            stack.pop()
+        elif not stack and char in {",", "\n"}:
+            term = text[start:index].strip()
+            if term:
+                terms.append(term)
+            start = index + 1
         index += 1
     term = text[start:].strip()
     if term:
@@ -526,22 +623,21 @@ def split_top_level(text: str, separator: str) -> list[str]:
     parts: list[str] = []
     start = 0
     stack: list[str] = []
-    in_string = False
     index = 0
     while index < len(text):
         char = text[index]
-        if char == '"':
-            in_string = not in_string
-        elif not in_string:
-            if char in "({[":
-                stack.append({ "(": ")", "{": "}", "[": "]" }[char])
-            elif stack and char == stack[-1]:
-                stack.pop()
-            elif not stack and text.startswith(separator, index):
-                parts.append(text[start:index])
-                index += len(separator)
-                start = index
-                continue
+        if is_literal_quote_start(text, index):
+            index = find_quoted_literal_end(text, index) + 1
+            continue
+        if char in "({[":
+            stack.append({"(": ")", "{": "}", "[": "]"}[char])
+        elif stack and char == stack[-1]:
+            stack.pop()
+        elif not stack and text.startswith(separator, index):
+            parts.append(text[start:index])
+            index += len(separator)
+            start = index
+            continue
         index += 1
     parts.append(text[start:])
     return parts
@@ -560,12 +656,11 @@ def has_top_level(text: str, separator: str) -> bool:
 
 def find_matching(text: str, start: int, open_char: str, close_char: str) -> int:
     depth = 0
-    in_string = False
-    for index in range(start, len(text)):
+    index = start
+    while index < len(text):
         char = text[index]
-        if char == '"':
-            in_string = not in_string
-        if in_string:
+        if is_literal_quote_start(text, index):
+            index = find_quoted_literal_end(text, index) + 1
             continue
         if char == open_char:
             depth += 1
@@ -573,6 +668,7 @@ def find_matching(text: str, start: int, open_char: str, close_char: str) -> int
             depth -= 1
             if depth == 0:
                 return index
+        index += 1
     raise CompileError(f"unclosed {open_char}")
 
 
@@ -659,7 +755,12 @@ def parse_declaration(text: str) -> tuple[str, list[str], list[str], str] | None
 
 def declaration_colon_index(text: str) -> int | None:
     stack: list[str] = []
-    for index, char in enumerate(text):
+    index = 0
+    while index < len(text):
+        char = text[index]
+        if is_literal_quote_start(text, index):
+            index = find_quoted_literal_end(text, index) + 1
+            continue
         if char in "([{":
             stack.append({"(": ")", "[": "]", "{": "}"}[char])
         elif stack and char == stack[-1]:
@@ -670,7 +771,103 @@ def declaration_colon_index(text: str) -> int | None:
             if previous_char == ":" or next_char == ":":
                 continue
             return index
+        index += 1
     return None
+
+
+def find_quoted_literal_end(text: str, start: int) -> int:
+    quote = text[start]
+    kind = "string" if quote == '"' else "char"
+    index = start + 1
+    while index < len(text):
+        char = text[index]
+        if char == "\\":
+            index += 2
+            continue
+        if char == quote:
+            return index
+        if char == "\n":
+            raise CompileError(f"unterminated {kind} literal")
+        index += 1
+    raise CompileError(f"unterminated {kind} literal")
+
+
+def decode_literal_body(body: str) -> str:
+    output: list[str] = []
+    index = 0
+    while index < len(body):
+        char = body[index]
+        if char != "\\":
+            output.append(char)
+            index += 1
+            continue
+        if index + 1 >= len(body):
+            raise CompileError("unterminated escape sequence")
+        escape = body[index + 1]
+        if escape not in BASIC_ESCAPES:
+            raise CompileError(f"invalid escape sequence \\{escape}")
+        output.append(BASIC_ESCAPES[escape])
+        index += 2
+    return "".join(output)
+
+
+def parse_literal_text(text: str) -> LiteralValue | None:
+    if len(text) < 2 or text[0] not in {'"', "'"} or text[-1] != text[0]:
+        return None
+    quote = text[0]
+    if find_quoted_literal_end(text, 0) != len(text) - 1:
+        return None
+    value = decode_literal_body(text[1:-1])
+    if quote == "'":
+        if len(value) != 1:
+            raise CompileError("char literal must contain exactly one character")
+        return LiteralValue(kind="char", value=value, raw=text)
+    return LiteralValue(kind="string", value=value, raw=text)
+
+
+def is_literal_text(text: str) -> bool:
+    return parse_literal_text(text.strip()) is not None
+
+
+def encode_char_literal(value: str) -> str:
+    if len(value) != 1:
+        raise CompileError("char literal must contain exactly one character")
+    return "'" + ESCAPE_OUTPUTS.get(value, value) + "'"
+
+
+def top_level_assignment_index(text: str) -> int | None:
+    stack: list[str] = []
+    index = 0
+    while index < len(text):
+        char = text[index]
+        if is_literal_quote_start(text, index):
+            index = find_quoted_literal_end(text, index) + 1
+            continue
+        if char in "({[":
+            stack.append({"(": ")", "{": "}", "[": "]"}[char])
+        elif stack and char == stack[-1]:
+            stack.pop()
+        elif not stack and char == "=":
+            previous_char = text[index - 1] if index > 0 else ""
+            next_char = text[index + 1] if index + 1 < len(text) else ""
+            if previous_char in {"<", ">", "!", "="} or next_char in {">", "="}:
+                index += 1
+                continue
+            return index
+        index += 1
+    return None
+
+
+def is_literal_quote_start(text: str, index: int) -> bool:
+    quote = text[index]
+    if quote == '"':
+        return True
+    if quote != "'":
+        return False
+    previous = text[index - 1] if index > 0 else ""
+    if previous.isalnum() or previous == "_" or previous == "$":
+        return False
+    return True
 
 
 def parse_signature_terms(text: str) -> list[str]:

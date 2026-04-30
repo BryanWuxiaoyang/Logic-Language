@@ -76,7 +76,7 @@ logic-language module-text semantics, compilation, and diagnostics
 ### Describe `module-signature`
 - introduce `module-signature` as the module-file-level validation environment for modules parsed from a `module-file`.
 - The `module-signature` includes
-  - `intrinsic-syms`: `tuple`, `set`, `function`, `value`, `true`, `false`, `bool`, `sym`
+  - `intrinsic-syms`: `tuple`, `set`, `function`, `value`, `true`, `false`, `bool`, `sym`, `char`, `string`
   - `function-syms`
   - `built-in-forms` includes form categories accepted by `module-text`.
     - literal forms: set-comprehension, tuple-comprehension, set-literals, tuple-literals, numeric-literals
@@ -128,6 +128,7 @@ logic-language module-text semantics, compilation, and diagnostics
         M("sym = (sym1, sym2)") =
         M("
         tuple~sym
+        sym.size = 2
         sym[0] = sym1
         sym[1] = sym2
         ")
@@ -222,9 +223,25 @@ logic-language module-text semantics, compilation, and diagnostics
 - introduce `set-literal`
     - `{sym1, sym2, ...}` is a set-literal.
     - a set-literal denotes the predicate that holds exactly on the listed elements.
-      `M("sym = {sym1, sym2}") = M("∀{| x | sym(x) = (x = sym1 ∨ x = sym2)}")`
     - if a declared symbol is equated with a set-literal, the symbol is classified as `set`.
-      `M("sym = {sym1, sym2}") = M("sym = {sym1, sym2}, set~sym")`
+      `M("sym = {sym1, sym2}") = M("∀{| x | set~sym, sym.size = 2, sym(x) = (x = sym1 ∨ x = sym2)}")`
+
+- introduce `char` intrinsic-sym
+    - `char-literal` is single characters wrapped in `''`, e.g. 'a'/'b'/'c'/...
+    `M("sym = 'a'") = M(sym = 'a', char~sym)`
+
+- introduce `string` intrinsic-sym
+    - `stirng` is a list of chars. it has `string = char_list`
+    `M("sym = \"abc\"") = M("
+    string~sym
+    sym.size = 3
+    sym[0] = 'a'
+    sym[1] = 'b'
+    sym[2] = 'c'
+    "
+    )`
+
+
 - in non-braced `module-text` or `QMT`, `{sym, PS}` before final `TSs` can swap freely
     `M("| sym1 | PS1 | sym2 | PS2 | TS") = M("| sym1 | sym2 | PS1 | PS2 | TS")`
 

@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from compile_module_text import INTRINSIC_SYMS, CompileError, parse_declaration
+from compile_module_text import FRESH_PREFIX, INTRINSIC_SYMS, CompileError, parse_declaration
 from syntax_check_common import (
     STDIN_FILE,
     Binder,
@@ -108,6 +108,8 @@ class SemanticChecker:
 
     def check_binder(self, binder: Binder, current_scope_id: int, ancestors: set[int]) -> None:
         if binder.text in self.warned_names:
+            return
+        if binder.text.startswith(FRESH_PREFIX):
             return
         if is_function_declaration_formal(binder.position):
             return

@@ -1,8 +1,12 @@
 symbol
+sym = symbol
 value
 set
 tuple
 list = tuple
+char
+string
+str = string
 bool
 true
 false
