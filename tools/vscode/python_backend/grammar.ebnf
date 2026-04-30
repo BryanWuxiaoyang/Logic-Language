@@ -1,0 +1,32 @@
+// logic-language executable grammar for Lark.
+//
+// Source text is normalized by latex-tokens.json before parsing. In
+// particular, \all, \exists, \land, \and, \lor, and \or normalize to
+// ∀, ∃, ∧, &&, ∨, and ||.
+//
+// The compiler uses this grammar for balanced module expressions and keeps
+// statement expressions as normalized text. Section roles are assigned by the
+// compiler after parsing:
+// - rightmost section: target_statements
+// - left-to-right binder section: syms
+// - remaining middle sections: predicate_statements
+
+?start: module_expr
+
+?module_expr: quantified_module
+            | set_module
+
+quantified_module: QUANTIFIER "{" section_text? "}"
+set_module: "{" section_text? "}"
+
+QUANTIFIER: "∀" | "∃"
+
+// The section scanner in compile_module_text.py interprets top-level |, =>,
+// and , separators because sections may contain nested module expressions.
+section_text: section_chunk+
+
+?section_chunk: /[^{}]+/
+              | module_expr
+
+%import common.WS_INLINE
+%ignore WS_INLINE

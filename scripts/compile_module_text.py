@@ -20,7 +20,7 @@ except ModuleNotFoundError:  # pragma: no cover - exercised by CLI environments.
 
 LATEX_CODE_RE = re.compile(r"\\[A-Za-z_][A-Za-z0-9_]*")
 IMPORT_RE = re.compile(r"^(?P<indent>[ \t]*)\$import\s+(?P<path>.+?)\s*$")
-INTRINSIC_SYMS = {"tuple", "set", "function", "value", "true", "false", "bool", "symbol"}
+INTRINSIC_SYMS = {"tuple", "set", "function", "value", "true", "false", "bool", "sym"}
 INFER_OPERATORS = ("=", ">", "<", ">=", "<=", "≤", "≥", "∈", "∉", "⊂", "⊄", "⊆", "⊈", "≠")
 FRESH_PREFIX = "__logic_language_out"
 

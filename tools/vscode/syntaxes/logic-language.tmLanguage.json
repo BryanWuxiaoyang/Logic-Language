@@ -1,0 +1,81 @@
+{
+  "scopeName": "source.logic-language",
+  "name": "Logic Language",
+  "patterns": [
+    {
+      "include": "#comments"
+    },
+    {
+      "include": "#imports"
+    },
+    {
+      "include": "#strings"
+    },
+    {
+      "include": "#quantifiers"
+    },
+    {
+      "include": "#operators"
+    }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        {
+          "name": "comment.line.number-sign.logic-language",
+          "match": "#.*$"
+        }
+      ]
+    },
+    "imports": {
+      "patterns": [
+        {
+          "captures": {
+            "1": {
+              "name": "keyword.control.import.logic-language"
+            },
+            "2": {
+              "name": "string.unquoted.import-path.logic-language"
+            }
+          },
+          "match": "^(\\s*\\$import)\\s+(.*)$"
+        }
+      ]
+    },
+    "strings": {
+      "patterns": [
+        {
+          "name": "string.quoted.double.logic-language",
+          "begin": "\"",
+          "end": "\"",
+          "patterns": [
+            {
+              "name": "constant.character.escape.logic-language",
+              "match": "\\\\[\\\\\"nrt]"
+            }
+          ]
+        }
+      ]
+    },
+    "quantifiers": {
+      "patterns": [
+        {
+          "name": "keyword.control.quantifier.logic-language",
+          "match": "[\\u2200\\u2203]"
+        }
+      ]
+    },
+    "operators": {
+      "patterns": [
+        {
+          "name": "keyword.operator.logic-language",
+          "match": "=>|::|:=:|->|&&|\\|\\||[=~:+\\-*/^<>!|]"
+        },
+        {
+          "name": "keyword.operator.logic-language",
+          "match": "[\\u2208\\u2209\\u222A\\u2229\\u2264\\u2265\\u2260]"
+        }
+      ]
+    }
+  }
+}

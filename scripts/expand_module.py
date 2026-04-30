@@ -218,7 +218,7 @@ class ModuleExpander:
     def implicit_predicates(self, syms: list[str]) -> list[str]:
         predicates: list[str] = []
         for sym in syms:
-            predicates.append(f"symbol~{sym}")
+            predicates.append(f"sym~{sym}")
             predicates.append(f"{sym}~{sym}")
             predicates.extend(self.naming_inheritance(sym))
         return predicates

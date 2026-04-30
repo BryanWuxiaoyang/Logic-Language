@@ -1,9 +1,14 @@
-# Summary
-todo
+---
+name: logic-language
+description: Parse, compile, and diagnose logic-language module text (postfix as .lp) and semantics.
+---
 
-# Semantics
+# Overview
+logic-language module-text semantics, compilation, and diagnostics
 
-## describe the `logic-system`
+## Semantics
+
+### Describe the `logic-system`
 - the `logic-system` is standard typed higher-order logic (HOL).
 
 - the `logic-system` uses the usual HOL written forms for:
@@ -29,7 +34,7 @@ todo
 
 - this document does not redefine HOL in detail. It uses the `logic-system` only as the target written form for translating `logic-language` modules.
 
-## Describe `module`
+### Describe `module`
 - a `module` is the parsed artifact translated from `module-text`.
 - `logic(module)` translates `module` to a written-form expression in the `logic-system`.
     - `logic(module)` is defined by the concrete kind of `module`, currently `set-module` or `quantified-module`.
@@ -68,10 +73,10 @@ todo
 
 - if `sym` is in a `module`, it shouldn't appear in any of its `nested-modules`
 
-## Describe `module-signature`
+### Describe `module-signature`
 - introduce `module-signature` as the module-file-level validation environment for modules parsed from a `module-file`.
 - The `module-signature` includes
-  - `intrinsic-syms`: `tuple`, `set`, `function`, `value`, `true`, `false`, `bool`, `symbol`
+  - `intrinsic-syms`: `tuple`, `set`, `function`, `value`, `true`, `false`, `bool`, `sym`
   - `function-syms`
   - `built-in-forms` includes form categories accepted by `module-text`.
     - literal forms: set-comprehension, tuple-comprehension, set-literals, tuple-literals, numeric-literals
@@ -79,7 +84,7 @@ todo
     - module-text forms: imports, sections, comments, branches, function declarations, class declarations, image-set syntax
 - if a `intrinsic-sym` appears in `module.syms`, it is omitted. e.g. `M("| value, sym | PS | TS") = M("| sym | PS | TS")`
 
-## Describe `module-text`
+## Module Text
 - introduce `module-text` as the written syntax of `logic-language`.
     - `M(module-text)` translates `module-text` to a module
     - `M("...") = M("...")` denotes reduction between equivalent surface forms.
@@ -112,14 +117,20 @@ todo
     - every declared-sym implicitly inherits itself
     `M("| sym | TS") = M("| sym | sym~sym | TS")`
 
-- introduce `tuple` as an intrinsic sym in `module-text`.
-    M("| sym1, sym2, sym3 | (sym1, sym2) = sym3 | TS") = M("
-    | sym1, sym2, sym3
-    tuple~(sym1, sym2) 
-    | (sym1, sym2) = sym3 
-    TS
-    "
-    )
+- introduce `tuple-literal`
+    - `(sym1, sym2, ...)` is a tuple-literal.
+    - `[sym1, sym2, ...]` is identical to `(sym1, sym2, ...)`
+    - tuple-literals are ordinary HOL tuple expressions.
+    - tuple-literal equality is ordinary HOL tuple equality.
+    - tuple-literal equality lowers component-wise.
+      `M("(sym1, sym2) = (sym1', sym2')") = M("sym1 = sym1', sym2 = sym2'")`
+    - if a declared symbol is equated with a tuple-literal, the symbol is classified as `tuple`.
+        M("sym = (sym1, sym2)") =
+        M("
+        tuple~sym
+        sym[0] = sym1
+        sym[1] = sym2
+        ")
 
 - introduce `value` as an intrinsic sym in `module-text`.
     - numeric literals of supported syntax implicitly have an adjacent wrapper fact `value~literal`.
@@ -143,10 +154,10 @@ todo
     "
     )
 
-- introduce `symbol` as an intrinsic sym in `module-text`
-    - all `declared-syms` inherit `symbol`
-    `M("| sym1, sym2 | PS | TS") = M("| sym1, sym2 | symbol~sym1 | symbol~sym2 | PS | TS")`
-    - Induction: all `syms` in `module` will have at least `symbol` as inheriting `class-sym`, except `symbol` itself
+- introduce `sym` as an intrinsic sym in `module-text`
+    - all `declared-syms` inherit `sym`
+    `M("| sym1, sym2 | PS | TS") = M("| sym1, sym2 | sym~sym1 | sym~sym2 | PS | TS")`
+    - Induction: all `syms` in `module` will have at least `sym` as inheriting `class-sym`, except `sym` itself
 
 - a `module-text` includes text-replacement rules for translation. Below are `M("...") = M("...")` rules that translate `module-text` to more reduced `normal-module-text`
 
@@ -208,6 +219,12 @@ todo
     ")
     Both forms reduce to a `nested-module-text` with implicit `∀` on the nested non-braced text.
 
+- introduce `set-literal`
+    - `{sym1, sym2, ...}` is a set-literal.
+    - a set-literal denotes the predicate that holds exactly on the listed elements.
+      `M("sym = {sym1, sym2}") = M("∀{| x | sym(x) = (x = sym1 ∨ x = sym2)}")`
+    - if a declared symbol is equated with a set-literal, the symbol is classified as `set`.
+      `M("sym = {sym1, sym2}") = M("sym = {sym1, sym2}, set~sym")`
 - in non-braced `module-text` or `QMT`, `{sym, PS}` before final `TSs` can swap freely
     `M("| sym1 | PS1 | sym2 | PS2 | TS") = M("| sym1 | sym2 | PS1 | PS2 | TS")`
 
@@ -275,6 +292,17 @@ todo
     `M("| sym1, sym1 | PS | TS") = M("| sym1 | PS | TS")`
 
 - introduce `implicit-inheritance` that in `PS` and `TS`, a `sym` name can implicitly add `~` predicate-statement
+    - A name-implicit class is applied only when the class part of the name resolves to a visible class-sym.
+    - A visible class-sym is an intrinsic sym or a declared sym that is usable as the first argument of `~` in the current scope.
+    - If the class part does not resolve to a visible class-sym, the name-implicit inheritance rule does not apply.
+    - Regardless, every declared-sym still inherits `sym`, except `sym` itself.
+    - `{class}{digit}` inherits `{class}` only when `{class}` is visible.
+        `sym1` infers `sym~sym1` only if `sym` is visible.
+    - `{prefix}_{class}` inherits `{class}` only when `{class}` is visible.
+        `out_sym` infers `sym~out_sym` only if `sym` is visible.
+        `merge_out` infers `out~merge_out` only if `out` is visible.
+    - `{class}_class` inherits `{class}` only when `{class}` is visible.
+    - `{prefix}_{class}_list` and `{prefix}_{class}s` inherit `tuple`, and their elements inherit `{class}`, only when `{class}` is visible.
     - `{class}{digit}` and `{prefix}_{class}` and `{class}_class` syms inherit `{class}`.
         M("| prefix_object1") = M("| prefix_object1 | object~prefix_object1")
     - `{prefix}_{class}_list` and `{prefix}_{class}s` inherit `tuple`. and all its elements inherit `{class}`
@@ -376,7 +404,7 @@ todo
 - The `function-declaration`'s `parameter` uses class-inheritance naming rules, and class-name aliasing applies in `function-declaration` only.
     - when a param-name is `class` name, this `class` itself will not be able to be used as `free-sym` inside the `function-declaration` scope.
     - when a param-name is outer-scope declared-sym, it implicitly translates to another name; otherwise it will not be a `bound-sym`.
-    - when a param-name does not imply a base-class by naming rules, it does not add any inherit predicate-statement.
+    - If a name syntactically suggests a class, but that class symbol is not visible in the current scope, then the name-implicit-class rule does not apply.
     `M("sym: (value, value1) => out_value") = M("sym: (value', value1) => out_value")`
     Note that `value'` is implicitly introduced as `bound-sym` inheriting `value` in `function-declaration`, So as to avoid sym-scope-override
 
@@ -508,7 +536,7 @@ todo
 - introduce comparator concatenation
     `M("sym1 < sym2 < sym3") = M("sym1 < sym2 && sym2 < sym3")`
 
-- introduce `[]` as identical to `()` tuple
+- introduce `[]-literal` as identical to `tuple-literal`
     `M("[x, y]") = M("(x, y)")`
 
 - introduce `[]` as a `binary-operator`
@@ -624,7 +652,14 @@ todo
     )
     `null` does not imply any output class predicate such as `out_c~null`.
 
-# Compilation
+## Diagnostics
+- `syntax_check` inputs `module-text` or `module-file` and returns syntax warnings/errors.
+    - tool: `scripts/syntax_check.py`
+- `semantic_check` inputs `module-text` or `module-file` and returns semantic warnings/errors.
+    - semantic checking only runs when syntax checking succeeds.
+    - tool: `scripts/semantic_check.py`
+
+## Compilation
 - introduce `module-file`. Each `.lp` is a `module-file`.
 - introduce `module-import`
     - `$import file-path` macro-expands to the `module-text` stored inside `file-path` with current indent-level
@@ -632,14 +667,8 @@ todo
 
 - introduce `expand_module`
     - it inputs `module-text`, expand `implicit-declare-syms` and return the expanded `module-text`
-    - related tool `scripts/expand_module_text.py`
+    - tool: `scripts/expand_module.py`
 
 - introduce `compile_module`
     - it inputs `module-text`/`module-file`, return `AST` with `Module-info`
-    - related tool
-
-- introduce `syntax_check`
-    - it inputs `module-text`/`module-file`, return syntax-warning/errors
-
-- introduce `semantic_check`
-    - it inputs `module-text`/`module-file`, return semantic-warning/errors
+    - tool: `scripts/compile_module_text.py`

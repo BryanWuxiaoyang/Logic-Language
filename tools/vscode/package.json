@@ -1,0 +1,57 @@
+{
+  "name": "logic-language",
+  "displayName": "Logic Language",
+  "description": "Syntax and semantic diagnostics for logic-language .lp module text.",
+  "version": "0.1.2",
+  "publisher": "xiaoyangwu",
+  "license": "UNLICENSED",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Linters"
+  ],
+  "activationEvents": [
+    "onLanguage:logic-language"
+  ],
+  "main": "./src/extension.js",
+  "contributes": {
+    "languages": [
+      {
+        "id": "logic-language",
+        "aliases": [
+          "Logic Language",
+          "logic-language"
+        ],
+        "extensions": [
+          ".lp"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "logic-language",
+        "scopeName": "source.logic-language",
+        "path": "./syntaxes/logic-language.tmLanguage.json"
+      }
+    ],
+    "configuration": {
+      "title": "Logic Language",
+      "properties": {
+        "logicLanguage.pythonPath": {
+          "type": "string",
+          "default": "python3",
+          "description": "Python executable used to run the bundled logic-language checkers."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "package": "vsce package --allow-missing-repository --out ../../../../artifacts/logic-language.vsix"
+  },
+  "devDependencies": {
+    "@vscode/vsce": "^3.9.1"
+  }
+}
