@@ -1,8 +1,9 @@
+# Summary
+todo
 
+# Semantics
 
-for the logic language skill in this repo, I want to ground the logic-language to a formal logic system. my initial idea is to represent it as high-order-logic, with only function and predicate.
-
-# describe the `logic-system`
+## describe the `logic-system`
 - the `logic-system` is standard typed higher-order logic (HOL).
 
 - the `logic-system` uses the usual HOL written forms for:
@@ -28,7 +29,7 @@ for the logic language skill in this repo, I want to ground the logic-language t
 
 - this document does not redefine HOL in detail. It uses the `logic-system` only as the target written form for translating `logic-language` modules.
 
-# Describe `module`
+## Describe `module`
 - a `module` is the parsed artifact translated from `module-text`.
 - `logic(module)` translates `module` to a written-form expression in the `logic-system`.
     - `logic(module)` is defined by the concrete kind of `module`, currently `set-module` or `quantified-module`.
@@ -67,7 +68,7 @@ for the logic language skill in this repo, I want to ground the logic-language t
 
 - if `sym` is in a `module`, it shouldn't appear in any of its `nested-modules`
 
-# Describe `module-signature`
+## Describe `module-signature`
 - introduce `module-signature` as the module-file-level validation environment for modules parsed from a `module-file`.
 - The `module-signature` includes
   - `intrinsic-syms`: `tuple`, `set`, `function`, `value`, `true`, `false`, `bool`, `symbol`
@@ -78,7 +79,7 @@ for the logic language skill in this repo, I want to ground the logic-language t
     - module-text forms: imports, sections, comments, branches, function declarations, class declarations, image-set syntax
 - if a `intrinsic-sym` appears in `module.syms`, it is omitted. e.g. `M("| value, sym | PS | TS") = M("| sym | PS | TS")`
 
-# Describe `module-text`
+## Describe `module-text`
 - introduce `module-text` as the written syntax of `logic-language`.
     - `M(module-text)` translates `module-text` to a module
     - `M("...") = M("...")` denotes reduction between equivalent surface forms.
@@ -623,43 +624,22 @@ for the logic language skill in this repo, I want to ground the logic-language t
     )
     `null` does not imply any output class predicate such as `out_c~null`.
 
-# Describe module-file
+# Compilation
 - introduce `module-file`. Each `.lp` is a `module-file`.
 - introduce `module-import`
     - `$import file-path` macro-expands to the `module-text` stored inside `file-path` with current indent-level
     - every `module-file` implicitly imports `standard_library.lp` in this folder
 
-- introduce `expand-imports(module-text)`
-    - `expand-imports(module-text)` macro-expands all `$import` inside `module-text`
+- introduce `expand_module`
+    - it inputs `module-text`, expand `implicit-declare-syms` and return the expanded `module-text`
+    - related tool `scripts/expand_module_text.py`
 
-- introduce `reformat-module(module-text)` that converts `latex-code` to `identifiers`
-    - use `scripts/format-module.py`
+- introduce `compile_module`
+    - it inputs `module-text`/`module-file`, return `AST` with `Module-info`
+    - related tool
 
-- introduce `compile-module-text`
-    - `compile-module-text(module-text) = M(reformat-module(expand-imports(module-text)))`
-    - `compile-module-text(module-text)` returns one JSON-serializable `module`
-    - a statement contains normalized `text` and `sub_modules`; nested module text is replaced by `$module{index}` placeholders in `text`
+- introduce `syntax_check`
+    - it inputs `module-text`/`module-file`, return syntax-warning/errors
 
-- introduce `module-signature(M)` that returns the valid-signature-syms from `M` parsed from `compile-module-text`
-  - `module-signature(M).function-syms` are `M.free-syms` that have `function~sym`
-  - `M` is invalid if any sym occurrence is not signature-syms
-    `M("| sym1 | sym2: in => out | P(sym1, sym2, value)")` is valid because `sym2` is `function-declaration-sym` and `value` is `intrinsic-sym`
-    `M("| sym1 | P(sym1, sym2)")` is invalid because `sym2` is not in `signature-syms`
-
-- introduce `compile-module-file`
-    - `compile-module-file(file-path) = compile-module-text(file-text(file-path))`
-    - `compile-module-file(file-path)` returns one `module`
-    - `compile-module-file(file-path)` is valid only when the returned `module` is a `QM`
-    - `compile-module-file(file-path)` is valid only when the returned `module` satisfies `module.free-syms ⊆ module-file.module-signature.free-syms`
-    - therefore a `module-file` cannot have root-scope `{...}` after translation
-
-- introduce `compile-module-files`
-    - `compile-module-files(file-paths)` returns a list of modules, one from each `compile-module-file(file-path)`
-
-- introduce `module-files(folder-path)`
-    - `module-files(folder-path)` is the set of `.lp` files inside `folder-path`
-
-- introduce `compile-module-folder`
-    - `compile-module-folder(folder-path) = compile-module-files(module-files(folder-path))`
-
-- introduce `compile-module` which dispatch to proper compile-function given input-path
+- introduce `semantic_check`
+    - it inputs `module-text`/`module-file`, return semantic-warning/errors

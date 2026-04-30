@@ -24,7 +24,6 @@ min: vals => val
 size = val
 cnt = val
 id = val
-i = id
 size = val
 list
     ::size: list => size
