@@ -212,11 +212,11 @@ def expand_imports(text: str, base_dir: Path, seen: set[Path] | None = None) -> 
 
 
 def compile_module_text(text: str, base_dir: Path | str = ".") -> Module:
-    from expand_module import expand_module_text
+    from compile_pipeline.stage2_desugar_module_text import desugar_module_text
 
     parser = load_lark_parser()
-    expanded = expand_module_text(text, Path(base_dir).resolve())
-    return ModuleCompiler(parser).compile(strip_artifact_imports(expanded))
+    desugared = desugar_module_text(text, Path(base_dir).resolve())
+    return ModuleCompiler(parser).compile(strip_artifact_imports(desugared))
 
 
 def strip_artifact_imports(text: str) -> str:

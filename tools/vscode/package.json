@@ -2,7 +2,7 @@
   "name": "logic-language",
   "displayName": "Logic Language",
   "description": "Syntax and semantic diagnostics for logic-language .lp module text.",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "publisher": "xiaoyangwu",
   "license": "UNLICENSED",
   "engines": {

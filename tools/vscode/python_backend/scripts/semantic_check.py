@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from compile_module_text import FRESH_PREFIX, CompileError, parse_declaration
+from compile_module_text import CompileError, FRESH_PREFIX
 from syntax_check_common import (
     STDIN_FILE,
     Binder,
@@ -113,29 +113,21 @@ class SemanticChecker:
         ]
         if not conflicts:
             return
-        is_formal = self.is_function_declaration_formal(binder.position)
-        message = format_conflict_message(binder.text, conflicts, formal=is_formal)
+        message = format_conflict_message(binder.text, conflicts)
         self.diagnostics.append(
             Diagnostic(
                 file=binder.position.file,
                 lineno=max(binder.position.line - 1, 0),
                 col_start_no=max(binder.position.column - 1, 0),
                 col_end_no=max(binder.position.column - 1 + len(binder.text), 1),
-                type="information" if is_formal else "warning",
-                code="formal_name_override" if is_formal else "name_conflict",
+                type="warning",
+                code="name_override",
                 reason=message,
             )
         )
 
     def add_visible(self, declaration: VisibleDeclaration) -> None:
         self.visible.setdefault(declaration.name, []).append(declaration)
-
-    def is_function_declaration_formal(self, position: SourcePosition) -> bool:
-        try:
-            line = self.line_text(position)
-        except (OSError, IndexError, ValueError):
-            return False
-        return parse_declaration(line.strip()) is not None
 
     def line_text(self, position: SourcePosition) -> str:
         if position.file in self.source_lines_by_file:
@@ -149,7 +141,7 @@ def format_prior_location(position: SourcePosition) -> str:
     return f"{position.file}:{position.line}"
 
 
-def format_conflict_message(name: str, conflicts: list[VisibleDeclaration], *, formal: bool) -> str:
+def format_conflict_message(name: str, conflicts: list[VisibleDeclaration]) -> str:
     imported = dedupe_join([format_prior_location(conflict.position) for conflict in conflicts if conflict.is_imported])
     ancestors = dedupe_join([format_prior_location(conflict.position) for conflict in conflicts if not conflict.is_imported])
     locations: list[str] = []
@@ -158,12 +150,7 @@ def format_conflict_message(name: str, conflicts: list[VisibleDeclaration], *, f
     if ancestors:
         locations.append(f"outer declaration at {ancestors}")
     joined = " and ".join(locations)
-    if formal:
-        return (
-            f"formal parameter '{name}' intentionally overrides {joined} "
-            "due to the class-name-alias rule"
-        )
-    return f"declare-sym '{name}' conflicts with {joined}"
+    return f"declare-sym '{name}' overrides {joined}"
 
 
 def dedupe_join(values: list[str]) -> str:

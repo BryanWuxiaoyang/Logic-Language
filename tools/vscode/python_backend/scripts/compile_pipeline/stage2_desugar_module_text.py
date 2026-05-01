@@ -1,10 +1,17 @@
 #!/usr/bin/env python3
-"""Expand local logic-language module-text rewrite rules."""
+"""Stage 2: desugar logic-language module text before AST compilation."""
 
 from __future__ import annotations
 
+import argparse
 import re
+import sys
+from dataclasses import dataclass
 from pathlib import Path
+
+SCRIPTS_DIR = Path(__file__).resolve().parents[1]
+if str(SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS_DIR))
 
 from compile_module_text import (
     CompileError,
@@ -27,8 +34,6 @@ from compile_module_text import (
     remove_comments,
     skill_dir,
     strip_outer_blank_lines,
-    tuple_or_single,
-    call_text,
 )
 
 
@@ -36,11 +41,43 @@ NUMERIC_LITERAL_RE = re.compile(r"(?<![\w'])\d+(?:\.\d+)?(?![\w'])")
 STDLIB_IMPORT = "$import standard_library.lp"
 
 
-class ExpandError(CompileError):
-    """Raised when module text cannot be expanded."""
+class DesugarError(CompileError):
+    """Raised when module text cannot be desugared."""
 
 
-def expand_module_text(text: str, base_dir: Path | str = ".") -> str:
+@dataclass(frozen=True)
+class BindingInfo:
+    source: str
+    alias: str
+
+
+@dataclass(frozen=True)
+class ScopeState:
+    visible_syms: set[str]
+    rewrite_map: dict[str, str]
+
+
+@dataclass(frozen=True)
+class DesugarResult:
+    text: str
+    import_count: int
+    body_line_count: int
+    visible_sym_count: int
+
+    def summary(self) -> str:
+        return "\n".join(
+            [
+                "stage: stage2_desugar_module_text",
+                f"imports: {self.import_count}",
+                f"body_lines: {self.body_line_count}",
+                f"visible_syms: {self.visible_sym_count}",
+                "desugared_text:",
+                self.text.rstrip(),
+            ]
+        )
+
+
+def run(text: str, base_dir: Path | str = ".") -> DesugarResult:
     base_path = Path(base_dir).resolve()
     tokens = load_tokens()
     import_lines, body_text = split_imports(text)
@@ -48,17 +85,23 @@ def expand_module_text(text: str, base_dir: Path | str = ".") -> str:
 
     normalized_body = normalize_latex(body_text, tokens)
     visible_text = visible_context_text(text, base_path, tokens)
-    visible_syms = collect_visible_syms(visible_text + "\n" + normalized_body)
+    visible_syms = collect_visible_syms(visible_text)
 
     body = strip_outer_blank_lines(remove_comments(normalized_body))
     if not body:
-        return "\n".join(output_imports) + "\n"
+        desugared = "\n".join(output_imports) + "\n"
+        return DesugarResult(desugared, len(output_imports), 0, len(visible_syms))
 
-    compiler = AliasModuleCompiler(load_lark_parser(), visible_syms)
+    compiler = ModuleCompiler(load_lark_parser())
     module = compiler.compile(body)
-    expander = ModuleExpander(visible_syms)
-    expanded_body = expander.render_module(module, outer_syms=set(), indent=0)
-    return "\n".join([*output_imports, expanded_body]) + "\n"
+    desugarer = ModuleDesugarer(visible_syms)
+    desugared_body = desugarer.render_module(module, ScopeState(set(visible_syms), {}), indent=0)
+    desugared = "\n".join([*output_imports, desugared_body]) + "\n"
+    return DesugarResult(desugared, len(output_imports), len(desugared_body.splitlines()), len(visible_syms))
+
+
+def desugar_module_text(text: str, base_dir: Path | str = ".") -> str:
+    return run(text, base_dir).text
 
 
 def split_imports(text: str) -> tuple[list[str], str]:
@@ -79,11 +122,11 @@ def visible_context_text(text: str, base_dir: Path, tokens: dict[str, str]) -> s
     if stdlib_path.exists():
         context_parts.append(stdlib_path.read_text(encoding="utf-8"))
     for import_line in import_lines:
-        context_parts.append(expand_visible_import(import_line, base_dir))
+        context_parts.append(desugar_visible_import(import_line, base_dir))
     return normalize_latex("\n".join(context_parts), tokens)
 
 
-def expand_visible_import(import_line: str, base_dir: Path) -> str:
+def desugar_visible_import(import_line: str, base_dir: Path) -> str:
     match = IMPORT_RE.match(import_line)
     if not match:
         return ""
@@ -121,85 +164,42 @@ def collect_visible_syms(text: str) -> set[str]:
     return syms
 
 
-class AliasModuleCompiler(ModuleCompiler):
-    def __init__(self, parser: object, visible_syms: set[str]) -> None:
-        super().__init__(parser)
-        self.visible_syms = set(visible_syms) | set(INTRINSIC_SYMS)
-
-    def lower_header_with_block(self, header: str, block: str) -> list[str]:
-        if header.startswith("@") or header.startswith("|-"):
-            return super().lower_header_with_block(header, block)
-        declaration = parse_declaration(header)
-        if declaration is None:
-            return super().lower_header_with_block(header, block)
-
-        name, inputs, outputs, arrow = declaration
-        inputs, outputs, aliases = self.alias_signature(inputs, outputs)
-        block = replace_symbols(block, aliases)
-        if arrow == "->":
-            outputs = [replace_symbols(output, aliases) for output in outputs]
-            call = call_text(name, inputs)
-            target = f"{tuple_or_single(outputs)} = {call}"
-            return [f"{name}: {tuple_or_single(inputs)} => {tuple_or_single(outputs)}", "∀{\n" + target + "\n" + block + "\n}"]
-        call = call_text(name, inputs)
-        target = f"{tuple_or_single(outputs)} = {call}" if outputs != ["bool"] else call
-        return ["function~" + name, "∀{\n| " + ", ".join(inputs + outputs) + "\n| " + target + "\n" + block + "\n}"]
-
-    def alias_signature(self, inputs: list[str], outputs: list[str]) -> tuple[list[str], list[str], dict[str, str]]:
-        aliases: dict[str, str] = {}
-        reserved = set(inputs + outputs) | self.visible_syms
-
-        def alias_term(term: str) -> str:
-            if not is_plain_sym(term) or term not in self.visible_syms or self.class_for_alias(term) is not None:
-                return term
-            if term not in aliases:
-                aliases[term] = self.fresh_alias(term, reserved)
-                reserved.add(aliases[term])
-            return aliases[term]
-
-        return [alias_term(term) for term in inputs], [alias_term(term) for term in outputs], aliases
-
-    def class_for_alias(self, sym: str) -> str | None:
-        classes = sorted(self.visible_syms, key=len, reverse=True)
-        for class_sym in classes:
-            if class_sym == sym:
-                continue
-            if re.fullmatch(re.escape(class_sym) + r"\d+", sym):
-                return class_sym
-            if sym.endswith("_" + class_sym):
-                return class_sym
-            if sym == class_sym + "_class":
-                return class_sym
-        return None
-
-    def fresh_alias(self, sym: str, reserved: set[str]) -> str:
-        preferred = "__" + sym
-        candidate = preferred
-        suffix = 1
-        while candidate in reserved:
-            candidate = f"{preferred}{suffix}"
-            suffix += 1
-        self.visible_syms.add(candidate)
-        return candidate
-
-
-class ModuleExpander:
+class ModuleDesugarer:
     def __init__(self, visible_syms: set[str]) -> None:
-        self.visible_syms = set(visible_syms) | set(INTRINSIC_SYMS)
+        self.reserved_syms = set(visible_syms) | set(INTRINSIC_SYMS)
         self.fresh_index = 0
 
-    def render_module(self, module: Module, outer_syms: set[str], indent: int) -> str:
+    def render_module(self, module: Module, scope: ScopeState, indent: int) -> str:
         original_syms = dedupe([*module.syms, *self.infer_statement_syms(module.predicate_statements)])
-        local_syms = [sym for sym in original_syms if sym not in INTRINSIC_SYMS]
-        if module.type == "quantifier":
-            local_syms = [sym for sym in local_syms if sym not in outer_syms]
-        child_outer = outer_syms | set(local_syms)
+        current_visible = set(scope.visible_syms)
+        current_rewrite = dict(scope.rewrite_map)
+        local_bindings: list[BindingInfo] = []
+        self.reserved_syms.update(current_visible)
 
-        predicates = self.implicit_predicates(local_syms)
-        rendered_predicates = [self.render_statement(statement, child_outer) for statement in module.predicate_statements]
-        targets = [self.render_statement(statement, child_outer) for statement in module.target_statements]
+        for source in original_syms:
+            if source in INTRINSIC_SYMS:
+                continue
+            alias = source
+            if source in current_visible:
+                alias = self.fresh_alias(source)
+            local_bindings.append(BindingInfo(source, alias))
+            current_visible.add(source)
+            current_visible.add(alias)
+            current_rewrite[source] = alias
+            self.reserved_syms.add(source)
+            self.reserved_syms.add(alias)
+
+        current_scope = ScopeState(current_visible, current_rewrite)
+        local_syms = [binding.alias for binding in local_bindings]
+        predicates = self.implicit_predicates(local_bindings, current_visible)
+        rendered_predicates = [self.render_statement(statement, current_scope) for statement in module.predicate_statements]
+        targets = [self.render_statement(statement, current_scope) for statement in module.target_statements]
         predicates.extend(rendered_predicates)
-        predicates.extend(self.local_wrapper_predicates([statement.text for statement in module.predicate_statements + module.target_statements]))
+        predicates.extend(
+            self.local_wrapper_predicates(
+                [self.rewrite_statement_text(statement, current_scope) for statement in module.predicate_statements + module.target_statements]
+            )
+        )
         predicates = dedupe([predicate for predicate in predicates if predicate])
 
         opener = module.quantifier + "{" if module.type == "quantifier" else "{"
@@ -208,36 +208,41 @@ class ModuleExpander:
     def infer_statement_syms(self, statements: list[Statement]) -> list[str]:
         return infer_syms([statement.text for statement in statements])
 
-    def render_statement(self, statement: Statement, outer_syms: set[str]) -> str:
-        text = lower_member_calls(statement.text)
+    def render_statement(self, statement: Statement, scope: ScopeState) -> str:
+        text = self.rewrite_statement_text(statement, scope)
         for index, submodule in enumerate(statement.sub_modules):
-            rendered = self.render_module(submodule, outer_syms, indent=0)
+            rendered = self.render_module(submodule, scope, indent=0)
             text = text.replace(f"$module{index}", rendered)
         return text
 
-    def implicit_predicates(self, syms: list[str]) -> list[str]:
+    def rewrite_statement_text(self, statement: Statement, scope: ScopeState) -> str:
+        return replace_symbols(lower_member_calls(statement.text), scope.rewrite_map)
+
+    def implicit_predicates(self, bindings: list[BindingInfo], visible_syms: set[str]) -> list[str]:
         predicates: list[str] = []
-        for sym in syms:
-            predicates.append(f"sym~{sym}")
-            predicates.append(f"{sym}~{sym}")
-            predicates.extend(self.naming_inheritance(sym))
+        for binding in bindings:
+            predicates.append(f"sym~{binding.alias}")
+            predicates.append(f"{binding.alias}~{binding.alias}")
+            if binding.source != binding.alias:
+                predicates.append(f"{binding.source}~{binding.alias}")
+            predicates.extend(self.naming_inheritance(binding.alias, visible_syms))
         return predicates
 
-    def naming_inheritance(self, sym: str) -> list[str]:
+    def naming_inheritance(self, sym: str, visible_syms: set[str]) -> list[str]:
         predicates: list[str] = []
-        class_sym = self.class_for_sym(sym)
+        class_sym = self.class_for_sym(sym, visible_syms)
         if class_sym is not None and class_sym != sym:
             predicates.append(f"{class_sym}~{sym}")
 
-        collection = self.collection_inheritance(sym)
+        collection = self.collection_inheritance(sym, visible_syms)
         if collection is not None:
             item = self.fresh_sym(f"{sym}_item")
             predicates.append(f"{collection[0]}~{sym}")
             predicates.append(f"∀{{| {item} | {item} ∈ {sym} | {collection[1]}~{item}}}")
         return predicates
 
-    def class_for_sym(self, sym: str) -> str | None:
-        classes = sorted(self.visible_syms, key=len, reverse=True)
+    def class_for_sym(self, sym: str, visible_syms: set[str]) -> str | None:
+        classes = sorted(visible_syms, key=len, reverse=True)
         for class_sym in classes:
             if class_sym.startswith("__"):
                 continue
@@ -254,8 +259,8 @@ class ModuleExpander:
                 return class_sym
         return None
 
-    def collection_inheritance(self, sym: str) -> tuple[str, str] | None:
-        classes = sorted(self.visible_syms, key=len, reverse=True)
+    def collection_inheritance(self, sym: str, visible_syms: set[str]) -> tuple[str, str] | None:
+        classes = sorted(visible_syms, key=len, reverse=True)
         for class_sym in classes:
             if sym.endswith("_" + class_sym + "_list"):
                 return ("tuple", class_sym)
@@ -276,10 +281,20 @@ class ModuleExpander:
 
     def fresh_sym(self, preferred: str) -> str:
         candidate = preferred
-        while candidate in self.visible_syms:
+        while candidate in self.reserved_syms:
             candidate = f"{preferred}{self.fresh_index}"
             self.fresh_index += 1
-        self.visible_syms.add(candidate)
+        self.reserved_syms.add(candidate)
+        return candidate
+
+    def fresh_alias(self, sym: str) -> str:
+        preferred = "__" + sym
+        candidate = preferred
+        suffix = 1
+        while candidate in self.reserved_syms:
+            candidate = f"{preferred}{suffix}"
+            suffix += 1
+        self.reserved_syms.add(candidate)
         return candidate
 
     def format_module(
@@ -316,7 +331,7 @@ def tuple_literals(text: str) -> list[str]:
             continue
         try:
             end = matching_close(text, index, "(", ")")
-        except ExpandError:
+        except DesugarError:
             index += 1
             continue
         candidate = text[index : end + 1]
@@ -342,7 +357,7 @@ def set_module_literals(text: str) -> list[str]:
             continue
         try:
             end = matching_close(text, module_start, "{", "}")
-        except ExpandError:
+        except DesugarError:
             index += 1
             continue
         if text[start] == "{":
@@ -394,7 +409,7 @@ def matching_close(text: str, start: int, open_char: str, close_char: str) -> in
             depth -= 1
             if depth == 0:
                 return index
-    raise ExpandError(f"unclosed {open_char}")
+    raise DesugarError(f"unclosed {open_char}")
 
 
 def format_section_line(text: str, indent: str, prefix: str) -> list[str]:
@@ -404,3 +419,24 @@ def format_section_line(text: str, indent: str, prefix: str) -> list[str]:
     output = [indent + prefix + lines[0]]
     output.extend(indent + line for line in lines[1:])
     return output
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Run compile pipeline stage 2 desugaring.")
+    parser.add_argument("--text", help="module text to desugar; defaults to stdin")
+    parser.add_argument("--base-dir", type=Path, default=Path.cwd(), help="base directory for $import")
+    args = parser.parse_args()
+
+    source = args.text if args.text is not None else sys.stdin.read()
+    try:
+        result = run(source, args.base_dir)
+    except (CompileError, OSError) as error:
+        print(error, file=sys.stderr)
+        return 1
+    sys.stdout.write(result.summary())
+    sys.stdout.write("\n")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

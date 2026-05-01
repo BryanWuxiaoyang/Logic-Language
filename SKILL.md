@@ -71,7 +71,7 @@ logic-language module-text semantics, compilation, and diagnostics
 - `logic(module-list)` is defined only when every `module ∈ module-list` is statement-valued.
     - `logic(module-list) = &&{| module ∈ module-list | logic(module)}`
 
-- if `sym` is in a `module`, it shouldn't appear in any of its `nested-modules`
+- Formal definition is in `semantic_logic/module_AST.lp`
 
 ### Describe `module-signature`
 - introduce `module-signature` as the module-file-level validation environment for modules parsed from a `module-file`.
@@ -261,10 +261,9 @@ logic-language module-text semantics, compilation, and diagnostics
     "
     )
 
-- `module-text`'s `syms` override all `nested-module-text`s' `syms` with same name
-    `M("| sym1 | ∀{| sym1, sym2 | TS2} | TS1") = M("| sym1 | ∀{| sym2 | TS2} | TS1")`
-    This is important difference from most programming-languages' scoping-rule, which let nested-scope override parent-scope.
-    With this rule, `nested-module-text` can add constraints onto parent-scope's syms
+- `module-text`'s nested `syms` shadow outer `syms` by freshening the inner name and inheriting the outer same-name symbol
+    `M("| x | ∀{| x | x = x} | TS1") = M("| x | ∀{| __x | x~__x | __x = __x} | TS1")`
+    This applies to `SMT`, `QMT`, `function-declaration`, and any nested `module-text`.
 
 - a non-braced `module-text` or `QMT` that has `TS` not in final lines translates to one `module-text` with nested `QMT`s
     M("
@@ -375,7 +374,7 @@ logic-language module-text semantics, compilation, and diagnostics
     - selected binary-operator `PSs` implicitly add `syms` to current `SMT`/`QMT`.
     - this rule applies only to `PSs`, not final `TSs`.
     - this rule only infers a plain sym or tuple of plain syms.
-    - inferred `syms` follow the existing deduplication and outer-scope override rules.
+    - inferred `syms` follow the same deduplication and shadowing rule as explicit `syms`.
     - `sym1 = sym2`, `sym1 > sym2`, `sym1 < sym2`, `sym1 >= sym2`, `sym1 <= sym2`, `sym1 ∈ sym2`, `sym1 ∉ sym2`, `sym1 ⊂ sym2`, `sym1 ⊄ sym2`, `sym1 ⊆ sym2`, `sym1 ⊈ sym2`, and `sym1 ≠ sym2` infer `sym1`.
     - the same rule applies before `latex-translation` to `sym1 \in sym2`, `sym1 \notin sym2`, `sym1 \subsetof sym2`, `sym1 \notsubsetof sym2`, `sym1 \includedin sym2`, `sym1 \notincludedin sym2`, and `sym1 \ne sym2`.
     - `class~sym2` infers `sym2`; `class` must already be declared or intrinsic.
@@ -414,7 +413,8 @@ logic-language module-text semantics, compilation, and diagnostics
         TS
     ")
     
-    - function `parameters` must be `bound-sym` in current-scope. So it cannot have same name as `syms` in outer-scopes, otherwise according to scope-override rule, it will be referring to outer-scope `sym`, which is unexpected
+    - function `parameters` follow the same shadowing rule as nested `module-text`.
+    - when a param-name is already visible in an outer-scope, it is freshened inside the function body and inherits the outer same-name symbol.
     - Induction: `function`'s arity is not fixed, so multiple `function-declarations` for the same `sym` add quantified constraints to the same function-sym.
 
 - introduce `function-assign`
@@ -425,12 +425,12 @@ logic-language module-text semantics, compilation, and diagnostics
     "
     )
 
-- The `function-declaration`'s `parameter` uses class-inheritance naming rules, and class-name aliasing applies in `function-declaration` only.
+- The `function-declaration`'s `parameter` uses class-inheritance naming rules, and the same scope-shadowing rule as nested `module-text`.
     - when a param-name is `class` name, this `class` itself will not be able to be used as `free-sym` inside the `function-declaration` scope.
-    - when a param-name is outer-scope declared-sym, it implicitly translates to another name; otherwise it will not be a `bound-sym`.
+    - when a param-name is outer-scope declared-sym, it implicitly translates to another name and inherits the outer same-name symbol; otherwise it will not be a `bound-sym`.
     - If a name syntactically suggests a class, but that class symbol is not visible in the current scope, then the name-implicit-class rule does not apply.
-    `M("sym: (value, value1) => out_value") = M("sym: (value', value1) => out_value")`
-    Note that `value'` is implicitly introduced as `bound-sym` inheriting `value` in `function-declaration`, So as to avoid sym-scope-override
+    `M("sym: (value, value1) => out_value") = M("sym: (__value, value1) => out_value")`
+    Note that `__value` is implicitly introduced as `bound-sym` inheriting `value` in `function-declaration`, so as to follow the same shadowing rule.
 
 - introduce `predicate-declaration`
     `predicate` follows the same rule as `function-declaration`, but `sym(...)` is a `predicate-statement`, not `function-statement`
@@ -686,12 +686,11 @@ logic-language module-text semantics, compilation, and diagnostics
 ## Compilation
 - introduce `module-file`. Each `.lp` is a `module-file`.
 - introduce `module-import`
-    - `$import file-path` macro-expands to the `module-text` stored inside `file-path` with current indent-level
+    - `$import file-path` simply replace this line with the file-text stored in `file-path`
     - every `module-file` implicitly imports `standard_library.lp` in this folder
 
-- introduce `expand_module`
-    - it inputs `module-text`, expand `implicit-declare-syms` and return the expanded `module-text`
-    - tool: `scripts/expand_module.py`
+- compile-module internally desugars `module-text` through staged compiler pipeline passes.
+    - stage debug summaries live under `scripts/compile_pipeline/`
 
 - introduce `compile_module`
     - it inputs `module-text`/`module-file`, return `AST` with `Module-info`
