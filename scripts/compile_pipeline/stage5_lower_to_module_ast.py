@@ -20,6 +20,8 @@ from compile_module import (
     Module,
     Statement,
     find_matching,
+    find_quoted_literal_end,
+    is_literal_quote_start,
     is_plain_sym,
     lower_member_calls,
     parse_literal_text,
@@ -38,6 +40,12 @@ OPERATOR_CALLS: tuple[tuple[str, str], ...] = (
     (">=", ">="),
     ("≤", "<="),
     ("<=", "<="),
+    ("&&", "&&"),
+    ("||", "||"),
+    ("+", "+"),
+    ("-", "-"),
+    ("*", "*"),
+    ("/", "/"),
     ("∉", "∉"),
     ("∈", "∈"),
     ("⊄", "⊄"),
@@ -184,8 +192,9 @@ class AstLowerer:
         set_items = parse_set_literal_items(text)
         if set_items is not None:
             return literal_collection("set_literal_stmt", [self.parse_expr(item, statement) for item in set_items], self.loc)
-        if is_plain_sym(text):
-            return sym_node(text, self.loc)
+        grouped = strip_outer_grouping_parens(text)
+        if grouped is not None:
+            return self.parse_expr(grouped, statement)
         index_call = parse_index_call(text)
         if index_call is not None:
             receiver, index = index_call
@@ -198,6 +207,8 @@ class AstLowerer:
         if operator is not None:
             lhs, op, rhs = operator
             return self.call_expr(op, [lhs, rhs], statement)
+        if is_sym_name(text):
+            return sym_node(text, self.loc)
         raise CompileError(f"unsupported expression: {text}")
 
     def call_expr(self, name: str, arg_texts: list[str], statement: Statement) -> AstNode:
@@ -307,6 +318,20 @@ def parse_set_literal_items(text: str) -> list[str] | None:
     return [item.strip() for item in split_top_level(inner, ",") if item.strip()]
 
 
+def strip_outer_grouping_parens(text: str) -> str | None:
+    text = text.strip()
+    if len(text) < 2 or not text.startswith("(") or not text.endswith(")"):
+        return None
+    if find_matching(text, 0, "(", ")") != len(text) - 1:
+        return None
+    inner = text[1:-1].strip()
+    if not inner:
+        return None
+    if len(split_top_level(inner, ",")) > 1:
+        return None
+    return inner
+
+
 def parse_call(text: str) -> tuple[str, list[str]] | None:
     text = text.strip()
     if not text.endswith(")"):
@@ -315,7 +340,7 @@ def parse_call(text: str) -> tuple[str, list[str]] | None:
     if open_index <= 0 or find_matching(text, open_index, "(", ")") != len(text) - 1:
         return None
     name = text[:open_index].strip()
-    if not is_plain_sym(name) and name not in {"[]"}:
+    if not is_sym_name(name):
         return None
     inner = text[open_index + 1 : -1].strip()
     args = [] if not inner else [arg.strip() for arg in split_top_level(inner, ",")]
@@ -334,12 +359,44 @@ def parse_index_call(text: str) -> tuple[str, str] | None:
 
 def split_operator(text: str) -> tuple[str, str, str] | None:
     for raw, canonical in OPERATOR_CALLS:
-        parts = split_top_level(text, raw)
+        parts = split_top_level_token(text, raw) if raw.isalpha() else split_top_level(text, raw)
         if len(parts) == 2:
             lhs, rhs = parts[0].strip(), parts[1].strip()
             if lhs and rhs:
                 return lhs, canonical, rhs
     return None
+
+
+def split_top_level_token(text: str, separator: str) -> list[str]:
+    parts: list[str] = []
+    start = 0
+    stack: list[str] = []
+    index = 0
+    while index < len(text):
+        char = text[index]
+        if is_literal_quote_start(text, index):
+            index = find_quoted_literal_end(text, index) + 1
+            continue
+        if char in "({[":
+            stack.append({"(": ")", "{": "}", "[": "]"}[char])
+        elif stack and char == stack[-1]:
+            stack.pop()
+        elif not stack and text.startswith(separator, index):
+            left_ok = index == 0 or not is_sym_name_char(text[index - 1])
+            right_index = index + len(separator)
+            right_ok = right_index >= len(text) or not is_sym_name_char(text[right_index])
+            if left_ok and right_ok:
+                parts.append(text[start:index])
+                index += len(separator)
+                start = index
+                continue
+        index += 1
+    parts.append(text[start:])
+    return parts
+
+
+def is_sym_name(text: str) -> bool:
+    return re.fullmatch(r"[^\s()\[\]{},]+", text) is not None
 
 
 def preferred_temp_name(text: str) -> str:
@@ -357,10 +414,27 @@ def preferred_temp_name(text: str) -> str:
 def sanitize_temp_name(value: str) -> str:
     if value == "[]":
         return "index"
-    aliases = {"+": "add", "-": "sub", "*": "mul", "/": "div", "=": "eq", "~": "inherit", "<": "lt", ">": "gt", "<=": "le", ">=": "ge"}
+    aliases = {
+        "+": "add",
+        "-": "sub",
+        "*": "mul",
+        "/": "div",
+        "&&": "and",
+        "||": "or",
+        "=": "eq",
+        "~": "inherit",
+        "<": "lt",
+        ">": "gt",
+        "<=": "le",
+        ">=": "ge",
+    }
     value = aliases.get(value, value)
     sanitized = re.sub(r"\W+", "_", value, flags=re.UNICODE).strip("_")
     return sanitized or "tmp"
+
+
+def is_sym_name_char(char: str) -> bool:
+    return char.isalnum() or char in {"_", "'"}
 
 
 def intrinsic_syms() -> set[str]:

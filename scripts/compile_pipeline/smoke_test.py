@@ -110,6 +110,35 @@ def test_member_and_operator() -> None:
     assert calls(ast, "=")
 
 
+def test_missing_infix_support_round_trip() -> None:
+    cases = [
+        ("∀{| x, y, z | z = (x + y)}", "+", "+"),
+        ("∀{| x, y, z | z = x - y}", "-", "-"),
+        ("∀{| x, y, z | z = x * y}", "*", "*"),
+        ("∀{| x, y, z | z = x / y}", "/", "/"),
+        ("∀{| x, y | x && y}", "&&", "&&"),
+        ("∀{| x, y | x || y}", "||", "||"),
+        ("∀{| x, S | x in S}", "in", "∈"),
+        ("∀{| x, S | x notin S}", "notin", "∉"),
+    ]
+    for text, call_name, rendered in cases:
+        ast = compile_text(text)
+        assert calls(ast, call_name), (text, call_name)
+        source = translate_ast_to_source(ast)
+        assert rendered in source, (text, rendered, source)
+        reparsed = compile_text(source)
+        assert calls(reparsed, rendered if call_name in {"in", "notin"} else call_name), (text, source)
+
+
+def test_operator_head_declaration_round_trip() -> None:
+    text = "+: (list, list1) => list2\n        list2 = list"
+    ast = compile_text(text)
+    assert calls(ast, "+")
+    source = translate_ast_to_source(ast)
+    reparsed = compile_text(source)
+    assert calls(reparsed, "+")
+
+
 def test_import_file_locations() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
@@ -178,6 +207,18 @@ def test_disassembled_final_ast_preserves_target_placement() -> None:
     assert not any(stmt.get("call_sym", {}).get("name") == "~" for stmt in reparsed["premise_PSs"])
 
 
+def test_round_trip_disassembly_is_idempotent() -> None:
+    text = "val ~ min_val\n∀{| val1 | val1 ≥ min_val}"
+    first_ast = compile_text(text)
+    first_source = translate_ast_to_source(first_ast)
+    second_ast = compile_text(first_source)
+    second_source = translate_ast_to_source(second_ast)
+    assert second_source == first_source
+    assert first_source.count("| sym ~ val1") == 1
+    assert first_source.count("| val1 ~ val1") == 1
+    assert first_source.count("| val ~ val1") == 1
+
+
 def main() -> int:
     tests = [
         test_simple_quantified,
@@ -188,6 +229,8 @@ def main() -> int:
         test_compound_lhs,
         test_literals,
         test_member_and_operator,
+        test_missing_infix_support_round_trip,
+        test_operator_head_declaration_round_trip,
         test_import_file_locations,
         test_stdin_import_rejected,
         test_multiline_bar_semantics,
@@ -196,6 +239,7 @@ def main() -> int:
         test_target_literal_assignment_normalized,
         test_target_module_assignment_normalized,
         test_disassembled_final_ast_preserves_target_placement,
+        test_round_trip_disassembly_is_idempotent,
     ]
     for test in tests:
         test()

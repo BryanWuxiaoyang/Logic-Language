@@ -23,6 +23,8 @@ from compile_module import (
     dedupe,
     expand_imports,
     infer_syms,
+    find_quoted_literal_end,
+    is_literal_quote_start,
     is_plain_sym,
     load_lark_parser,
     load_tokens,
@@ -200,7 +202,7 @@ class ModuleDesugarer:
                 [self.rewrite_statement_text(statement, current_scope) for statement in module.predicate_statements + module.target_statements]
             )
         )
-        predicates = dedupe([predicate for predicate in predicates if predicate])
+        predicates = dedupe_statements([predicate for predicate in predicates if predicate])
 
         opener = module.quantifier + "{" if module.type == "quantifier" else "{"
         return self.format_module(opener, local_syms, predicates, targets, indent)
@@ -419,6 +421,36 @@ def format_section_line(text: str, indent: str, prefix: str) -> list[str]:
     output = [indent + prefix + lines[0]]
     output.extend(indent + line for line in lines[1:])
     return output
+
+
+def dedupe_statements(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    output: list[str] = []
+    for value in values:
+        key = canonical_statement_key(value)
+        if key in seen:
+            continue
+        seen.add(key)
+        output.append(value)
+    return output
+
+
+def canonical_statement_key(text: str) -> str:
+    output: list[str] = []
+    index = 0
+    while index < len(text):
+        if is_literal_quote_start(text, index):
+            end = find_quoted_literal_end(text, index)
+            output.append(text[index : end + 1])
+            index = end + 1
+            continue
+        char = text[index]
+        if char.isspace():
+            index += 1
+            continue
+        output.append(char)
+        index += 1
+    return "".join(output)
 
 
 def main() -> int:

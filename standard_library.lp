@@ -15,6 +15,19 @@ function
 func = function
 f = func
 
+~
+
+\all
+    | _sym1, _sym2
+    | _sym1 = _sym2
+    _sym1 ~ _sym2
+
+\all
+    | _sym1, _sym2, _sym3
+    | _sym1 ~ _sym2
+    | _sym2 ~ _sym3
+    _sym1 ~ _sym3
+
 val = value
 v = val
 val ~ max_val

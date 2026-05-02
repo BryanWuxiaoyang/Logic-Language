@@ -741,6 +741,12 @@ def split_top_level(text: str, separator: str) -> list[str]:
         elif stack and char == stack[-1]:
             stack.pop()
         elif not stack and text.startswith(separator, index):
+            if separator == "|":
+                previous_char = text[index - 1] if index > 0 else ""
+                next_char = text[index + 1] if index + 1 < len(text) else ""
+                if previous_char == "|" or next_char == "|":
+                    index += 1
+                    continue
             parts.append(text[start:index])
             index += len(separator)
             start = index
