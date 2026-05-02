@@ -16,7 +16,6 @@ if str(SCRIPTS_DIR) not in sys.path:
 from compile_module import (
     CompileError,
     IMPORT_RE,
-    INTRINSIC_SYMS,
     Module,
     ModuleCompiler,
     Statement,
@@ -25,22 +24,21 @@ from compile_module import (
     infer_syms,
     find_quoted_literal_end,
     is_literal_quote_start,
-    is_plain_sym,
     load_lark_parser,
     load_tokens,
     lower_member_calls,
     normalize_latex,
-    parse_binder_list,
-    parse_declaration,
     parse_signature_terms,
     remove_comments,
     skill_dir,
     strip_outer_blank_lines,
 )
+from syntax_check_common import STDIN_FILE, collect_top_level_declarations, make_located_text
 
 
 NUMERIC_LITERAL_RE = re.compile(r"(?<![\w'])\d+(?:\.\d+)?(?![\w'])")
 STDLIB_IMPORT = "$import standard_library.lp"
+CANONICAL_INFIX_OPERATORS = {"~", "=", "!=", "≠", ">=", "≥", "<=", "≤", ">", "<", "∈", "∉", "⊂", "⊄", "⊆", "⊈"}
 
 
 class DesugarError(CompileError):
@@ -55,7 +53,7 @@ class BindingInfo:
 
 @dataclass(frozen=True)
 class ScopeState:
-    visible_syms: set[str]
+    ancestor_bound_syms: set[str]
     rewrite_map: dict[str, str]
 
 
@@ -139,69 +137,41 @@ def desugar_visible_import(import_line: str, base_dir: Path) -> str:
 
 
 def collect_visible_syms(text: str) -> set[str]:
-    syms = set(INTRINSIC_SYMS)
     cleaned = remove_comments(text)
-    for line in cleaned.splitlines():
-        stripped = line.strip()
-        if not stripped or stripped.startswith("$import"):
-            continue
-        if stripped.startswith("|"):
-            binders = parse_binder_list(stripped[1:].strip())
-            if binders:
-                syms.update(binders)
-        declaration = parse_declaration(stripped)
-        if declaration is not None:
-            name, _, _, _ = declaration
-            syms.add(name)
-        if "::" in stripped:
-            left = stripped.split("::", 1)[0].strip()
-            if is_plain_sym(left):
-                syms.add(left)
-        if "~" in stripped:
-            left, _ = stripped.split("~", 1)
-            if is_plain_sym(left.strip()):
-                syms.add(left.strip())
-        if is_plain_sym(stripped):
-            syms.add(stripped)
-    return syms
+    located = make_located_text(cleaned, STDIN_FILE, import_origin=True)
+    return {declaration.name for declaration in collect_top_level_declarations(located, import_origin_only=True)}
 
 
 class ModuleDesugarer:
     def __init__(self, visible_syms: set[str]) -> None:
-        self.reserved_syms = set(visible_syms) | set(INTRINSIC_SYMS)
+        self.reserved_syms = set(visible_syms)
         self.fresh_index = 0
 
     def render_module(self, module: Module, scope: ScopeState, indent: int) -> str:
         original_syms = dedupe([*module.syms, *self.infer_statement_syms(module.predicate_statements)])
-        current_visible = set(scope.visible_syms)
+        ancestor_bound_syms = set(scope.ancestor_bound_syms)
         current_rewrite = dict(scope.rewrite_map)
         local_bindings: list[BindingInfo] = []
-        self.reserved_syms.update(current_visible)
+        local_aliases: set[str] = set()
+        self.reserved_syms.update(ancestor_bound_syms)
 
         for source in original_syms:
-            if source in INTRINSIC_SYMS:
-                continue
             alias = source
-            if source in current_visible:
-                alias = self.fresh_alias(source)
+            if source in ancestor_bound_syms:
+                alias = self.fresh_alias(source, ancestor_bound_syms | local_aliases)
             local_bindings.append(BindingInfo(source, alias))
-            current_visible.add(source)
-            current_visible.add(alias)
+            local_aliases.add(alias)
             current_rewrite[source] = alias
             self.reserved_syms.add(source)
             self.reserved_syms.add(alias)
 
-        current_scope = ScopeState(current_visible, current_rewrite)
+        current_scope = ScopeState(ancestor_bound_syms | local_aliases, current_rewrite)
         local_syms = [binding.alias for binding in local_bindings]
-        predicates = self.implicit_predicates(local_bindings, current_visible)
+        predicates = self.implicit_predicates(local_bindings, ancestor_bound_syms)
         rendered_predicates = [self.render_statement(statement, current_scope) for statement in module.predicate_statements]
         targets = [self.render_statement(statement, current_scope) for statement in module.target_statements]
         predicates.extend(rendered_predicates)
-        predicates.extend(
-            self.local_wrapper_predicates(
-                [self.rewrite_statement_text(statement, current_scope) for statement in module.predicate_statements + module.target_statements]
-            )
-        )
+        predicates.extend(self.local_wrapper_predicates(rendered_predicates + targets))
         predicates = dedupe_statements([predicate for predicate in predicates if predicate])
 
         opener = module.quantifier + "{" if module.type == "quantifier" else "{"
@@ -218,15 +188,18 @@ class ModuleDesugarer:
         return text
 
     def rewrite_statement_text(self, statement: Statement, scope: ScopeState) -> str:
-        return replace_symbols(lower_member_calls(statement.text), scope.rewrite_map)
+        rewritten = replace_symbols(lower_member_calls(statement.text), scope.rewrite_map)
+        return normalize_legacy_wrapper_statement(rewritten)
 
     def implicit_predicates(self, bindings: list[BindingInfo], visible_syms: set[str]) -> list[str]:
         predicates: list[str] = []
         for binding in bindings:
-            predicates.append(f"sym~{binding.alias}")
-            predicates.append(f"{binding.alias}~{binding.alias}")
+            if is_generated_sym(binding.alias):
+                continue
+            predicates.append(render_infix(binding.alias, "~", binding.alias))
             if binding.source != binding.alias:
-                predicates.append(f"{binding.source}~{binding.alias}")
+                predicates.append(render_infix(binding.source, "~", binding.alias))
+            predicates.append(render_infix("sym", "~", binding.alias))
             predicates.extend(self.naming_inheritance(binding.alias, visible_syms))
         return predicates
 
@@ -234,13 +207,13 @@ class ModuleDesugarer:
         predicates: list[str] = []
         class_sym = self.class_for_sym(sym, visible_syms)
         if class_sym is not None and class_sym != sym:
-            predicates.append(f"{class_sym}~{sym}")
+            predicates.append(render_infix(class_sym, "~", sym))
 
         collection = self.collection_inheritance(sym, visible_syms)
         if collection is not None:
             item = self.fresh_sym(f"{sym}_item")
-            predicates.append(f"{collection[0]}~{sym}")
-            predicates.append(f"∀{{| {item} | {item} ∈ {sym} | {collection[1]}~{item}}}")
+            predicates.append(render_infix(collection[0], "~", sym))
+            predicates.append(f"∀{{| {item} | {render_infix(item, '∈', sym)} | {render_infix(collection[1], '~', item)}}}")
         return predicates
 
     def class_for_sym(self, sym: str, visible_syms: set[str]) -> str | None:
@@ -272,13 +245,10 @@ class ModuleDesugarer:
 
     def local_wrapper_predicates(self, texts: list[str]) -> list[str]:
         predicates: list[str] = []
-        joined = "\n".join(texts)
-        for literal in NUMERIC_LITERAL_RE.findall(joined):
-            predicates.append(f"value~{literal}")
-        for tuple_text in tuple_literals(joined):
-            predicates.append(f"tuple~{tuple_text}")
-        for set_text in set_module_literals(joined):
-            predicates.append(f"set~{set_text}")
+        for text in texts:
+            predicate = wrapper_predicate_for_expression(text)
+            if predicate:
+                predicates.append(predicate)
         return predicates
 
     def fresh_sym(self, preferred: str) -> str:
@@ -289,14 +259,13 @@ class ModuleDesugarer:
         self.reserved_syms.add(candidate)
         return candidate
 
-    def fresh_alias(self, sym: str) -> str:
+    def fresh_alias(self, sym: str, forbidden: set[str]) -> str:
         preferred = "__" + sym
         candidate = preferred
         suffix = 1
-        while candidate in self.reserved_syms:
+        while candidate in forbidden:
             candidate = f"{preferred}{suffix}"
             suffix += 1
-        self.reserved_syms.add(candidate)
         return candidate
 
     def format_module(
@@ -320,52 +289,66 @@ class ModuleDesugarer:
         return "\n".join(lines)
 
 
-def tuple_literals(text: str) -> list[str]:
-    literals: list[str] = []
-    index = 0
-    while index < len(text):
-        if text[index] != "(":
-            index += 1
-            continue
-        previous = text[index - 1] if index > 0 else ""
-        if previous == "'" or previous == "_" or previous.isalnum():
-            index += 1
-            continue
-        try:
-            end = matching_close(text, index, "(", ")")
-        except DesugarError:
-            index += 1
-            continue
-        candidate = text[index : end + 1]
-        inner = candidate[1:-1]
-        terms = parse_signature_terms(inner)
-        if len(terms) > 1 and "," in inner:
-            literals.append(candidate)
-        index = end + 1
-    return dedupe(literals)
+def wrapper_predicate_for_expression(text: str) -> str | None:
+    stripped = text.strip()
+    if not stripped:
+        return None
+    if is_numeric_literal_text(stripped):
+        return render_infix("value", "~", stripped)
+    if is_tuple_literal_text(stripped):
+        return render_infix("tuple", "~", stripped)
+    if is_set_literal_text(stripped):
+        return render_infix("set", "~", stripped)
+    return None
 
 
-def set_module_literals(text: str) -> list[str]:
-    literals: list[str] = []
-    index = 0
-    while index < len(text):
-        if text[index] not in {"{", "∀", "∃"}:
-            index += 1
+def normalize_legacy_wrapper_statement(text: str) -> str:
+    stripped = text.strip()
+    for wrapper_sym, validator in (
+        ("tuple", is_tuple_literal_text),
+        ("set", is_set_literal_text),
+        ("value", is_numeric_literal_text),
+    ):
+        legacy_head = wrapper_sym + "~"
+        if not stripped.startswith(legacy_head):
             continue
-        start = index
-        module_start = index + 1 if text[index] in {"∀", "∃"} else index
-        if module_start >= len(text) or text[module_start] != "{":
-            index += 1
-            continue
-        try:
-            end = matching_close(text, module_start, "{", "}")
-        except DesugarError:
-            index += 1
-            continue
-        if text[start] == "{":
-            literals.append(text[start : end + 1])
-        index = end + 1
-    return dedupe(literals)
+        rhs = stripped[len(legacy_head) :].strip()
+        if validator(rhs):
+            return render_infix(wrapper_sym, "~", rhs)
+    return text
+
+
+def is_numeric_literal_text(text: str) -> bool:
+    return NUMERIC_LITERAL_RE.fullmatch(text) is not None
+
+
+def is_tuple_literal_text(text: str) -> bool:
+    text = text.strip()
+    if len(text) < 2 or not text.startswith("(") or not text.endswith(")"):
+        return False
+    try:
+        if matching_close(text, 0, "(", ")") != len(text) - 1:
+            return False
+    except DesugarError:
+        return False
+    inner = text[1:-1]
+    terms = parse_signature_terms(inner)
+    return len(terms) > 1 and "," in inner
+
+
+def is_set_literal_text(text: str) -> bool:
+    text = text.strip()
+    if len(text) < 2 or not text.startswith("{") or not text.endswith("}"):
+        return False
+    try:
+        if matching_close(text, 0, "{", "}") != len(text) - 1:
+            return False
+    except DesugarError:
+        return False
+    inner = text[1:-1].strip()
+    if not inner or "|" in inner or "=>" in inner:
+        return False
+    return True
 
 
 def replace_symbols(text: str, replacements: dict[str, str]) -> str:
@@ -451,6 +434,16 @@ def canonical_statement_key(text: str) -> str:
         output.append(char)
         index += 1
     return "".join(output)
+
+
+def render_infix(lhs: str, operator: str, rhs: str) -> str:
+    if operator in CANONICAL_INFIX_OPERATORS:
+        return f"{lhs} {operator} {rhs}"
+    return f"{operator}({lhs}, {rhs})"
+
+
+def is_generated_sym(sym: str) -> bool:
+    return sym.startswith("__")
 
 
 def main() -> int:

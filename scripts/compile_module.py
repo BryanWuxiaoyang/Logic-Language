@@ -11,6 +11,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
 
+from check_final_AST import FinalAstChecker
+
 if __name__ == "__main__":
     sys.modules.setdefault("compile_module", sys.modules[__name__])
 
@@ -57,6 +59,14 @@ ESCAPE_OUTPUTS = {
 
 class CompileError(Exception):
     """Raised when module text cannot be compiled."""
+
+
+class FinalAstValidationCompileError(CompileError):
+    """Raised when final module_AST validation fails after compilation."""
+
+    def __init__(self, message: str, stage_summaries: list[str]) -> None:
+        super().__init__(message)
+        self.stage_summaries = stage_summaries
 
 
 @dataclass
@@ -275,6 +285,18 @@ class CompilePipelineResult:
     readable: str
 
 
+def format_final_ast_validation_error(diagnostics: list[dict[str, object]]) -> str:
+    lines = ["final AST validation failed:"]
+    for entry in diagnostics:
+        file = str(entry.get("file", "<ast>"))
+        line = int(entry.get("lineno", 0) or 0) + 1
+        column = int(entry.get("col_start_no", 0) or 0) + 1
+        code = str(entry.get("code", "final_ast_invalid"))
+        reason = str(entry.get("reason", "final AST validation failed"))
+        lines.append(f"{file}:{line}:{column}: {code}: {reason}")
+    return "\n".join(lines)
+
+
 def run_compile_pipeline(
     text: str,
     base_dir: Path | str = ".",
@@ -296,16 +318,23 @@ def run_compile_pipeline(
     statements = parse_statements(sections)
     lowered = lower_to_ast(statements, normalized.loc)
     emitted = emit_module_ast(lowered)
+    stage_summaries = [
+        normalized.summary(),
+        desugared.summary(),
+        sections.summary(),
+        statements.summary(),
+        lowered.summary(),
+        emitted.summary(),
+    ]
+    diagnostics = FinalAstChecker().check(emitted.to_json())
+    if diagnostics:
+        raise FinalAstValidationCompileError(
+            format_final_ast_validation_error(diagnostics),
+            stage_summaries,
+        )
     return CompilePipelineResult(
         ast=emitted.to_json(),
-        stage_summaries=[
-            normalized.summary(),
-            desugared.summary(),
-            sections.summary(),
-            statements.summary(),
-            lowered.summary(),
-            emitted.summary(),
-        ],
+        stage_summaries=stage_summaries,
         readable=emitted.readable(),
     )
 
@@ -1119,6 +1148,12 @@ def main() -> int:
         allow_imports = False
     try:
         result = run_compile_pipeline(source, base_dir, source=source_name, allow_imports=allow_imports)
+    except FinalAstValidationCompileError as error:
+        if args.debug_stages:
+            sys.stdout.write("\n\n".join(error.stage_summaries))
+            sys.stdout.write("\n")
+        print(error, file=sys.stderr)
+        return 1
     except (CompileError, OSError) as error:
         print(error, file=sys.stderr)
         return 1

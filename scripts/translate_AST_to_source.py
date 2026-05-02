@@ -35,9 +35,7 @@ BINARY_OPERATORS = {
     ">": ">",
     "<": "<",
     "∈": "∈",
-    "in": "∈",
     "∉": "∉",
-    "notin": "∉",
     "⊂": "⊂",
     "⊄": "⊄",
     "⊆": "⊆",
@@ -52,20 +50,23 @@ def translate_ast_to_source(ast: AstNode) -> str:
 
 class Renderer:
     def render_stmt(self, node: AstNode) -> str:
+        return "\n".join(self.render_lines(node, 0))
+
+    def render_lines(self, node: AstNode, indent: int) -> list[str]:
         kind = require_kind(node)
         if kind in {"quantified_stmt", "set_stmt"}:
-            return self.render_module(node)
+            return self.render_module(node, indent)
         if kind == "binding_stmt":
-            return self.render_binding(node)
+            return [self.indent(indent) + self.render_binding(node)]
         if kind == "func_stmt":
-            return self.render_func(node)
+            return [self.indent(indent) + self.render_func(node)]
         if kind == "sym":
-            return self.render_sym(node)
+            return [self.indent(indent) + self.render_sym(node)]
         if kind.endswith("_literal_stmt"):
-            return self.render_literal(node)
+            return [self.indent(indent) + self.render_literal(node)]
         raise TranslateError(f"unsupported AST node kind: {kind}")
 
-    def render_module(self, node: AstNode) -> str:
+    def render_module(self, node: AstNode, indent: int) -> list[str]:
         kind = require_kind(node)
         bound_syms = require_list(node, "bound_syms")
         premise_bindings = require_list(node, "premise_binding_stmts")
@@ -75,21 +76,18 @@ class Renderer:
             raise TranslateError(f"{kind} requires at least one target_PSs item")
 
         binders = ", ".join(self.render_sym(require_sym(sym, "bound_syms item")) for sym in bound_syms)
-        premises = [self.render_stmt(require_node(stmt, "premise_binding_stmts item")) for stmt in premise_bindings]
-        premises.extend(self.render_stmt(require_node(stmt, "premise_PSs item")) for stmt in premise_pss)
-        targets = [self.render_stmt(require_node(stmt, "target_PSs item")) for stmt in target_pss]
+        premise_nodes = [require_node(stmt, "premise_binding_stmts item") for stmt in premise_bindings]
+        premise_nodes.extend(require_node(stmt, "premise_PSs item") for stmt in premise_pss)
+        target_nodes = [require_node(stmt, "target_PSs item") for stmt in target_pss]
 
-        opener = self.module_opener(node)
-        lines = [opener]
+        lines = [self.indent(indent) + self.module_opener(node)]
         if binders:
-            lines.append("| " + binders)
-        if premises:
-            lines.extend(self.section_lines(premises, item_prefix="| "))
-            lines.extend(self.section_lines(targets, item_prefix=""))
-        else:
-            lines.extend(self.section_lines(targets, item_prefix=""))
-        lines.append("}")
-        return "\n".join(lines)
+            lines.append(self.indent(indent + 1) + "| " + binders)
+        if premise_nodes:
+            lines.extend(self.section_lines(premise_nodes, indent=indent + 1, item_prefix="| "))
+        lines.extend(self.section_lines(target_nodes, indent=indent + 1, item_prefix=""))
+        lines.append(self.indent(indent) + "}")
+        return lines
 
     def module_opener(self, node: AstNode) -> str:
         kind = require_kind(node)
@@ -100,13 +98,22 @@ class Renderer:
             raise TranslateError("quantified_stmt.quantifier_sym.name must be a non-empty string when present")
         return f"{quantifier}{{"
 
-    def section_lines(self, rendered_items: list[str], *, item_prefix: str) -> list[str]:
+    def section_lines(self, items: list[AstNode], *, indent: int, item_prefix: str) -> list[str]:
         lines: list[str] = []
-        for item in rendered_items:
-            item_lines = item.splitlines() or [""]
-            lines.append(item_prefix + item_lines[0])
-            lines.extend("  " + line for line in item_lines[1:])
+        for item in items:
+            item_lines = self.render_lines(item, indent)
+            if not item_lines:
+                continue
+            first_line = item_lines[0]
+            prefix_base = self.indent(indent)
+            if not first_line.startswith(prefix_base):
+                raise TranslateError("rendered item did not preserve requested indentation")
+            lines.append(prefix_base + item_prefix + first_line[len(prefix_base):])
+            lines.extend(item_lines[1:])
         return lines
+
+    def indent(self, depth: int) -> str:
+        return "  " * depth
 
     def render_binding(self, node: AstNode) -> str:
         dst = self.render_sym(require_sym(node.get("dst_sym"), "binding_stmt.dst_sym"))
