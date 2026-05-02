@@ -21,7 +21,7 @@ set_module: "{" section_text? "}"
 
 QUANTIFIER: "∀" | "∃"
 
-// The section scanner in compile_module_text.py interprets top-level |, =>,
+// The section scanner in compile_module.py interprets top-level |, =>,
 // and , separators because sections may contain nested module expressions.
 section_text: section_chunk+
 

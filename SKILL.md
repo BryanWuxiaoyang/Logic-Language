@@ -327,6 +327,7 @@ logic-language module-text semantics, compilation, and diagnostics
         M("| prefix_object_list") = M("| prefix_object_list | tuple~prefix_object_list | \all{sym \in prefix_object_list | object~sym }")
     - `{prefix}_{class}s` inherits `set`. and all its elements inherit `{class}`
         M("| prefix_objects") = M("| prefix_objects | set~prefix_objects | \all{sym \in prefix_objects | object~sym }")
+    - `{name}'`/`{name}''`/... is treated same as `{name}` for implicit-inheritance inference
 
 - when `set-literal` is the only parameter in `statement`, it can ignore `()`
     `M("\union({sym1, sym2})") = M("\union{sym1, sym2}")`
@@ -433,21 +434,29 @@ logic-language module-text semantics, compilation, and diagnostics
     Note that `__value` is implicitly introduced as `bound-sym` inheriting `value` in `function-declaration`, so as to follow the same shadowing rule.
 
 - introduce `predicate-declaration`
+    `predicate` is a special form of `function` which returns a output sym inheriting `bool`. i.e. `P: sym => bool`
     `predicate` follows the same rule as `function-declaration`, but `sym(...)` is a `predicate-statement`, not `function-statement`
     M(
     "
-    sym: sym1~sym1' => bool
+    sym: sym1 => bool
         | PS
         bool = TS
     "
     ) = M(
     "
-    \all{
-        | sym1'
-        | sym1~sym1'
+    \all
+        | sym1, __bool
+        | __bool = sym(sym1)
+        | PS
+        bool~__bool
+        __bool = TS
+    "
+    ) = M(
+    "
+    \all
+        | sym1
         | PS
         TS
-    }
     "
     )
 
@@ -689,9 +698,77 @@ logic-language module-text semantics, compilation, and diagnostics
     - `$import file-path` simply replace this line with the file-text stored in `file-path`
     - every `module-file` implicitly imports `standard_library.lp` in this folder
 
-- compile-module internally desugars `module-text` through staged compiler pipeline passes.
-    - stage debug summaries live under `scripts/compile_pipeline/`
+- introduce `module_AST` as the compiler output form.
+    - `compile_module` emits the root `module_stmt` JSON node by default.
+    - final output uses `module_AST` field names such as `bound_syms`, `premise_binding_stmts`, `premise_PSs`, and `target_PSs`.
+    - output contains direct AST fields only; derived recursive fields are not emitted.
+
+- `compile_module` is implemented as a staged compiler pipeline.
+    - `stage1_normalize_source`: expands imports, removes comments, normalizes latex codes, and preserves source identity.
+    - `stage2_desugar_module_text`: applies surface rewrites such as declarations, literals, operators, member calls, implicit inheritance, and freshening.
+    - `stage3_parse_module_sections`: parses set/quantified modules, binders, premise sections, and target sections.
+    - `stage4_parse_statements`: parses structural statement/term forms before AST lowering.
+    - `stage5_lower_to_module_ast`: lowers to `module_AST`, ANF-lifts non-symbol call arguments, inserts generated bindings, and enforces AST shape.
+    - `stage6_emit_module_ast`: emits final JSON or readable summaries.
 
 - introduce `compile_module`
-    - it inputs `module-text`/`module-file`, return `AST` with `Module-info`
-    - tool: `scripts/compile_module_text.py`
+    - it inputs `module-text` or `module-file` and returns `module_AST` JSON.
+    - `--readable` prints a compact AST summary.
+    - `--debug-stages` prints summaries for all compiler stages.
+
+- introduce `translate_AST_to_source`
+    - it inputs `module_AST` JSON from stdin or file and returns canonical parseable `.lp` source text.
+    - it is an AST-preserving printer, not an original-source reconstruction tool.
+    - generated symbols and generated statements are printed explicitly.
+
+## Tools
+- `compile_module`
+    - path: `scripts/compile_module.py`
+    - input: `module-text` via stdin/`--text`, or a `module-file` path.
+    - output: root `module_AST` JSON by default.
+    - useful flags: `--pretty`, `--readable`, `--debug-stages`.
+
+- `stage1_normalize_source`
+    - path: `scripts/compile_pipeline/stage1_normalize_source.py`
+    - input: source module text.
+    - output: normalized source summary with imports, comments, latex normalization, and source identity handling.
+
+- `stage2_desugar_module_text`
+    - path: `scripts/compile_pipeline/stage2_desugar_module_text.py`
+    - input: normalized module text.
+    - output: desugared module-text summary for source-level rewrites.
+
+- `stage3_parse_module_sections`
+    - path: `scripts/compile_pipeline/stage3_parse_module_sections.py`
+    - input: desugared module text.
+    - output: parsed module/section summary.
+
+- `stage4_parse_statements`
+    - path: `scripts/compile_pipeline/stage4_parse_statements.py`
+    - input: parsed or raw module text.
+    - output: parsed statement summary before AST lowering.
+
+- `stage5_lower_to_module_ast`
+    - path: `scripts/compile_pipeline/stage5_lower_to_module_ast.py`
+    - input: parsed statements or raw module text.
+    - output: lowered `module_AST` summary.
+
+- `stage6_emit_module_ast`
+    - path: `scripts/compile_pipeline/stage6_emit_module_ast.py`
+    - input: lowered AST or raw module text.
+    - output: final `module_AST` JSON, or readable summary with `--readable`.
+
+- `translate_AST_to_source`
+    - path: `scripts/translate_AST_to_source.py`
+    - input: `module_AST` JSON from stdin or file.
+    - output: canonical parseable `.lp` source text.
+
+- `syntax_check`
+    - path: `scripts/syntax_check.py`
+    - input: `module-text` via stdin/`--text`, or a `module-file` path.
+    - output: JSON syntax diagnostics.
+
+- `semantic_check`
+    - path: `scripts/semantic_check.py`
+    - input: `module-text` via stdin/`--text`, or a `module-file` path.
+    - output: JSON semantic diagnostics.

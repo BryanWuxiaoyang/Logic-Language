@@ -20,71 +20,37 @@ stmt
 
     ::active_free_syms = stmt.all_free_syms - stmt.all_bound_syms
 
-stmt~term
-stmt~proposition
-
-stmt~sym
-    ::bound_syms = {}
-    ::free_syms = {sym}
-    ::sub_stmts = {}
-term~sym
-
-stmt~equality_stmt
+stmt~binding_stmt
     ::dst_sym
-    ::src_term
+    ::src_stmt
     ::bound_syms = {}
-    ::free_syms = {equality_stmt.dst_sym}
-    ::sub_stmts = {equality_stmt.src_term}
-proposition~equality_stmt
+    ::free_syms = {binding_stmt.dst_sym}
+    ::sub_stmts = {binding_stmt.src_stmt}
 
-stmt~call_stmt
+stmt~literal_stmt
+
+stmt~func_stmt
     ::call_sym
     ::arg_sym_list
     ::bound_syms = {}
-    ::free_syms = call_stmt.arg_sym_list \union {call_stmt.call_sym}
+    ::free_syms = func_stmt.arg_sym_list \union {func_stmt.call_sym}
     ::sub_stmts = {}
+FS = func_stmt
 
-call_stmt~predicate_stmt
-proposition~predicate_stmt
-
-call_stmt~function_stmt
-term~function_stmt
+func_stmt~pred_stmt
+PS = pred_stmt
 
 stmt~module_stmt
     ::bound_syms
     ::free_syms = {}
 
-    ::premise_equality_stmts
+    ::premise_binding_stmts
     ::premise_PSs
     ::target_PSs
-    ::sub_stmts = module_stmt.premise_equality_stmts \union module_stmt.premise_PSs \union module_stmt.target_PSs
+    ::sub_stmts = module_stmt.premise_binding_stmts \union module_stmt.premise_PSs \union module_stmt.target_PSs
 
 module_stmt~set_stmt
-term~set_stmt
 
 module_stmt~quantified_stmt
     ::quantifier_sym
-proposition~quantified_stmt
 
-predicate_stmt~inherit_stmt
-    ::class_sym
-    ::src_sym
-
-    ::call_sym = '~'
-    ::arg_sym_list = {inherit_stmt.class_sym, inherit_stmt.src_sym}
-
-predicate_stmt~and_stmt
-    ::call_sym = '\land'
-
-predicate_stmt~or_stmt
-    ::call_sym = '\lor'
-
-predicate_stmt~not_stmt
-    ::call_sym = '\lnot'
-    ::sym
-    ::arg_sym_list [not_stmt.sym]
-
-predicate_stmt~implies_stmt
-    ::premise_sym
-    ::target_sym
-    ::arg_sym_list = [implies_stmt.premise_sym, implies_stmt.target_sym]

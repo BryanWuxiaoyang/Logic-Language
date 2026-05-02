@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from compile_module_text import (
+from compile_module import (
     CompileError,
     IMPORT_RE,
     LATEX_CODE_RE,
@@ -167,22 +167,36 @@ def split_imports_with_diagnostics(
 
 def latex_errors(text: str, file_label: str, tokens: dict[str, str]) -> list[Diagnostic]:
     diagnostics: list[Diagnostic] = []
-    for match in LATEX_CODE_RE.finditer(text):
-        code = match.group(0)
-        if code in tokens:
+    index = 0
+    while index < len(text):
+        if is_literal_quote_start(text, index):
+            index = find_quoted_literal_end(text, index) + 1
             continue
-        line, column = zero_based_line_column(text, match.start())
-        diagnostics.append(
-            make_diagnostic(
-                file_label,
-                line,
-                column,
-                column + len(code),
-                "error",
-                "unknown_latex_code",
-                f"unknown latex code {code}",
-            )
-        )
+        if text[index] == "#":
+            newline = text.find("\n", index)
+            if newline == -1:
+                break
+            index = newline + 1
+            continue
+        match = LATEX_CODE_RE.match(text, index)
+        if match is not None:
+            code = match.group(0)
+            if code not in tokens:
+                line, column = zero_based_line_column(text, match.start())
+                diagnostics.append(
+                    make_diagnostic(
+                        file_label,
+                        line,
+                        column,
+                        column + len(code),
+                        "error",
+                        "unknown_latex_code",
+                        f"unknown latex code {code}",
+                    )
+                )
+            index = match.end()
+            continue
+        index += 1
     return diagnostics
 
 

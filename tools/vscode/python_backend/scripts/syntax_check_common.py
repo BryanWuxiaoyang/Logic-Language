@@ -8,7 +8,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable
 
-from compile_module_text import (
+from compile_module import (
+    BASIC_ESCAPES,
     IMPORT_RE,
     LATEX_CODE_RE,
     CompileError,
@@ -21,6 +22,8 @@ from compile_module_text import (
     has_top_level,
     is_literal_quote_start,
     is_plain_sym,
+    is_raw_string_literal_start,
+    literal_quote_index,
     load_tokens,
     parse_declaration,
     remove_comments,
@@ -199,6 +202,19 @@ def normalize_latex_located(located: LocatedText, tokens: dict[str, str]) -> Loc
     keys = sorted(tokens, key=len, reverse=True)
     index = 0
     while index < len(located.text):
+        if is_literal_quote_start(located.text, index):
+            end = find_quoted_literal_end(located.text, index)
+            output.append(normalize_literal_latex_located(located.slice(index, end + 1), tokens, keys))
+            index = end + 1
+            continue
+        if located.text[index] == "#":
+            end = located.text.find("\n", index)
+            if end == -1:
+                output.append(located.slice(index))
+                break
+            output.append(located.slice(index, end))
+            index = end
+            continue
         matched_key = next((key for key in keys if located.text.startswith(key, index)), None)
         if matched_key is not None:
             output.append(synthetic_text(tokens[matched_key], located.positions[index]))
@@ -211,6 +227,38 @@ def normalize_latex_located(located: LocatedText, tokens: dict[str, str]) -> Loc
                 raise CheckError(f"{position.file}:{position.line}:{position.column}: unknown latex code {match.group(0)}")
         output.append(located.slice(index, index + 1))
         index += 1
+    return concat_located(output)
+
+
+def normalize_literal_latex_located(located: LocatedText, tokens: dict[str, str], keys: list[str]) -> LocatedText:
+    if is_raw_string_literal_start(located.text, 0):
+        return located
+    quote_index = literal_quote_index(located.text, 0)
+    if quote_index is None:
+        return located
+    output: list[LocatedText] = [located.slice(0, quote_index + 1)]
+    index = quote_index + 1
+    end = len(located.text) - 1
+    while index < end:
+        if located.text[index] == "\\":
+            escape = located.text[index + 1] if index + 1 < end else ""
+            if escape in BASIC_ESCAPES:
+                output.append(located.slice(index, index + 2))
+                index += 2
+                continue
+            matched_key = next((key for key in keys if located.text.startswith(key, index)), None)
+            if matched_key is not None:
+                output.append(synthetic_text(tokens[matched_key], located.positions[index]))
+                index += len(matched_key)
+                continue
+            match = LATEX_CODE_RE.match(located.text, index)
+            if match is not None:
+                output.append(located.slice(index, match.end()))
+                index = match.end()
+                continue
+        output.append(located.slice(index, index + 1))
+        index += 1
+    output.append(located.slice(end, end + 1))
     return concat_located(output)
 
 
