@@ -32,15 +32,11 @@ id = val
 size = val
 list
     ::size: list => size
-    ::[]: (list, i) => sym
-    ::push_back: (list, sym) => list1
-        list1.size = (list.size + 1)
-        ∀{| (0 ≤ i) < list.size | list1[i] = list[i]}
-        list1[list.size] = sym
+    ::[]: (list, id) => sym
     ::+: (list, list1) => list2
         list2.size = (list.size + list1.size)
-        ∀{| (0 ≤ i) < list.size | list2[i] = list[i]}
-        ∀{| (0 ≤ i) < list1.size | list2[list.size + i] = list1[i]}
+        ∀{| i | 0 ≤ i < list.size | list2[i] = list[i]}
+        ∀{| i | 0 ≤ i < list1.size | list2[list.size + i] = list1[i]}
 set ~ list
     : (list, sym) => bool
         bool = ∃{| i | list[i] = sym}
