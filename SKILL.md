@@ -304,6 +304,7 @@ logic-language module-text semantics, compilation, and diagnostics
     TS1, TS2
     "
     )
+    in multi-line form, when statement starts with `|` it is either a `sym` or `PS`, otherwise it is `TS`
 
 - when multiple same `sym` appears in the same `syms` section, deduplicate it
     `M("| sym1, sym1 | PS | TS") = M("| sym1 | PS | TS")`

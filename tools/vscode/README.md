@@ -5,8 +5,9 @@ VS Code diagnostics for `.lp` logic-language module text.
 ## Requirements
 
 - Python 3.11+
-- The extension bundles the current syntax checker and its Python dependencies.
+- Open the repository workspace root so `skills/logic-language` is available.
+- Install the Python dependencies from `skills/logic-language/requirements.txt`.
 
 ## Settings
 
-- `logicLanguage.pythonPath`: Python executable used to run the bundled checker. Defaults to `python3`.
+- `logicLanguage.pythonPath`: Python executable used to run the workspace source-tree checker. Defaults to `python3`.

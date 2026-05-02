@@ -1,7 +1,7 @@
 {
   "name": "logic-language",
   "displayName": "Logic Language",
-  "description": "Syntax and semantic diagnostics for logic-language .lp module text.",
+  "description": "Syntax and semantic diagnostics for logic-language .lp module text from the workspace source tree.",
   "version": "0.1.3",
   "publisher": "xiaoyangwu",
   "license": "UNLICENSED",
@@ -43,7 +43,7 @@
         "logicLanguage.pythonPath": {
           "type": "string",
           "default": "",
-          "description": "Python executable used to run the bundled logic-language checkers. Leave empty to use the platform default (`py` on Windows, `python3` elsewhere)."
+          "description": "Python executable used to run the logic-language checker scripts from the workspace source tree. Leave empty to use the platform default (`py` on Windows, `python3` elsewhere)."
         }
       }
     }

@@ -1,4 +1,5 @@
 const childProcess = require("child_process");
+const fs = require("fs");
 const path = require("path");
 const vscode = require("vscode");
 
@@ -56,25 +57,34 @@ function activate(context) {
     return workspaceFolder ? workspaceFolder.uri.fsPath : context.extensionPath;
   }
 
+  function resolveWorkspaceRoot() {
+    const workspaceFolders = vscode.workspace.workspaceFolders || [];
+    for (const folder of workspaceFolders) {
+      const root = folder.uri.fsPath;
+      const skillRoot = path.join(root, "skills", "logic-language");
+      const scriptsRoot = path.join(skillRoot, "scripts");
+      const syntaxChecker = path.join(scriptsRoot, "syntax_check.py");
+      const semanticChecker = path.join(scriptsRoot, "semantic_check.py");
+      if (
+        fs.existsSync(syntaxChecker) &&
+        fs.existsSync(semanticChecker)
+      ) {
+        return { root, skillRoot, scriptsRoot, syntaxChecker, semanticChecker };
+      }
+    }
+    throw new Error(
+      "logic-language backend not found. Open the repository workspace root containing skills/logic-language."
+    );
+  }
+
   function backendPaths() {
-    const scriptsRoot = path.join(context.extensionPath, "python_backend", "scripts");
-    const vendorRoot = path.join(context.extensionPath, "python_backend", "vendor");
-    const syntaxChecker = path.join(scriptsRoot, "syntax_check.py");
-    const semanticChecker = path.join(scriptsRoot, "semantic_check.py");
-    return { scriptsRoot, vendorRoot, syntaxChecker, semanticChecker };
+    return resolveWorkspaceRoot();
   }
 
   function pythonEnvironment(document) {
-    const { scriptsRoot, vendorRoot } = backendPaths();
-    const pythonPathEnv = process.env.PYTHONPATH
-      ? [scriptsRoot, vendorRoot, process.env.PYTHONPATH].join(path.delimiter)
-      : [scriptsRoot, vendorRoot].join(path.delimiter);
     return {
       cwd: getBaseDir(document),
-      env: {
-        ...process.env,
-        PYTHONPATH: pythonPathEnv
-      },
+      env: { ...process.env },
       windowsHide: true
     };
   }

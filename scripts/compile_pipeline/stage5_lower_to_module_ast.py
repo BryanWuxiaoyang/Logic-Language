@@ -73,13 +73,20 @@ class AstLowerer:
         target_pss: list[AstNode] = []
 
         for statement in module.predicate_statements:
-            bindings, node = self.lower_statement(statement)
+            bindings, nodes = self.lower_statement(statement, target_section=False)
             premise_bindings.extend(bindings)
-            premise_pss.append(node)
+            for node in nodes:
+                if node.get("kind") == "binding_stmt":
+                    premise_bindings.append(node)
+                else:
+                    premise_pss.append(node)
         for statement in module.target_statements:
-            bindings, node = self.lower_statement(statement)
+            bindings, nodes = self.lower_statement(statement, target_section=True)
             premise_bindings.extend(bindings)
-            target_pss.append(node)
+            for node in nodes:
+                if node.get("kind") == "binding_stmt":
+                    raise CompileError("target_PSs cannot contain binding_stmt")
+                target_pss.append(node)
 
         generated_syms = self.generated_bound_stack.pop()
         bound_names = [sym_node(sym, self.loc) for sym in module.syms if sym not in intrinsic_syms()]
@@ -98,48 +105,64 @@ class AstLowerer:
             ast["quantifier_sym"] = sym_node(module.quantifier)
         return ast
 
-    def lower_statement(self, statement: Statement) -> tuple[list[AstNode], AstNode]:
+    def lower_statement(self, statement: Statement, *, target_section: bool) -> tuple[list[AstNode], list[AstNode]]:
         text = lower_member_calls(statement.text.strip())
         if not text:
             raise CompileError("empty statement")
         placeholder = re.fullmatch(r"\$module(?P<index>\d+)", text)
         if placeholder is not None:
-            return [], self.lower_module(statement.sub_modules[int(placeholder.group("index"))])
+            return [], [self.lower_module(statement.sub_modules[int(placeholder.group("index"))])]
 
         assignment_index = top_level_assignment_index(text)
         if assignment_index is not None:
-            return self.lower_assignment(text[:assignment_index].strip(), text[assignment_index + 1 :].strip(), statement)
+            return self.lower_assignment(
+                text[:assignment_index].strip(),
+                text[assignment_index + 1 :].strip(),
+                statement,
+                target_section=target_section,
+            )
         bindings, node = self.lower_call_statement(text, statement)
-        return bindings, node
+        return bindings, [node]
 
-    def lower_assignment(self, lhs: str, rhs: str, statement: Statement) -> tuple[list[AstNode], AstNode]:
+    def lower_assignment(self, lhs: str, rhs: str, statement: Statement, *, target_section: bool) -> tuple[list[AstNode], list[AstNode]]:
         lhs_items = parse_tuple_or_list_items(lhs)
         if lhs_items is not None:
-            return self.lower_compound_lhs(lhs_items, rhs, statement)
+            return self.lower_compound_lhs(lhs_items, rhs, statement, target_section=target_section)
         if is_plain_sym(lhs):
             rhs_expr = self.parse_expr(rhs, statement)
             if rhs_expr["kind"] == "sym":
-                return [], func_stmt("=", [sym_node(lhs, self.loc), rhs_expr], self.loc)
+                return [], [func_stmt("=", [sym_node(lhs, self.loc), rhs_expr], self.loc)]
             if rhs_expr["kind"] in {"func_stmt", "set_stmt", "quantified_stmt"} or rhs_expr["kind"].endswith("_literal_stmt"):
-                return [], binding_stmt(lhs, rhs_expr, self.loc)
+                if target_section:
+                    bindings: list[AstNode] = []
+                    rhs_sym = self.ensure_sym(rhs_expr, bindings, preferred=preferred_temp_name(rhs))
+                    return bindings, [func_stmt("=", [sym_node(lhs, self.loc), rhs_sym], self.loc)]
+                nested_bindings = rhs_expr.pop("_bindings", [])
+                return nested_bindings, [binding_stmt(lhs, rhs_expr, self.loc)]
             raise CompileError(f"unsupported assignment RHS: {rhs}")
         bindings: list[AstNode] = []
         lhs_sym = self.ensure_sym(self.parse_expr(lhs, statement), bindings)
         rhs_sym = self.ensure_sym(self.parse_expr(rhs, statement), bindings)
-        return bindings, func_stmt("=", [lhs_sym, rhs_sym], self.loc)
+        return bindings, [func_stmt("=", [lhs_sym, rhs_sym], self.loc)]
 
-    def lower_compound_lhs(self, lhs_items: list[str], rhs: str, statement: Statement) -> tuple[list[AstNode], AstNode]:
+    def lower_compound_lhs(self, lhs_items: list[str], rhs: str, statement: Statement, *, target_section: bool) -> tuple[list[AstNode], list[AstNode]]:
         if not all(is_plain_sym(item) for item in lhs_items):
             raise CompileError("tuple/list assignment left-hand side must contain only symbols")
         bindings: list[AstNode] = []
         rhs_sym = self.ensure_sym(self.parse_expr(rhs, statement), bindings, preferred=preferred_temp_name(rhs))
+        target_nodes: list[AstNode] = []
         for index, lhs in enumerate(lhs_items):
             index_literal = literal_stmt(LiteralValue("value", str(index), str(index)), self.loc)
             index_sym = self.ensure_sym(index_literal, bindings, preferred="value")
-            bindings.append(binding_stmt(lhs, func_stmt("[]", [rhs_sym, index_sym], self.loc, generated=True), self.loc))
-        if not bindings:
+            index_call = func_stmt("[]", [rhs_sym, index_sym], self.loc, generated=True)
+            if target_section:
+                component_sym = self.ensure_sym(index_call, bindings, preferred="[]")
+                target_nodes.append(func_stmt("=", [sym_node(lhs, self.loc), component_sym], self.loc))
+            else:
+                bindings.append(binding_stmt(lhs, index_call, self.loc))
+        if not lhs_items:
             raise CompileError("empty tuple/list assignment left-hand side")
-        return bindings[:-1], bindings[-1]
+        return bindings, target_nodes
 
     def lower_call_statement(self, text: str, statement: Statement) -> tuple[list[AstNode], AstNode]:
         expr = self.parse_expr(text, statement)

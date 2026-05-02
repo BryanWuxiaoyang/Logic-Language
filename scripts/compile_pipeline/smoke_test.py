@@ -4,9 +4,13 @@
 from __future__ import annotations
 
 import tempfile
+import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
 from compile_module import CompileError, run_compile_pipeline
+from translate_AST_to_source import translate_ast_to_source
 
 
 def compile_text(text: str, *, base_dir: Path | str = ".", source: str = "__stdin__", allow_imports: bool = False) -> dict:
@@ -33,6 +37,14 @@ def bindings(ast: dict) -> list[dict]:
     return [node for node in all_nodes(ast) if node.get("kind") == "binding_stmt"]
 
 
+def target_bindings(ast: dict) -> list[dict]:
+    return [node for node in ast.get("target_PSs", []) if node.get("kind") == "binding_stmt"]
+
+
+def top_level_calls(ast: dict, name: str, field: str) -> list[dict]:
+    return [node for node in ast.get(field, []) if node.get("kind") == "func_stmt" and node.get("call_sym", {}).get("name") == name]
+
+
 def assert_no_legacy_top_level(ast: dict) -> None:
     assert "predicate_statements" not in ast
     assert "target_statements" not in ast
@@ -55,8 +67,15 @@ def test_set_module() -> None:
 
 
 def test_binding_call() -> None:
-    ast = compile_text("∀{| x, y | x = f(y)}")
+    ast = compile_text("∀{| x, y | x = f(y) | y = y}")
     assert any(binding["dst_sym"]["name"] == "x" and binding["src_stmt"]["kind"] == "func_stmt" for binding in bindings(ast))
+
+
+def test_target_call_assignment_normalized() -> None:
+    ast = compile_text("∀{| x, y | y = f(x)}")
+    assert not target_bindings(ast)
+    assert any(binding["dst_sym"]["name"].startswith("__tmpf") for binding in ast["premise_binding_stmts"])
+    assert top_level_calls(ast, "=", "target_PSs")
 
 
 def test_nested_call_anf() -> None:
@@ -67,8 +86,10 @@ def test_nested_call_anf() -> None:
 
 def test_compound_lhs() -> None:
     ast = compile_text("∀{| a, b, x | (a, b) = f(x)}")
-    assert any(binding["dst_sym"]["name"] == "a" for binding in ast["premise_binding_stmts"])
-    assert any(binding["dst_sym"]["name"] == "b" for binding in ast["target_PSs"] if binding.get("kind") == "binding_stmt")
+    assert not target_bindings(ast)
+    target_eqs = top_level_calls(ast, "=", "target_PSs")
+    assert len(target_eqs) == 2
+    assert {stmt["arg_sym_list"][0]["name"] for stmt in target_eqs} == {"a", "b"}
     assert calls(ast, "[]")
 
 
@@ -109,17 +130,72 @@ def test_stdin_import_rejected() -> None:
     raise AssertionError("stdin import should fail")
 
 
+def test_multiline_bar_semantics() -> None:
+    ast = compile_text("∀{\n| x\n| x ~ x\nx = x\n}")
+    assert [sym["name"] for sym in ast["bound_syms"] if not sym.get("generated")] == ["x"]
+    assert top_level_calls(ast, "~", "premise_PSs")
+    assert top_level_calls(ast, "=", "target_PSs")
+
+
+def test_translate_omits_empty_binder_bar() -> None:
+    ast = compile_text("val ~ min_val\n∀{| val1 | val1 ≥ min_val}")
+    source = translate_ast_to_source(ast)
+    lines = source.splitlines()
+    assert "|" not in [line.strip() for line in lines]
+    assert any(line.strip() == "val ~ min_val" for line in lines)
+    assert not any(line.strip() == "| val ~ min_val" for line in lines)
+    assert any(line.strip() == "| val1" for line in lines)
+    assert any(line.strip() == "| sym ~ val1" for line in lines)
+    assert any(line.strip() == "val1 ≥ min_val" for line in lines)
+
+
+def test_translate_keeps_binder_line_when_present() -> None:
+    ast = compile_text("∀{| x | x = x}")
+    source = translate_ast_to_source(ast)
+    assert "\n| x" in source
+
+
+def test_target_literal_assignment_normalized() -> None:
+    ast = compile_text("∀{| x | x = 1}")
+    assert not target_bindings(ast)
+    assert any(binding["src_stmt"]["kind"] == "value_literal_stmt" for binding in ast["premise_binding_stmts"])
+    assert top_level_calls(ast, "=", "target_PSs")
+
+
+def test_target_module_assignment_normalized() -> None:
+    ast = compile_text("∀{| x | x = ∀{| y | y = y}}")
+    assert not target_bindings(ast)
+    assert any(binding["src_stmt"]["kind"] == "quantified_stmt" for binding in ast["premise_binding_stmts"])
+    assert top_level_calls(ast, "=", "target_PSs")
+
+
+def test_disassembled_final_ast_preserves_target_placement() -> None:
+    ast = compile_text("val ~ min_val\n∀{| val1 | val1 ≥ min_val}")
+    source = translate_ast_to_source(ast)
+    reparsed = compile_text(source)
+    assert not target_bindings(reparsed)
+    assert any(stmt.get("call_sym", {}).get("name") == "~" for stmt in reparsed["target_PSs"])
+    assert not any(stmt.get("call_sym", {}).get("name") == "~" for stmt in reparsed["premise_PSs"])
+
+
 def main() -> int:
     tests = [
         test_simple_quantified,
         test_set_module,
         test_binding_call,
+        test_target_call_assignment_normalized,
         test_nested_call_anf,
         test_compound_lhs,
         test_literals,
         test_member_and_operator,
         test_import_file_locations,
         test_stdin_import_rejected,
+        test_multiline_bar_semantics,
+        test_translate_omits_empty_binder_bar,
+        test_translate_keeps_binder_line_when_present,
+        test_target_literal_assignment_normalized,
+        test_target_module_assignment_normalized,
+        test_disassembled_final_ast_preserves_target_placement,
     ]
     for test in tests:
         test()

@@ -75,13 +75,13 @@ class Renderer:
 
         opener = self.module_opener(node)
         lines = [opener]
+        if binders:
+            lines.append("| " + binders)
         if premises:
-            lines.append("| " + binders if binders else "|")
-            lines.extend(self.section_lines(premises, first_prefix="| "))
-            lines.extend(self.section_lines(targets, first_prefix="| "))
+            lines.extend(self.section_lines(premises, item_prefix="| "))
+            lines.extend(self.section_lines(targets, item_prefix=""))
         else:
-            lines.append("| " + binders if binders else "|")
-            lines.extend(self.section_lines(targets, first_prefix="| "))
+            lines.extend(self.section_lines(targets, item_prefix=""))
         lines.append("}")
         return "\n".join(lines)
 
@@ -94,12 +94,11 @@ class Renderer:
             raise TranslateError("quantified_stmt.quantifier_sym.name must be a non-empty string when present")
         return f"{quantifier}{{"
 
-    def section_lines(self, rendered_items: list[str], *, first_prefix: str) -> list[str]:
+    def section_lines(self, rendered_items: list[str], *, item_prefix: str) -> list[str]:
         lines: list[str] = []
-        for index, item in enumerate(rendered_items):
-            prefix = first_prefix if index == 0 else ""
+        for item in rendered_items:
             item_lines = item.splitlines() or [""]
-            lines.append(prefix + item_lines[0])
+            lines.append(item_prefix + item_lines[0])
             lines.extend("  " + line for line in item_lines[1:])
         return lines
 
