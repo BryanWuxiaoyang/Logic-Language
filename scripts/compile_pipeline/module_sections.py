@@ -104,6 +104,7 @@ class ModuleCompiler:
         while index < len(lines):
             line = lines[index]
             indent, content = split_indent(line)
+            content = erase_coloncolon_statement_head(content)
             if content in {"∀", "∃"} and index + 1 < len(lines):
                 block, next_index = collect_indented_block(lines, index + 1, indent)
                 if block:
@@ -117,7 +118,12 @@ class ModuleCompiler:
                     output.extend(self.lower_header_with_block(content, unindent_block(block)))
                     index = next_index
                     continue
-            output.append(content)
+            declaration = parse_declaration(content)
+            if declaration is not None:
+                output.extend(self.lower_declaration(declaration, block=None))
+            else:
+                reject_unsupported_coloncolon(content)
+                output.append(content)
             index += 1
         return output
 
@@ -127,18 +133,50 @@ class ModuleCompiler:
         if header.startswith("|-"):
             branch_ps = header[2:].strip()
             return ["∀{\n| " + branch_ps + "\n" + block + "\n}"]
+        class_sym = class_header_sym(header)
+        if class_sym is not None:
+            return self.lower_class_block(header, class_sym, block)
         declaration = parse_declaration(header)
         if declaration is None:
+            reject_unsupported_coloncolon(header)
             return [header, "∀{\n" + block + "\n}"]
+        return self.lower_declaration(declaration, block=self.lower_nested_block(block))
+
+    def lower_declaration(self, declaration: tuple[str, list[str], list[str], str], block: str | None) -> list[str]:
         name, inputs, outputs, arrow = declaration
         if arrow == "->":
             call = call_text(name, inputs)
             target = f"{tuple_or_single(outputs)} = {call}"
-            return [f"{name}: {tuple_or_single(inputs)} => {tuple_or_single(outputs)}", "∀{\n" + target + "\n" + block + "\n}"]
+            block_text = "" if block is None else "\n" + block
+            return [f"{name}: {tuple_or_single(inputs)} => {tuple_or_single(outputs)}", "∀{\n" + target + block_text + "\n}"]
         call = call_text(name, inputs)
         target = f"{tuple_or_single(outputs)} = {call}" if outputs != ["bool"] else call
         marker = f"{DECL_OUTPUT_MARKER}({', '.join(outputs)})"
-        return [f"Function ~ {name}", "∀{\n| " + ", ".join(inputs + outputs) + "\n| " + marker + "\n| " + target + "\n" + block + "\n}"]
+        block_text = "" if block is None else "\n" + block
+        return [f"Function ~ {name}", "∀{\n| " + ", ".join(inputs + outputs) + "\n| " + marker + "\n| " + target + block_text + "\n}"]
+
+    def lower_class_block(self, header: str, class_sym: str, block: str) -> list[str]:
+        expanded_lines = class_block_prefix_lines(header, class_sym)
+        body_lines = logical_lines(block)
+        index = 0
+        while index < len(body_lines):
+            line = body_lines[index]
+            indent, content = split_indent(line)
+            if indent != 0:
+                raise CompileError("class-declaration body line must start with '::'")
+            if not content.startswith("::"):
+                raise CompileError("class-declaration body line must start with '::'")
+            if content.startswith(":::") or content.strip() == "::":
+                raise CompileError("class-declaration body line must start with '::' followed by a declaration")
+            class_line = f"{class_sym}{content}"
+            nested, next_index = collect_indented_block(body_lines, index + 1, indent)
+            expanded_lines.append(class_line)
+            expanded_lines.extend(nested)
+            index = next_index
+        return self.lower_line_blocks(expanded_lines)
+
+    def lower_nested_block(self, block: str) -> str:
+        return "\n".join(self.lower_line_blocks(logical_lines(block)))
 
     def build_module(self, module_type: str, quantifier: str | None, body: str) -> Module:
         declaration_syms = collect_standalone_declaration_syms(body)
@@ -201,6 +239,7 @@ class ModuleCompiler:
     def lower_term(self, text: str, *, target_section: bool) -> LoweredTerm:
         text = text.strip()
         rewritten, sub_modules = self.extract_sub_modules(text)
+        reject_unsupported_coloncolon(rewritten)
         direct_assignment = self.parse_direct_literal_assignment(rewritten)
         if direct_assignment is not None:
             sym, literal = direct_assignment
@@ -599,6 +638,74 @@ def infer_syms(predicate_texts: list[str]) -> list[str]:
             if is_plain_sym(right):
                 syms.append(right)
     return dedupe(syms)
+
+
+def class_header_sym(header: str) -> str | None:
+    header = header.strip()
+    if is_plain_sym(header):
+        return header
+    parts = split_top_level(header, "~")
+    if len(parts) == 2:
+        rhs = parts[1].strip()
+        if is_plain_sym(rhs):
+            return rhs
+    return None
+
+
+def class_block_prefix_lines(header: str, class_sym: str) -> list[str]:
+    header = header.strip()
+    if is_plain_sym(header):
+        return [header]
+    return [header, class_sym]
+
+
+def erase_coloncolon_statement_head(text: str) -> str:
+    stripped = text.strip()
+    if "::" not in stripped:
+        return stripped
+    assignment_index = top_level_assignment_index(stripped)
+    if assignment_index is not None and "::" in stripped[:assignment_index]:
+        raise CompileError("class-field assignment with '::' is not supported")
+
+    colon_index = declaration_colon_index(stripped)
+    if colon_index is not None:
+        name = stripped[:colon_index].strip()
+        if "::" in name:
+            return erase_coloncolon_name(name) + stripped[colon_index:]
+        reject_unsupported_coloncolon(stripped)
+        return stripped
+
+    if is_coloncolon_name(stripped):
+        return erase_coloncolon_name(stripped)
+    reject_unsupported_coloncolon(stripped)
+    return stripped
+
+
+def reject_unsupported_coloncolon(text: str) -> None:
+    if "::" in text:
+        raise CompileError("unsupported '::' usage; '::' is only supported in declaration heads")
+
+
+def erase_coloncolon_name(name: str) -> str:
+    if not is_coloncolon_name(name):
+        raise CompileError("unsupported '::' usage; '::' is only supported in declaration heads")
+    suffix = name.split("::", 1)[1].strip()
+    if not suffix:
+        raise CompileError("unsupported '::' usage; missing declaration name after '::'")
+    return suffix
+
+
+def is_coloncolon_name(name: str) -> bool:
+    if name.count("::") != 1:
+        return False
+    prefix, suffix = (part.strip() for part in name.split("::", 1))
+    return bool(prefix and suffix and is_plain_sym(prefix) and is_declaration_head_name(suffix))
+
+
+def is_declaration_head_name(name: str) -> bool:
+    if is_plain_sym(name):
+        return True
+    return bool(re.fullmatch(r"[^\s:(),{}]+", name))
 
 
 def dedupe(values: Iterable[str]) -> list[str]:

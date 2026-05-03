@@ -12,12 +12,16 @@ from compile_pipeline.errors import CompileError
 from compile_pipeline.module_sections import (
     brace_delta,
     call_text,
+    class_block_prefix_lines,
+    class_header_sym,
     collect_indented_block,
     dedupe,
+    erase_coloncolon_statement_head,
     find_matching,
     has_top_level,
     is_plain_sym,
     parse_declaration,
+    reject_unsupported_coloncolon,
     split_indent,
     split_top_level,
     strip_outer_blank_lines,
@@ -466,6 +470,7 @@ class LocatedModuleParser:
         while index < len(lines):
             line = lines[index]
             indent, content = split_indent_located(line)
+            content = erase_coloncolon_statement_head_located(content)
             if content.text in QUANTIFIERS and index + 1 < len(lines):
                 block, next_index = collect_indented_block_located(lines, index + 1, indent)
                 if block:
@@ -478,7 +483,12 @@ class LocatedModuleParser:
                     output.extend(self.lower_header_with_block(content, unindent_block_located(block)))
                     index = next_index
                     continue
-            output.append(content)
+            declaration = parse_declaration(content.text)
+            if declaration is not None:
+                output.extend(self.lower_declaration(content, declaration, block=None))
+            else:
+                reject_unsupported_coloncolon(content.text)
+                output.append(content)
             index += 1
         return output
 
@@ -488,24 +498,71 @@ class LocatedModuleParser:
         if header.text.startswith("|-"):
             branch_ps = header.slice(2).strip()
             return [concat_located([synthetic_text("∀{\n| ", header.positions[0]), branch_ps, synthetic_text("\n", header.positions[0]), block, synthetic_text("\n}", header.positions[0])])]
+        class_sym = class_header_sym(header.text)
+        if class_sym is not None:
+            return self.lower_class_block(header, class_sym, block)
         declaration = parse_declaration(header.text)
         if declaration is None:
+            reject_unsupported_coloncolon(header.text)
             return [header, concat_located([synthetic_text("∀{\n", header.positions[0]), block, synthetic_text("\n}", header.positions[0])])]
+        return self.lower_declaration(header, declaration, block=self.lower_nested_block(block))
+
+    def lower_declaration(
+        self,
+        header: LocatedText,
+        declaration: tuple[str, list[str], list[str], str],
+        *,
+        block: LocatedText | None,
+    ) -> list[LocatedText]:
         name, inputs, outputs, arrow = declaration
+        origin = header.positions[0]
         if arrow == "->":
             call = call_text(name, inputs)
             target = f"{tuple_or_single(outputs)} = {call}"
+            body_parts = [synthetic_text("∀{\n", origin), synthetic_text(target, origin)]
+            if block is not None:
+                body_parts.extend([synthetic_text("\n", origin), block])
+            body_parts.append(synthetic_text("\n}", origin))
             return [
-                synthetic_text(f"{name}: {tuple_or_single(inputs)} => {tuple_or_single(outputs)}", header.positions[0]),
-                concat_located([synthetic_text("∀{\n", header.positions[0]), synthetic_text(target, header.positions[0]), synthetic_text("\n", header.positions[0]), block, synthetic_text("\n}", header.positions[0])]),
+                synthetic_text(f"{name}: {tuple_or_single(inputs)} => {tuple_or_single(outputs)}", origin),
+                concat_located(body_parts),
             ]
         call = call_text(name, inputs)
         target = f"{tuple_or_single(outputs)} = {call}" if outputs != ["bool"] else call
         binder_line = located_binder_line_from_header(header, inputs + outputs)
-        return [
-            synthetic_text(f"Function ~ {name}", header.positions[0]),
-            concat_located([synthetic_text("∀{\n", header.positions[0]), binder_line, synthetic_text("\n| ", header.positions[0]), synthetic_text(target, header.positions[0]), synthetic_text("\n", header.positions[0]), block, synthetic_text("\n}", header.positions[0])]),
+        body_parts = [
+            synthetic_text("∀{\n", origin),
+            binder_line,
+            synthetic_text("\n| ", origin),
+            synthetic_text(target, origin),
         ]
+        if block is not None:
+            body_parts.extend([synthetic_text("\n", origin), block])
+        body_parts.append(synthetic_text("\n}", origin))
+        return [
+            synthetic_text(f"Function ~ {name}", origin),
+            concat_located(body_parts),
+        ]
+
+    def lower_class_block(self, header: LocatedText, class_sym: str, block: LocatedText) -> list[LocatedText]:
+        expanded_lines = class_block_prefix_lines_located(header, class_sym)
+        body_lines = logical_lines_located(block)
+        index = 0
+        while index < len(body_lines):
+            line = body_lines[index]
+            indent, content = split_indent_located(line)
+            if indent != 0 or not content.text.startswith("::"):
+                raise CheckError("class-declaration body line must start with '::'")
+            if content.text.startswith(":::") or content.text.strip() == "::":
+                raise CheckError("class-declaration body line must start with '::' followed by a declaration")
+            expanded_lines.append(concat_located([synthetic_text(class_sym, content.positions[0]), content]))
+            nested, next_index = collect_indented_block_located(body_lines, index + 1, indent)
+            expanded_lines.extend(nested)
+            index = next_index
+        return self.lower_line_blocks(expanded_lines)
+
+    def lower_nested_block(self, block: LocatedText) -> LocatedText:
+        return join_lines_located(self.lower_line_blocks(logical_lines_located(block)))
 
     def build_module(self, module_type: str, quantifier: str | None, body: LocatedText) -> CheckModule:
         sections = split_sections_located(body)
@@ -547,6 +604,7 @@ class LocatedModuleParser:
 
     def compile_statement(self, located: LocatedText) -> CheckStatement:
         text, submodules = self.extract_sub_modules(located.strip())
+        reject_unsupported_coloncolon(text.text)
         return CheckStatement(text.text.strip(), submodules)
 
     def extract_sub_modules(self, located: LocatedText) -> tuple[LocatedText, list[CheckModule]]:
@@ -635,6 +693,29 @@ def join_lines_located(lines: Iterable[LocatedText]) -> LocatedText:
             fallback = line.positions[-1]
         first = False
     return concat_located(parts)
+
+
+def erase_coloncolon_statement_head_located(located: LocatedText) -> LocatedText:
+    stripped = located.strip()
+    rewritten = erase_coloncolon_statement_head(stripped.text)
+    if rewritten == stripped.text:
+        return stripped
+    if "::" in stripped.text:
+        suffix = stripped.text.split("::", 1)[1]
+        suffix_start = len(stripped.text) - len(suffix)
+        colon_index = suffix.find(":")
+        if colon_index >= 0:
+            suffix_name = suffix[:colon_index]
+            return concat_located([stripped.slice(suffix_start, suffix_start + len(suffix_name)), stripped.slice(suffix_start + len(suffix_name))])
+        return stripped.slice(suffix_start)
+    return synthetic_text(rewritten, stripped.positions[0])
+
+
+def class_block_prefix_lines_located(header: LocatedText, class_sym: str) -> list[LocatedText]:
+    prefix_texts = class_block_prefix_lines(header.text, class_sym)
+    if len(prefix_texts) == 1:
+        return [header]
+    return [header, synthetic_text(class_sym, header.positions[0])]
 
 
 def split_sections_located(body: LocatedText) -> list[LocatedText]:

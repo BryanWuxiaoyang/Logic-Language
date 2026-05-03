@@ -56,7 +56,7 @@ list
         ∀{| i | 0 ≤ i < list.size | list2[i] = list[i]}
         ∀{| i | 0 ≤ i < list1.size | list2[list.size + i] = list1[i]}
 Set ~ List
-    : (list, sym) => bool
+    ::∈: (sym, list) => bool
         bool = ∃{| i | list[i] = sym}
 Set::lists: set => lists
     lists = {

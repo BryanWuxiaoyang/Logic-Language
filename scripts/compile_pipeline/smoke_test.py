@@ -171,6 +171,62 @@ def test_operator_head_declaration_round_trip() -> None:
     assert calls(reparsed, "+")
 
 
+def test_class_coloncolon_top_level_function_declaration() -> None:
+    source = translate_ast_to_source(compile_text("Val\nClass::func: (val1, val2) => (val3, val4)"))
+    assert "Class::func" not in source
+    assert "Function ~ func" in source
+    assert "func(val1, val2)" in source
+    assert "| Val ~ val1" in source
+    assert "| Val ~ val2" in source
+    assert "\n    Val ~ val3\n" in source
+    assert "\n    Val ~ val4\n" in source
+
+
+def test_class_block_expands_to_current_scope() -> None:
+    source = translate_ast_to_source(compile_text("Class\n    ::field\n    ::func: (val1, val2) => (val3, val4)"))
+    assert "Class::" not in source
+    assert "\n  | Class, field\n" in source
+    assert "Function ~ func" in source
+    assert "func(val1, val2)" in source
+
+
+def test_class_method_body_is_preserved() -> None:
+    source = translate_ast_to_source(compile_text("Class\n    ::func: x => y\n        y = x"))
+    assert "Class::func" not in source
+    assert "Function ~ func" in source
+    assert "\n    | y = func(x)\n" in source
+    assert "\n    y = x\n" in source
+
+
+def test_inline_inheritance_class_body() -> None:
+    source = translate_ast_to_source(compile_text("A ~ B\n    ::func: b => out"))
+    assert "\n  | B\n" in source
+    assert "\n  | A ~ B\n" in source
+    assert "Function ~ func" in source
+    assert "\n    | B ~ b\n" in source
+
+
+def test_class_operator_suffix_declaration() -> None:
+    source = translate_ast_to_source(compile_text("List::[]: (list, id) => sym"))
+    assert "List::[]" not in source
+    assert "Function ~ []" in source
+    assert "list[id]" in source
+
+
+def test_invalid_class_body_lines_fail() -> None:
+    cases = [
+        "Class\n    P(class)",
+        "Class\n    : (class, x) => y",
+        "Class::field = value",
+    ]
+    for text in cases:
+        try:
+            compile_text(text)
+        except CompileError:
+            continue
+        raise AssertionError(f"expected invalid class-declaration source to fail: {text!r}")
+
+
 def test_wrapper_predicates_lower_through_anf() -> None:
     cases = [
         ("∀{| a, b | Tuple ~ (a, b)}", "tuple_literal_stmt", "Tuple"),
@@ -683,6 +739,12 @@ def main() -> int:
         test_member_and_operator,
         test_missing_infix_support_round_trip,
         test_operator_head_declaration_round_trip,
+        test_class_coloncolon_top_level_function_declaration,
+        test_class_block_expands_to_current_scope,
+        test_class_method_body_is_preserved,
+        test_inline_inheritance_class_body,
+        test_class_operator_suffix_declaration,
+        test_invalid_class_body_lines_fail,
         test_wrapper_predicates_lower_through_anf,
         test_capital_wrapper_predicates_normalize_to_infix,
         test_stage2_ancestor_scope_for_function_decl,

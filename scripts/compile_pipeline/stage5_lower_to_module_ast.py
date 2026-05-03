@@ -213,6 +213,8 @@ class AstLowerer:
         literal = parse_literal_or_numeric(text)
         if literal is not None:
             return literal_stmt(literal, self.loc)
+        if text == "[]":
+            return sym_node(text, self.loc)
         items = parse_tuple_or_list_items(text)
         if items is not None:
             return literal_collection("tuple_literal_stmt", [self.parse_expr(item, statement) for item in items], self.loc)
@@ -416,7 +418,10 @@ def parse_index_call(text: str) -> tuple[str, str] | None:
     open_index = text.rfind("[")
     if open_index <= 0 or find_matching(text, open_index, "[", "]") != len(text) - 1:
         return None
-    return text[:open_index].strip(), text[open_index + 1 : -1].strip()
+    index = text[open_index + 1 : -1].strip()
+    if not index:
+        return None
+    return text[:open_index].strip(), index
 
 
 def split_operator(text: str) -> tuple[str, str, str] | None:
@@ -458,6 +463,8 @@ def split_top_level_token(text: str, separator: str) -> list[str]:
 
 
 def is_sym_name(text: str) -> bool:
+    if text == "[]":
+        return True
     return re.fullmatch(r"[^\s()\[\]{},]+", text) is not None
 
 

@@ -514,33 +514,29 @@ logic-language module-text semantics, compilation, and diagnostics
     - it does not introduce a new primitive semantic kind named `class`.
     M(
     "
-    sym
+    Sym
         ::sym1
         ::sym2: sym => sym2'
         ::sym3: (sym, sym3') => sym3''
-        : (sym, sym4) => sym4'
-        P(sym)
     "
     ) = M("
-    sym
-    sym::sym1
-    sym::sym2: sym => sym2'
-    sym::sym3: (sym, sym3') => sym3''
-    sym: (sym, sym4) => sym4'
-    \all{| sym ~ sym' | P(sym')}
+    Sym
+    Sym::sym1
+    Sym::sym2: sym => sym2'
+    Sym::sym3: (sym, sym3') => sym3''
     ")
 
     `M("x::y") = M("y")`
 
     M(
     "
-    sym
-    sym::sym1
-    sym::sym2: sym => sym2'
-    sym::sym3: (sym, sym3') => sym3''
+    Sym
+    Sym::sym1
+    Sym::sym2: sym => sym2'
+    Sym::sym3: (sym, sym3') => sym3''
     "
     ) = M("
-    sym
+    Sym
     sym1
     sym2: sym => sym2
     sym3: (sym, sym3') => sym3''
@@ -553,19 +549,16 @@ logic-language module-text semantics, compilation, and diagnostics
 - `~` and `class-declaration` can be inlined
     M(
     "
-    sym1 ~ sym2
+    Sym1 ~ Sym2
         ::sym3: (sym2, sym4) => sym5
     "
     ) = M(
     "
-    sym1 ~ sym2
-    sym2
+    Sym1 ~ Sym2
+    Sym2
         ::sym3: (sym2, sym4) => sym5
     "
     )
-
-- introduce `class-field-assign` as sugar
-    `M("sym::sym1 = sym2") = M("sym::sym1: sym -> sym2")`
 
 - introduce `class-method-call` as sugar
     `M("sym1.sym2(sym3)") = M("sym2(sym1, sym3)")`

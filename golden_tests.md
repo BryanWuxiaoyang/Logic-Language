@@ -107,10 +107,54 @@ Class::func: (val1, val2) => (val3, val4)
 Class
     ::field
     ::func: (val1, val2) => (val3, val4)
-\all {| class | P(class)}
 "
 =
 "
-
+∀{
+  | Val, Class, field, func
+  | Function ~ func
+  | ∀{
+    | val1, val2, val3, val4, __tmpfunc0, __tmpvalue1, __tmpindex2, __tmpvalue3, __tmpindex4
+    | __tmpfunc0 = func(val1, val2)
+    | __tmpvalue1 = 0
+    | __tmpindex2 = __tmpfunc0[__tmpvalue1]
+    | __tmpvalue3 = 1
+    | __tmpindex4 = __tmpfunc0[__tmpvalue3]
+    | Val ~ val1
+    | Val ~ val2
+    | Tuple ~ __tmpfunc0
+    Value ~ __tmpvalue1
+    Value ~ __tmpvalue3
+    Val ~ val3
+    Val ~ val4
+    val3 = __tmpindex2
+    val4 = __tmpindex4
+  }
+  Symbol ~ Val
+  Symbol ~ Class
+  Symbol ~ field
+  Function ~ func
+  ∀{
+    | val1, val2, val3, val4, __tmpfunc5, __tmpvalue6, __tmpindex7, __tmpvalue8, __tmpindex9
+    | __tmpfunc5 = func(val1, val2)
+    | __tmpvalue6 = 0
+    | __tmpindex7 = __tmpfunc5[__tmpvalue6]
+    | __tmpvalue8 = 1
+    | __tmpindex9 = __tmpfunc5[__tmpvalue8]
+    | Val ~ val1
+    | Val ~ val2
+    | Tuple ~ __tmpfunc5
+    Value ~ __tmpvalue6
+    Value ~ __tmpvalue8
+    Val ~ val3
+    Val ~ val4
+    val3 = __tmpindex7
+    val4 = __tmpindex9
+  }
+}
 "
 
+## function-assign
+"
+F: (__sym1, __sym2) => F1(__sym1, __sym2)
+"
