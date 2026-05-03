@@ -22,7 +22,7 @@ List
     | __tmpfunc_stmt3 = __tmpsize1 + __tmpsize2
     | List ~ list
     | List ~ list1
-    | List ~ list2
+    List ~ list2
     __tmpfunc_stmt0 = __tmpfunc_stmt3
   }
 }

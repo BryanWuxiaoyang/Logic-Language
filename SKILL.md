@@ -329,6 +329,7 @@ logic-language module-text semantics, compilation, and diagnostics
     - Candidate lookup strips trailing primes and trailing digits, then tries the full remaining name and repeatedly removes the first `_` segment. Only the first character of each candidate is capitalized.
         `max_head_val1` tries `Max_head_val`, then `Head_val`, then `Val`.
     - When multiple visible candidates match, the longest candidate wins.
+    - If the current module target section already contains an inheritance fact `source ~ sym`, compiler-generated premise inheritance for `sym` is omitted so target guarantees remain canonical after disassembly.
     - `{base}{digit}` and `{prefix}_{base}` syms inherit the selected visible capital-head base.
         `list1` infers `List ~ list1` only if `List` is visible.
         `out_value` infers `Value ~ out_value` only if `Value` is visible.
@@ -402,6 +403,7 @@ logic-language module-text semantics, compilation, and diagnostics
         | sym1, sym2
         | sym2 = sym(sym1)
         | PS
+        implicit-output-inheritance(sym2)
         TS
     ")
 
@@ -416,11 +418,14 @@ logic-language module-text semantics, compilation, and diagnostics
         | sym1, sym2, sym3, sym4
         | (sym3, sym4) = sym(sym1, sym2)
         | PS
+        implicit-output-inheritance(sym3)
+        implicit-output-inheritance(sym4)
         TS
     ")
     
     - function `parameters` follow the same ancestor-conflict invalidity rule as nested `module-text`.
     - when a param-name is already visible in an outer-scope, the final AST is invalid; names are not freshened.
+    - function input implicit-inheritance facts are premises; function output implicit-inheritance facts are targets because they are guarantees of the function.
     - Induction: `function`'s arity is not fixed, so multiple `function-declarations` for the same `sym` add quantified constraints to the same function-sym.
 
 - introduce `function-assign`
@@ -431,9 +436,9 @@ logic-language module-text semantics, compilation, and diagnostics
     "
     )
 
-- The `function-declaration`'s `parameter` uses the same name-implicit inheritance rules and ancestor-conflict invalidity rule as nested `module-text`.
+- The `function-declaration`'s parameters and outputs use the same name-implicit inheritance rules and ancestor-conflict invalidity rule as nested `module-text`.
     - If a name syntactically suggests an inheritance-source sym, but that source is not visible in the current scope, then the name-implicit inheritance rule does not apply.
-    - e.g. with visible `Value`, `M("sym: (value, value1) => out_value")` adds `Value ~ value`, `Value ~ value1`, and `Value ~ out_value`.
+    - e.g. with visible `Value`, `M("sym: (value, value1) => out_value")` adds premise facts `Value ~ value` and `Value ~ value1`, and target fact `Value ~ out_value`.
 
 - introduce `predicate-declaration`
     `predicate` is a special form of `function` which returns a output sym inheriting `bool`. i.e. `P: sym => bool`

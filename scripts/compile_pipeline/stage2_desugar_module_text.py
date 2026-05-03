@@ -15,6 +15,7 @@ if str(SCRIPTS_DIR) not in sys.path:
 
 from compile_module import (
     CompileError,
+    DECL_OUTPUT_MARKER,
     IMPORT_RE,
     Module,
     ModuleCompiler,
@@ -141,7 +142,9 @@ class ModuleDesugarer:
         self.fresh_index = 0
 
     def render_module(self, module: Module, scope: ScopeState, indent: int) -> str:
-        original_syms = dedupe([*module.syms, *self.infer_statement_syms(module.predicate_statements)])
+        output_syms, predicate_statements = self.extract_decl_output_syms(module.predicate_statements)
+        output_sym_set = set(output_syms)
+        original_syms = dedupe([*module.syms, *self.infer_statement_syms(predicate_statements)])
         ancestor_bound_syms = set(scope.ancestor_bound_syms)
         local_bindings: list[BindingInfo] = []
         local_syms_set: set[str] = set()
@@ -154,15 +157,39 @@ class ModuleDesugarer:
 
         current_scope = ScopeState(ancestor_bound_syms | local_syms_set)
         local_syms = [binding.name for binding in local_bindings]
-        rendered_predicates = [self.render_statement(statement, current_scope) for statement in module.predicate_statements]
-        predicates = self.implicit_predicates(local_bindings, ancestor_bound_syms, rendered_predicates)
-        targets = [self.render_statement(statement, current_scope) for statement in module.target_statements]
+        rendered_predicates = [self.render_statement(statement, current_scope) for statement in predicate_statements]
+        rendered_targets = [self.render_statement(statement, current_scope) for statement in module.target_statements]
+        target_inheritance_rhs = inheritance_rhs_names(rendered_targets)
+        premise_bindings = [
+            binding
+            for binding in local_bindings
+            if binding.name not in output_sym_set and binding.name not in target_inheritance_rhs
+        ]
+        output_bindings = [binding for binding in local_bindings if binding.name in output_sym_set]
+        predicates = self.implicit_predicates(premise_bindings, ancestor_bound_syms, rendered_predicates)
+        target_inheritance = self.implicit_predicates(output_bindings, ancestor_bound_syms, rendered_targets)
+        targets = [*target_inheritance, *rendered_targets]
         predicates.extend(rendered_predicates)
         predicates.extend(self.local_wrapper_predicates(rendered_predicates + targets))
         predicates = dedupe_statements([predicate for predicate in predicates if predicate])
+        targets = [target for target in targets if target]
 
         opener = module.quantifier + "{" if module.type == "quantifier" else "{"
         return self.format_module(opener, local_syms, predicates, targets, indent)
+
+    def extract_decl_output_syms(self, statements: list[Statement]) -> tuple[list[str], list[Statement]]:
+        output_syms: list[str] = []
+        remaining: list[Statement] = []
+        marker_prefix = DECL_OUTPUT_MARKER + "("
+        for statement in statements:
+            text = statement.text.strip()
+            if statement.sub_modules or not text.startswith(marker_prefix) or not text.endswith(")"):
+                remaining.append(statement)
+                continue
+            inner = text[len(marker_prefix) : -1]
+            parsed = [sym for sym in parse_signature_terms(inner) if is_plain_sym(sym)]
+            output_syms.extend(parsed)
+        return dedupe(output_syms), remaining
 
     def infer_statement_syms(self, statements: list[Statement]) -> list[str]:
         return infer_syms([statement.text for statement in statements])

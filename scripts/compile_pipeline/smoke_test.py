@@ -219,6 +219,15 @@ def test_stage2_capital_inheritance_when_visible() -> None:
     assert "| list ~ list1" not in desugared
 
 
+def test_stage2_function_output_inheritance_is_target() -> None:
+    text = "List\n-: (list, list1) => list2\n        list2.size = (list.size + list1.size)"
+    desugared = run_stage2(text, SKILL_DIR).text
+    assert "| List ~ list" in desugared
+    assert "| List ~ list1" in desugared
+    assert "| List ~ list2" not in desugared
+    assert "\n        List ~ list2\n" in desugared
+
+
 def test_stage2_does_not_inject_implicit_stdlib_import() -> None:
     desugared = run_stage2("∀{| x | x = x}", ".").text
     assert "$import standard_library.lp" not in desugared
@@ -356,6 +365,36 @@ def test_nested_module_disassembly_is_indented() -> None:
     assert "\n    | list, list1, list2" in source
     assert "\n    | list2 = list - list1\n" in source
     assert "\n  }\n" in source
+
+
+def test_function_output_inheritance_disassembles_as_target() -> None:
+    text = "List\n-: (list, list1) => list2\n        list2.size = (list.size + list1.size)"
+    first_source = translate_ast_to_source(compile_text(text, base_dir=SKILL_DIR))
+    second_source = translate_ast_to_source(compile_text(first_source, base_dir=SKILL_DIR))
+    assert "\n    | List ~ list\n" in first_source
+    assert "\n    | List ~ list1\n" in first_source
+    assert "\n    | List ~ list2\n" not in first_source
+    assert "\n    List ~ list2\n" in first_source
+    assert second_source == first_source
+
+
+def test_function_output_inheritance_cases() -> None:
+    value_source = translate_ast_to_source(compile_text("Value\nF: value => out_value\n    out_value = out_value", base_dir=SKILL_DIR))
+    assert "\n    | Value ~ value\n" in value_source
+    assert "\n    Value ~ out_value\n" in value_source
+    assert "\n    | Value ~ out_value\n" not in value_source
+
+    symbol_source = translate_ast_to_source(compile_text("F: x => y\n    y = y", base_dir=SKILL_DIR))
+    assert "\n    | Symbol ~ x\n" in symbol_source
+    assert "\n    Symbol ~ y\n" in symbol_source
+
+    generated_source = translate_ast_to_source(compile_text("F: __x => __y\n    __y = __y", base_dir=SKILL_DIR))
+    assert "Symbol ~ __x" not in generated_source
+    assert "Symbol ~ __y" not in generated_source
+
+    bool_source = translate_ast_to_source(compile_text("Bool\nP: x => bool\n    P(x)", base_dir=SKILL_DIR))
+    assert "\n    Bool ~ bool\n" in bool_source
+    assert "\n    | Bool ~ bool\n" not in bool_source
 
 
 def test_sibling_nested_modules_are_indented_consistently() -> None:
@@ -568,6 +607,7 @@ def main() -> int:
         test_capital_wrapper_predicates_normalize_to_infix,
         test_stage2_ancestor_scope_for_function_decl,
         test_stage2_capital_inheritance_when_visible,
+        test_stage2_function_output_inheritance_is_target,
         test_stage2_does_not_inject_implicit_stdlib_import,
         test_standard_library_supplies_universal_inheritance_axioms,
         test_stage2_generated_sym_does_not_re_desugar,
@@ -586,6 +626,8 @@ def main() -> int:
         test_translate_omits_empty_binder_bar,
         test_translate_keeps_binder_line_when_present,
         test_nested_module_disassembly_is_indented,
+        test_function_output_inheritance_disassembles_as_target,
+        test_function_output_inheritance_cases,
         test_sibling_nested_modules_are_indented_consistently,
         test_target_literal_assignment_normalized,
         test_nested_literal_argument_adds_classifier_premise,

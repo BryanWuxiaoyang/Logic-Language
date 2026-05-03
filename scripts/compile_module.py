@@ -28,6 +28,7 @@ LATEX_CODE_RE = re.compile(r"\\[A-Za-z_][A-Za-z0-9_]*")
 IMPORT_RE = re.compile(r"^(?P<indent>[ \t]*)\$import\s+(?P<path>.+?)\s*$")
 INFER_OPERATORS = ("=", ">", "<", ">=", "<=", "≤", "≥", "∈", "∉", "⊂", "⊄", "⊆", "⊈", "≠")
 FRESH_PREFIX = "__logic_language_out"
+DECL_OUTPUT_MARKER = "__compiler_function_outputs"
 INTRINSIC_SYMS = tuple(sorted(CAPITAL_INTRINSIC_SYMS | {"true", "false"}))
 BASIC_ESCAPES = {
     "n": "\n",
@@ -423,7 +424,8 @@ class ModuleCompiler:
             return [f"{name}: {tuple_or_single(inputs)} => {tuple_or_single(outputs)}", "∀{\n" + target + "\n" + block + "\n}"]
         call = call_text(name, inputs)
         target = f"{tuple_or_single(outputs)} = {call}" if outputs != ["bool"] else call
-        return [f"Function ~ {name}", "∀{\n| " + ", ".join(inputs + outputs) + "\n| " + target + "\n" + block + "\n}"]
+        marker = f"{DECL_OUTPUT_MARKER}({', '.join(outputs)})"
+        return [f"Function ~ {name}", "∀{\n| " + ", ".join(inputs + outputs) + "\n| " + marker + "\n| " + target + "\n" + block + "\n}"]
 
     def build_module(self, module_type: str, quantifier: str | None, body: str) -> Module:
         sections = split_sections(body)
