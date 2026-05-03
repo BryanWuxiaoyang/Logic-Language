@@ -501,7 +501,7 @@ class LocatedModuleParser:
         target = f"{tuple_or_single(outputs)} = {call}" if outputs != ["bool"] else call
         binder_line = located_binder_line_from_header(header, inputs + outputs)
         return [
-            synthetic_text("function~" + name, header.positions[0]),
+            synthetic_text(f"Function ~ {name}", header.positions[0]),
             concat_located([synthetic_text("∀{\n", header.positions[0]), binder_line, synthetic_text("\n| ", header.positions[0]), synthetic_text(target, header.positions[0]), synthetic_text("\n", header.positions[0]), block, synthetic_text("\n}", header.positions[0])]),
         ]
 
@@ -674,6 +674,11 @@ def split_multiline_sections_located(body: LocatedText) -> list[LocatedText]:
                     section_lines = [section]
                 else:
                     sections.append(section)
+        elif balance == 0 and is_plain_sym(line.text):
+            if target_lines:
+                sections.append(join_lines_located(target_lines))
+                target_lines = []
+            sections.append(line)
         else:
             target_lines.append(line)
             balance += brace_delta(line.text)

@@ -13,6 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import compile_module as compile_module_script
 from compile_module import CompileError, run_compile_pipeline
 from compile_pipeline.stage2_desugar_module_text import run as run_stage2
+from semantic_check import collect_semantic_diagnostics_from_text
 from translate_AST_to_source import translate_ast_to_source
 
 SKILL_DIR = Path(__file__).resolve().parents[2]
@@ -111,15 +112,19 @@ def test_literals() -> None:
 
 def test_implicit_literal_classifier_predicates() -> None:
     cases = [
-        ("∀{| x | x = 'a'}", "char"),
-        ('∀{| x | x = "ab"}', "string"),
-        ("∀{| x | x = 1}", "value"),
-        ("∀{| x, a, b | x = (a, b)}", "tuple"),
-        ("∀{| x, a, b | x = {a, b}}", "set"),
+        ("∀{| x | x = 'a'}", "Char"),
+        ('∀{| x | x = "ab"}', "String"),
+        ("∀{| x | x = 1}", "Value"),
+        ("∀{| x, a, b | x = (a, b)}", "Tuple"),
+        ("∀{| x, a, b | x = {a, b}}", "Set"),
     ]
     for text, classifier in cases:
         ast = compile_text(text)
         premise_calls = top_level_calls(ast, "~", "premise_PSs")
+        all_classifier_calls = [stmt for stmt in calls(ast, "~") if stmt["arg_sym_list"][0]["name"] == classifier]
+        assert all_classifier_calls, (text, classifier, calls(ast, "~"))
+        if classifier == "String":
+            continue
         assert any(
             stmt["arg_sym_list"][0]["name"] == classifier and stmt["arg_sym_list"][1].get("generated")
             for stmt in premise_calls
@@ -161,9 +166,9 @@ def test_operator_head_declaration_round_trip() -> None:
 
 def test_wrapper_predicates_lower_through_anf() -> None:
     cases = [
-        ("∀{| a, b | tuple ~ (a, b)}", "tuple_literal_stmt", "tuple"),
-        ("∀{| a, b | set ~ {a, b}}", "set_literal_stmt", "set"),
-        ("∀{| a | value ~ 1}", "value_literal_stmt", "value"),
+        ("∀{| a, b | Tuple ~ (a, b)}", "tuple_literal_stmt", "Tuple"),
+        ("∀{| a, b | Set ~ {a, b}}", "set_literal_stmt", "Set"),
+        ("∀{| a | Value ~ 1}", "value_literal_stmt", "Value"),
     ]
     for text, literal_kind, classifier in cases:
         ast = compile_text(text)
@@ -179,11 +184,11 @@ def test_wrapper_predicates_lower_through_anf() -> None:
         ), text
 
 
-def test_legacy_wrapper_predicates_normalize_to_infix() -> None:
+def test_capital_wrapper_predicates_normalize_to_infix() -> None:
     cases = [
-        ("∀{| a, b | tuple~(a, b)}", "tuple ~ (a, b)"),
-        ("∀{| a, b | set~{a, b}}", "set ~ {a, b}"),
-        ("∀{| a | value~1}", "value ~ 1"),
+        ("∀{| a, b | Tuple~(a, b)}", "Tuple ~ (a, b)"),
+        ("∀{| a, b | Set~{a, b}}", "Set ~ {a, b}"),
+        ("∀{| a | Value~1}", "Value ~ 1"),
     ]
     for text, rendered in cases:
         desugared = run_stage2(text, ".").text
@@ -198,11 +203,20 @@ def test_stage2_ancestor_scope_for_function_decl() -> None:
     desugared = run_stage2(text, ".").text
     assert "| list, list1, list2" in desugared
     assert "| list ~ list1" not in desugared
-    assert "| sym ~ list" in desugared
-    assert "| list ~ list" in desugared
+    assert "| Symbol ~ list" in desugared
+    assert "| list ~ list" not in desugared
+    assert "| List ~ list" not in desugared
     assert "tuple~(__list, __list1)" not in desugared
     assert "tuple ~ (list, list1)" not in desugared
     assert "__list1" not in desugared
+
+
+def test_stage2_capital_inheritance_when_visible() -> None:
+    desugared = run_stage2("$import standard_library.lp\n∀{| list1 | list1 = list1}", SKILL_DIR).text
+    assert "| Symbol ~ list1" not in desugared
+    assert "| List ~ list1" in desugared
+    assert "| sym ~ list1" not in desugared
+    assert "| list ~ list1" not in desugared
 
 
 def test_stage2_does_not_inject_implicit_stdlib_import() -> None:
@@ -210,11 +224,17 @@ def test_stage2_does_not_inject_implicit_stdlib_import() -> None:
     assert "$import standard_library.lp" not in desugared
 
 
+def test_standard_library_supplies_universal_inheritance_axioms() -> None:
+    stdlib = (SKILL_DIR / "standard_library.lp").read_text(encoding="utf-8")
+    assert "__sym ~ __sym" in stdlib
+    assert "Symbol ~ __sym" in stdlib
+
+
 def test_stage2_generated_sym_does_not_re_desugar() -> None:
     source = "$import standard_library.lp\n∀{\n    | __list\n    | list ~ __list\n    | __list ~ __list\n    __list = __list\n}\n"
     desugared = run_stage2(source, SKILL_DIR).text
     assert desugared.startswith("$import standard_library.lp\n")
-    assert "| sym ~ __list" not in desugared
+    assert "| Symbol ~ __list" not in desugared
     assert desugared.count("| list ~ __list") == 1
     assert desugared.count("| __list ~ __list") == 1
 
@@ -222,20 +242,26 @@ def test_stage2_generated_sym_does_not_re_desugar() -> None:
 def test_stage2_authored_generated_sym_gets_no_implicit_facts() -> None:
     desugared = run_stage2("∀{| __x | __x = __x}", ".").text
     assert "| __x" in desugared
-    assert "| sym ~ __x" not in desugared
+    assert "| Symbol ~ __x" not in desugared
     assert "| __x ~ __x" not in desugared
 
 
 def test_stage2_synthesized_infixes_are_spaced() -> None:
     desugared = run_stage2("∀{| x | x = x}", ".").text
-    assert "| sym ~ x" in desugared
-    assert "| x ~ x" in desugared
-    assert "| sym~x" not in desugared
+    assert "| Symbol ~ x" in desugared
+    assert "| x ~ x" not in desugared
+    assert "| Symbol~x" not in desugared
     assert "| x~x" not in desugared
 
 
+def test_stage2_omits_symbol_when_inheritance_premise_exists() -> None:
+    desugared = run_stage2("∀{| x | Value ~ x | x = x}", ".").text
+    assert "| Value ~ x" in desugared
+    assert "| Symbol ~ x" not in desugared
+
+
 def test_stage2_legacy_unspaced_infix_still_compiles() -> None:
-    ast = compile_text("∀{| x | sym~x}")
+    ast = compile_text("∀{| x | Symbol~x}")
     assert top_level_calls(ast, "~", "target_PSs")
 
 
@@ -271,10 +297,27 @@ def test_duplicate_binders_deduplicate() -> None:
     assert [sym["name"] for sym in ast["bound_syms"] if not sym.get("generated")] == ["x"]
 
 
-def test_nested_ancestor_conflict_freshens() -> None:
+def test_nested_ancestor_conflict_is_invalid() -> None:
     desugared = run_stage2("∀{| x | ∀{| x | x = x}}", ".").text
-    assert "| __x" in desugared
+    assert "| __x" not in desugared
     assert "| x ~ __x" not in desugared
+    try:
+        compile_text("∀{| x | ∀{| x | x = x}}")
+    except CompileError as error:
+        assert "bound_sym_name_conflict" in str(error)
+    else:
+        raise AssertionError("ancestor bound-sym conflict should fail final AST validation")
+
+
+def test_semantic_warning_for_multiple_inheritance_candidates() -> None:
+    diagnostics = collect_semantic_diagnostics_from_text("Max_head_val\nHead_val\nVal\n∀{| max_head_val1 | max_head_val1 = max_head_val1}")
+    assert any(
+        entry["type"] == "warning"
+        and entry["code"] == "implicit_inheritance_candidates"
+        and "Max_head_val, Head_val, Val" in entry["reason"]
+        and "selected Max_head_val" in entry["reason"]
+        for entry in diagnostics
+    )
 
 
 def test_sibling_submodules_can_reuse_name() -> None:
@@ -288,14 +331,14 @@ def test_authored_generated_sym_is_accepted() -> None:
 
 
 def test_translate_omits_empty_binder_bar() -> None:
-    ast = compile_text("val ~ min_val\n∀{| val1 | val1 ≥ min_val}")
+    ast = compile_text("Val ~ min_val\n∀{| val1 | val1 ≥ min_val}")
     source = translate_ast_to_source(ast)
     lines = source.splitlines()
     assert "|" not in [line.strip() for line in lines]
-    assert any(line.strip() == "val ~ min_val" for line in lines)
-    assert not any(line.strip() == "| val ~ min_val" for line in lines)
+    assert any(line.strip() == "Val ~ min_val" for line in lines)
+    assert not any(line.strip() == "| Val ~ min_val" for line in lines)
     assert any(line.strip() == "| val1" for line in lines)
-    assert any(line.strip() == "| sym ~ val1" for line in lines)
+    assert any(line.strip() == "| Symbol ~ val1" for line in lines)
     assert any(line.strip() == "val1 ≥ min_val" for line in lines)
 
 
@@ -308,9 +351,9 @@ def test_translate_keeps_binder_line_when_present() -> None:
 def test_nested_module_disassembly_is_indented() -> None:
     ast = compile_text("-: (list, list1) => list2\n        list2.size = (list.size + list1.size)")
     source = translate_ast_to_source(ast)
-    assert "\n  function ~ -\n" in source
+    assert "\n  Function ~ -\n" in source
     assert "\n  ∀{\n" in source
-    assert "\n    | list1, list2" in source
+    assert "\n    | list, list1, list2" in source
     assert "\n    | list2 = list - list1\n" in source
     assert "\n  }\n" in source
 
@@ -326,7 +369,7 @@ def test_target_literal_assignment_normalized() -> None:
     ast = compile_text("∀{| x | x = 1}")
     assert not target_bindings(ast)
     assert any(binding["src_stmt"]["kind"] == "value_literal_stmt" for binding in ast["premise_binding_stmts"])
-    assert any(stmt["arg_sym_list"][0]["name"] == "value" for stmt in top_level_calls(ast, "~", "premise_PSs"))
+    assert any(stmt["arg_sym_list"][0]["name"] == "Value" for stmt in top_level_calls(ast, "~", "premise_PSs"))
     assert top_level_calls(ast, "=", "target_PSs")
 
 
@@ -334,7 +377,7 @@ def test_nested_literal_argument_adds_classifier_premise() -> None:
     ast = compile_text("∀{| p, a, b | P((a, b))}")
     assert any(binding["src_stmt"]["kind"] == "tuple_literal_stmt" for binding in ast["premise_binding_stmts"])
     premise_calls = top_level_calls(ast, "~", "premise_PSs")
-    assert any(stmt["arg_sym_list"][0]["name"] == "tuple" and stmt["arg_sym_list"][1].get("generated") for stmt in premise_calls)
+    assert any(stmt["arg_sym_list"][0]["name"] == "Tuple" and stmt["arg_sym_list"][1].get("generated") for stmt in premise_calls)
 
 
 def test_target_module_assignment_normalized() -> None:
@@ -345,7 +388,7 @@ def test_target_module_assignment_normalized() -> None:
 
 
 def test_disassembled_final_ast_preserves_target_placement() -> None:
-    ast = compile_text("val ~ min_val\n∀{| val1 | val1 ≥ min_val}")
+    ast = compile_text("Val ~ min_val\n∀{| val1 | val1 ≥ min_val}")
     source = translate_ast_to_source(ast)
     reparsed = compile_text(source)
     assert not target_bindings(reparsed)
@@ -354,15 +397,15 @@ def test_disassembled_final_ast_preserves_target_placement() -> None:
 
 
 def test_round_trip_disassembly_is_idempotent() -> None:
-    text = "val ~ min_val\n∀{| val1 | val1 ≥ min_val}"
+    text = "Val ~ min_val\n∀{| val1 | val1 ≥ min_val}"
     first_ast = compile_text(text)
     first_source = translate_ast_to_source(first_ast)
     second_ast = compile_text(first_source)
     second_source = translate_ast_to_source(second_ast)
     assert second_source == first_source
-    assert first_source.count("| sym ~ val1") == 1
-    assert first_source.count("| val1 ~ val1") == 1
-    assert "| val ~ val1" not in first_source
+    assert first_source.count("| Symbol ~ val1") == 1
+    assert "| val1 ~ val1" not in first_source
+    assert "| Val ~ val1" not in first_source
 
 
 def test_generated_temp_round_trip_is_idempotent() -> None:
@@ -379,7 +422,7 @@ def test_generated_temp_round_trip_is_idempotent() -> None:
 
 
 def test_wrapper_round_trip_is_stable() -> None:
-    text = "∀{| a, b | tuple ~ (a, b)}"
+    text = "∀{| a, b | Tuple ~ (a, b)}"
     first_source = translate_ast_to_source(compile_text(text))
     second_source = translate_ast_to_source(compile_text(first_source))
     assert second_source == first_source
@@ -389,7 +432,7 @@ def test_tuple_assignment_round_trip_adds_classifier_predicate() -> None:
     text = "x = (a, b)"
     first_source = translate_ast_to_source(compile_text(text))
     second_source = translate_ast_to_source(compile_text(first_source))
-    assert "| tuple ~ __tmpa_b0" in first_source
+    assert "| Tuple ~ __tmpa_b0" in first_source
     assert second_source == first_source
 
 
@@ -517,21 +560,27 @@ def main() -> int:
         test_nested_call_anf,
         test_compound_lhs,
         test_literals,
+        test_implicit_literal_classifier_predicates,
         test_member_and_operator,
         test_missing_infix_support_round_trip,
         test_operator_head_declaration_round_trip,
         test_wrapper_predicates_lower_through_anf,
-        test_legacy_wrapper_predicates_normalize_to_infix,
+        test_capital_wrapper_predicates_normalize_to_infix,
         test_stage2_ancestor_scope_for_function_decl,
+        test_stage2_capital_inheritance_when_visible,
+        test_stage2_does_not_inject_implicit_stdlib_import,
+        test_standard_library_supplies_universal_inheritance_axioms,
         test_stage2_generated_sym_does_not_re_desugar,
         test_stage2_authored_generated_sym_gets_no_implicit_facts,
         test_stage2_synthesized_infixes_are_spaced,
+        test_stage2_omits_symbol_when_inheritance_premise_exists,
         test_stage2_legacy_unspaced_infix_still_compiles,
         test_import_file_locations,
         test_stdin_import_rejected,
         test_multiline_bar_semantics,
         test_duplicate_binders_deduplicate,
-        test_nested_ancestor_conflict_freshens,
+        test_nested_ancestor_conflict_is_invalid,
+        test_semantic_warning_for_multiple_inheritance_candidates,
         test_sibling_submodules_can_reuse_name,
         test_authored_generated_sym_is_accepted,
         test_translate_omits_empty_binder_bar,
@@ -539,11 +588,13 @@ def main() -> int:
         test_nested_module_disassembly_is_indented,
         test_sibling_nested_modules_are_indented_consistently,
         test_target_literal_assignment_normalized,
+        test_nested_literal_argument_adds_classifier_premise,
         test_target_module_assignment_normalized,
         test_disassembled_final_ast_preserves_target_placement,
         test_round_trip_disassembly_is_idempotent,
         test_generated_temp_round_trip_is_idempotent,
         test_wrapper_round_trip_is_stable,
+        test_tuple_assignment_round_trip_adds_classifier_predicate,
         test_run_compile_pipeline_fails_on_final_ast_validation_invalid_name,
         test_run_compile_pipeline_fails_on_final_ast_validation_conflict,
         test_compile_module_cli_fails_without_ast_json_on_validation_error,

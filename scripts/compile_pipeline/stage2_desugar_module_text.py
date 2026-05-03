@@ -29,11 +29,13 @@ from compile_module import (
     lower_member_calls,
     normalize_latex,
     parse_signature_terms,
+    is_plain_sym,
     remove_comments,
     skill_dir,
     strip_outer_blank_lines,
 )
 from syntax_check_common import STDIN_FILE, collect_top_level_declarations, make_located_text
+from inheritance_sources import SYMBOL_SOURCE, selected_inheritance_source
 
 
 NUMERIC_LITERAL_RE = re.compile(r"(?<![\w'])\d+(?:\.\d+)?(?![\w'])")
@@ -46,14 +48,12 @@ class DesugarError(CompileError):
 
 @dataclass(frozen=True)
 class BindingInfo:
-    source: str
-    alias: str
+    name: str
 
 
 @dataclass(frozen=True)
 class ScopeState:
     ancestor_bound_syms: set[str]
-    rewrite_map: dict[str, str]
 
 
 @dataclass(frozen=True)
@@ -94,7 +94,7 @@ def run(text: str, base_dir: Path | str = ".") -> DesugarResult:
     compiler = ModuleCompiler(load_lark_parser())
     module = compiler.compile(body)
     desugarer = ModuleDesugarer(visible_syms)
-    desugared_body = desugarer.render_module(module, ScopeState(set(visible_syms), {}), indent=0)
+    desugared_body = desugarer.render_module(module, ScopeState(set(visible_syms)), indent=0)
     desugared = "\n".join([*output_imports, desugared_body]) + "\n"
     return DesugarResult(desugared, len(output_imports), len(desugared_body.splitlines()), len(visible_syms))
 
@@ -143,25 +143,19 @@ class ModuleDesugarer:
     def render_module(self, module: Module, scope: ScopeState, indent: int) -> str:
         original_syms = dedupe([*module.syms, *self.infer_statement_syms(module.predicate_statements)])
         ancestor_bound_syms = set(scope.ancestor_bound_syms)
-        current_rewrite = dict(scope.rewrite_map)
         local_bindings: list[BindingInfo] = []
-        local_aliases: set[str] = set()
+        local_syms_set: set[str] = set()
         self.reserved_syms.update(ancestor_bound_syms)
 
         for source in original_syms:
-            alias = source
-            if source in ancestor_bound_syms:
-                alias = self.fresh_alias(source, ancestor_bound_syms | local_aliases)
-            local_bindings.append(BindingInfo(source, alias))
-            local_aliases.add(alias)
-            current_rewrite[source] = alias
+            local_bindings.append(BindingInfo(source))
+            local_syms_set.add(source)
             self.reserved_syms.add(source)
-            self.reserved_syms.add(alias)
 
-        current_scope = ScopeState(ancestor_bound_syms | local_aliases, current_rewrite)
-        local_syms = [binding.alias for binding in local_bindings]
-        predicates = self.implicit_predicates(local_bindings, ancestor_bound_syms)
+        current_scope = ScopeState(ancestor_bound_syms | local_syms_set)
+        local_syms = [binding.name for binding in local_bindings]
         rendered_predicates = [self.render_statement(statement, current_scope) for statement in module.predicate_statements]
+        predicates = self.implicit_predicates(local_bindings, ancestor_bound_syms, rendered_predicates)
         targets = [self.render_statement(statement, current_scope) for statement in module.target_statements]
         predicates.extend(rendered_predicates)
         predicates.extend(self.local_wrapper_predicates(rendered_predicates + targets))
@@ -181,26 +175,29 @@ class ModuleDesugarer:
         return text
 
     def rewrite_statement_text(self, statement: Statement, scope: ScopeState) -> str:
-        rewritten = replace_symbols(lower_member_calls(statement.text), scope.rewrite_map)
-        return normalize_legacy_wrapper_statement(rewritten)
+        return normalize_legacy_wrapper_statement(lower_member_calls(statement.text))
 
-    def implicit_predicates(self, bindings: list[BindingInfo], visible_syms: set[str]) -> list[str]:
+    def implicit_predicates(self, bindings: list[BindingInfo], visible_syms: set[str], authored_predicates: list[str]) -> list[str]:
         predicates: list[str] = []
         for binding in bindings:
-            if is_generated_sym(binding.alias):
+            if is_generated_sym(binding.name) or binding.name in CANONICAL_INFIX_OPERATORS:
                 continue
-            predicates.append(render_infix(binding.alias, "~", binding.alias))
-            if binding.source != binding.alias:
-                predicates.append(render_infix(binding.source, "~", binding.alias))
-            predicates.append(render_infix("sym", "~", binding.alias))
-            predicates.extend(self.naming_inheritance(binding.alias, visible_syms))
+            specific_predicates = self.naming_inheritance(binding.name, visible_syms)
+            predicates.extend(specific_predicates)
+
+        inherited_rhs = inheritance_rhs_names([*authored_predicates, *predicates])
+        for binding in bindings:
+            if is_generated_sym(binding.name) or binding.name in CANONICAL_INFIX_OPERATORS:
+                continue
+            if binding.name not in inherited_rhs:
+                predicates.append(render_infix(SYMBOL_SOURCE, "~", binding.name))
         return predicates
 
     def naming_inheritance(self, sym: str, visible_syms: set[str]) -> list[str]:
         predicates: list[str] = []
-        class_sym = self.class_for_sym(sym, visible_syms)
-        if class_sym is not None and class_sym != sym:
-            predicates.append(render_infix(class_sym, "~", sym))
+        source_sym = selected_inheritance_source(sym, visible_syms)
+        if source_sym is not None and source_sym != sym:
+            predicates.append(render_infix(source_sym, "~", sym))
 
         collection = self.collection_inheritance(sym, visible_syms)
         if collection is not None:
@@ -209,31 +206,15 @@ class ModuleDesugarer:
             predicates.append(f"∀{{| {item} | {render_infix(item, '∈', sym)} | {render_infix(collection[1], '~', item)}}}")
         return predicates
 
-    def class_for_sym(self, sym: str, visible_syms: set[str]) -> str | None:
-        classes = sorted(visible_syms, key=len, reverse=True)
-        for class_sym in classes:
-            if class_sym.startswith("__"):
-                continue
-            if re.fullmatch("__" + re.escape(class_sym) + r"\d*", sym):
-                return class_sym
-        for class_sym in classes:
-            if class_sym == sym:
-                continue
-            if re.fullmatch(re.escape(class_sym) + r"\d+", sym):
-                return class_sym
-            if sym.endswith("_" + class_sym):
-                return class_sym
-            if sym == class_sym + "_class":
-                return class_sym
-        return None
-
     def collection_inheritance(self, sym: str, visible_syms: set[str]) -> tuple[str, str] | None:
-        classes = sorted(visible_syms, key=len, reverse=True)
-        for class_sym in classes:
-            if sym.endswith("_" + class_sym + "_list"):
-                return ("tuple", class_sym)
-            if sym.endswith("_" + class_sym + "s"):
-                return ("set", class_sym)
+        if sym.endswith("_list"):
+            source = selected_inheritance_source(sym[: -len("_list")], visible_syms)
+            if source is not None:
+                return ("Tuple", source)
+        if sym.endswith("s") and len(sym) > 1:
+            source = selected_inheritance_source(sym[:-1], visible_syms)
+            if source is not None:
+                return ("Set", source)
         return None
 
     def local_wrapper_predicates(self, texts: list[str]) -> list[str]:
@@ -250,15 +231,6 @@ class ModuleDesugarer:
             candidate = f"{preferred}{self.fresh_index}"
             self.fresh_index += 1
         self.reserved_syms.add(candidate)
-        return candidate
-
-    def fresh_alias(self, sym: str, forbidden: set[str]) -> str:
-        preferred = "__" + sym
-        candidate = preferred
-        suffix = 1
-        while candidate in forbidden:
-            candidate = f"{preferred}{suffix}"
-            suffix += 1
         return candidate
 
     def format_module(
@@ -287,20 +259,20 @@ def wrapper_predicate_for_expression(text: str) -> str | None:
     if not stripped:
         return None
     if is_numeric_literal_text(stripped):
-        return render_infix("value", "~", stripped)
+        return render_infix("Value", "~", stripped)
     if is_tuple_literal_text(stripped):
-        return render_infix("tuple", "~", stripped)
+        return render_infix("Tuple", "~", stripped)
     if is_set_literal_text(stripped):
-        return render_infix("set", "~", stripped)
+        return render_infix("Set", "~", stripped)
     return None
 
 
 def normalize_legacy_wrapper_statement(text: str) -> str:
     stripped = text.strip()
     for wrapper_sym, validator in (
-        ("tuple", is_tuple_literal_text),
-        ("set", is_set_literal_text),
-        ("value", is_numeric_literal_text),
+        ("Tuple", is_tuple_literal_text),
+        ("Set", is_set_literal_text),
+        ("Value", is_numeric_literal_text),
     ):
         legacy_head = wrapper_sym + "~"
         if not stripped.startswith(legacy_head):
@@ -409,6 +381,28 @@ def dedupe_statements(values: list[str]) -> list[str]:
         seen.add(key)
         output.append(value)
     return output
+
+
+def inheritance_rhs_names(statements: list[str]) -> set[str]:
+    names: set[str] = set()
+    for statement in statements:
+        rhs = inheritance_rhs_name(statement)
+        if rhs is not None:
+            names.add(rhs)
+    return names
+
+
+def inheritance_rhs_name(statement: str) -> str | None:
+    stripped = statement.strip()
+    if "\n" in stripped:
+        return None
+    match = re.match(r"^(.+?)\s*~\s*(.+)$", stripped)
+    if not match:
+        return None
+    rhs = match.group(2).strip()
+    if is_plain_sym(rhs):
+        return rhs
+    return None
 
 
 def canonical_statement_key(text: str) -> str:

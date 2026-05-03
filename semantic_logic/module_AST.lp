@@ -11,8 +11,8 @@ stmt
             all_stmts = {stmt}
         |- stmt.sub_stmts \neq {}
             all_stmts = {stmt' \in stmt.sub_stmts => stmt'.all_stmts}
-        # in the final module_AST, symbol-name conflicts have already been resolved by freshening, 
-        # so every active symbol name at any scope point is unambiguous.
+        # in the final module_AST, bound-symbol names must not conflict with
+        # current-statement or ancestor bound-symbol names.
 
     ::all_bound_syms = {| stmt' \in stmt.all_stmts => stmt'.bound_syms}
 
@@ -37,8 +37,11 @@ stmt~func_stmt
     ::sub_stmts = {}
 FS = func_stmt
 
+stmt ~ proposition_stmt
+
 func_stmt~pred_stmt
-PS = pred_stmt
+proposition_stmt ~ pred_stmt
+PS = proposition_stmt
 
 stmt~module_stmt
     ::bound_syms
@@ -53,4 +56,4 @@ module_stmt~set_stmt
 
 module_stmt~quantified_stmt
     ::quantifier_sym
-
+proposition_stmt~quantified_stmt

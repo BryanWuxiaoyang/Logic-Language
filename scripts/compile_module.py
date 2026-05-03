@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from check_final_AST import FinalAstChecker
+from inheritance_sources import CAPITAL_INTRINSIC_SYMS
 
 if __name__ == "__main__":
     sys.modules.setdefault("compile_module", sys.modules[__name__])
@@ -27,19 +28,7 @@ LATEX_CODE_RE = re.compile(r"\\[A-Za-z_][A-Za-z0-9_]*")
 IMPORT_RE = re.compile(r"^(?P<indent>[ \t]*)\$import\s+(?P<path>.+?)\s*$")
 INFER_OPERATORS = ("=", ">", "<", ">=", "<=", "≤", "≥", "∈", "∉", "⊂", "⊄", "⊆", "⊈", "≠")
 FRESH_PREFIX = "__logic_language_out"
-INTRINSIC_SYMS = (
-    "tuple",
-    "set",
-    "function",
-    "value",
-    "true",
-    "false",
-    "bool",
-    "sym",
-    "char",
-    "string",
-    "list",
-)
+INTRINSIC_SYMS = tuple(sorted(CAPITAL_INTRINSIC_SYMS | {"true", "false"}))
 BASIC_ESCAPES = {
     "n": "\n",
     "r": "\r",
@@ -434,7 +423,7 @@ class ModuleCompiler:
             return [f"{name}: {tuple_or_single(inputs)} => {tuple_or_single(outputs)}", "∀{\n" + target + "\n" + block + "\n}"]
         call = call_text(name, inputs)
         target = f"{tuple_or_single(outputs)} = {call}" if outputs != ["bool"] else call
-        return ["function~" + name, "∀{\n| " + ", ".join(inputs + outputs) + "\n| " + target + "\n" + block + "\n}"]
+        return [f"Function ~ {name}", "∀{\n| " + ", ".join(inputs + outputs) + "\n| " + target + "\n" + block + "\n}"]
 
     def build_module(self, module_type: str, quantifier: str | None, body: str) -> Module:
         sections = split_sections(body)
@@ -446,8 +435,8 @@ class ModuleCompiler:
         predicate_sections: list[str] = []
         for section in before_target:
             candidates = parse_binder_list(section)
-            if candidates and not syms:
-                syms = candidates
+            if candidates:
+                syms.extend(candidates)
             else:
                 predicate_sections.append(section)
         predicate_texts = split_terms("\n".join(predicate_sections))
@@ -564,8 +553,8 @@ class ModuleCompiler:
 
     def lower_literal_assignment(self, sym: str, literal: LiteralValue) -> list[str]:
         if literal.kind == "char":
-            return [f"char~{sym}", f"{sym} = {encode_char_literal(literal.value)}"]
-        statements = [f"string~{sym}", f"{sym}.size = {len(literal.value)}"]
+            return [f"Char~{sym}", f"{sym} = {encode_char_literal(literal.value)}"]
+        statements = [f"String~{sym}", f"{sym}.size = {len(literal.value)}"]
         statements.extend(f"{sym}[{index}] = {encode_char_literal(char)}" for index, char in enumerate(literal.value))
         return statements
 
@@ -717,6 +706,11 @@ def split_multiline_sections(body: str) -> list[str]:
                     section_lines = [section]
                 else:
                     sections.append(section)
+        elif balance == 0 and is_plain_sym(line):
+            if target_lines:
+                sections.append("\n".join(target_lines))
+                target_lines = []
+            sections.append(line)
         else:
             target_lines.append(line)
             balance += brace_delta(line)
@@ -854,7 +848,9 @@ def parse_binder_list(section: str) -> list[str] | None:
 
 
 def is_plain_sym(text: str) -> bool:
-    return re.fullmatch(r"[^\W\d]\w*'?", text, flags=re.UNICODE) is not None
+    if re.fullmatch(r"[^\W\d]\w*'?", text, flags=re.UNICODE) is not None:
+        return True
+    return len(text) == 1 and not text.isspace() and not text.isdigit() and text not in {"(", ")", "[", "]", "{", "}", ",", '"', "'"}
 
 
 def infer_syms(predicate_texts: list[str]) -> list[str]:

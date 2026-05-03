@@ -30,6 +30,7 @@ from compile_module import (
 )
 from compile_pipeline.stage1_normalize_source import SourceLoc
 from compile_pipeline.stage4_parse_statements import ParsedStatements, run as parse_statements
+from inheritance_sources import CAPITAL_INTRINSIC_SYMS, LITERAL_CLASSIFIERS
 
 AstNode = dict[str, Any]
 
@@ -170,6 +171,8 @@ class AstLowerer:
             raise CompileError("tuple/list assignment left-hand side must contain only symbols")
         bindings: list[AstNode] = []
         rhs_sym = self.ensure_sym(self.parse_expr(rhs, statement), bindings, preferred=preferred_temp_name(rhs))
+        if self.generated_premise_stack:
+            self.generated_premise_stack[-1].append(func_stmt("~", [sym_node("Tuple", self.loc), rhs_sym], self.loc, generated=True))
         target_nodes: list[AstNode] = []
         for index, lhs in enumerate(lhs_items):
             index_literal = literal_stmt(LiteralValue("value", str(index), str(index)), self.loc)
@@ -277,13 +280,7 @@ def func_stmt(name: str, args: list[AstNode], loc: dict[str, Any], *, generated:
 
 
 def literal_classifier_name(kind: str | None) -> str | None:
-    return {
-        "tuple_literal_stmt": "tuple",
-        "set_literal_stmt": "set",
-        "value_literal_stmt": "value",
-        "char_literal_stmt": "char",
-        "str_literal_stmt": "string",
-    }.get(kind)
+    return LITERAL_CLASSIFIERS.get(kind or "")
 
 
 def stmt_identity_key(node: AstNode) -> tuple[Any, ...]:
@@ -491,7 +488,7 @@ def is_sym_name_char(char: str) -> bool:
 
 
 def intrinsic_syms() -> set[str]:
-    return {"tuple", "set", "function", "value", "true", "false", "bool", "sym", "char", "string", "list"}
+    return set(CAPITAL_INTRINSIC_SYMS) | {"true", "false"}
 
 
 def summarize_ast(node: AstNode, lines: list[str], indent: int) -> None:
