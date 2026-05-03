@@ -146,6 +146,7 @@ class ModuleDesugarer:
     def render_module(self, module: Module, scope: ScopeState, indent: int) -> str:
         output_syms, predicate_statements = self.extract_decl_output_syms(module.predicate_statements)
         output_sym_set = set(output_syms)
+        declaration_sym_set = set(module.declaration_syms)
         original_syms = dedupe([*module.syms, *self.infer_statement_syms(predicate_statements)])
         ancestor_bound_syms = set(scope.ancestor_bound_syms)
         local_bindings: list[BindingInfo] = []
@@ -162,12 +163,13 @@ class ModuleDesugarer:
         rendered_predicates = [self.render_statement(statement, current_scope) for statement in predicate_statements]
         rendered_targets = [self.render_statement(statement, current_scope) for statement in module.target_statements]
         target_inheritance_rhs = inheritance_rhs_names(rendered_targets)
+        target_binding_names = output_sym_set | declaration_sym_set
         premise_bindings = [
             binding
             for binding in local_bindings
-            if binding.name not in output_sym_set and binding.name not in target_inheritance_rhs
+            if binding.name not in target_binding_names and binding.name not in target_inheritance_rhs
         ]
-        output_bindings = [binding for binding in local_bindings if binding.name in output_sym_set]
+        output_bindings = [binding for binding in local_bindings if binding.name in target_binding_names]
         predicates = self.implicit_predicates(premise_bindings, ancestor_bound_syms, rendered_predicates)
         target_inheritance = self.implicit_predicates(output_bindings, ancestor_bound_syms, rendered_targets)
         targets = [*target_inheritance, *rendered_targets]

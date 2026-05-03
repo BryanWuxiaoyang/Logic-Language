@@ -229,6 +229,9 @@ def test_stage2_capital_inheritance_when_visible() -> None:
 def test_stage2_function_output_inheritance_is_target() -> None:
     text = "List\n-: (list, list1) => list2\n        list2.size = (list.size + list1.size)"
     desugared = run_stage2(text, SKILL_DIR).text
+    assert "\n    | List\n" in desugared
+    assert "\n    | Symbol ~ List\n" not in desugared
+    assert "\n    Symbol ~ List\n" in desugared
     assert "| List ~ list" in desugared
     assert "| List ~ list1" in desugared
     assert "| List ~ list2" not in desugared
@@ -378,11 +381,24 @@ def test_function_output_inheritance_disassembles_as_target() -> None:
     text = "List\n-: (list, list1) => list2\n        list2.size = (list.size + list1.size)"
     first_source = translate_ast_to_source(compile_text(text, base_dir=SKILL_DIR))
     second_source = translate_ast_to_source(compile_text(first_source, base_dir=SKILL_DIR))
+    assert "\n  | List\n" in first_source
+    assert "\n  | Symbol ~ List\n" not in first_source
+    assert "\n  Symbol ~ List\n" in first_source
     assert "\n    | List ~ list\n" in first_source
     assert "\n    | List ~ list1\n" in first_source
     assert "\n    | List ~ list2\n" not in first_source
     assert "\n    List ~ list2\n" in first_source
     assert second_source == first_source
+
+
+def test_bound_syms_are_not_filtered_as_intrinsics() -> None:
+    ast = compile_text("∀{| Symbol, Function, true, false | Symbol = Function}")
+    assert [sym["name"] for sym in ast["bound_syms"] if not sym.get("generated")] == ["Symbol", "Function", "true", "false"]
+
+
+def test_free_classifier_syms_are_not_auto_bound() -> None:
+    ast = compile_text("∀{| x | Symbol ~ x | x = x}")
+    assert [sym["name"] for sym in ast["bound_syms"] if not sym.get("generated")] == ["x"]
 
 
 def test_function_output_inheritance_cases() -> None:
@@ -691,6 +707,8 @@ def main() -> int:
         test_translate_keeps_binder_line_when_present,
         test_nested_module_disassembly_is_indented,
         test_function_output_inheritance_disassembles_as_target,
+        test_bound_syms_are_not_filtered_as_intrinsics,
+        test_free_classifier_syms_are_not_auto_bound,
         test_function_output_inheritance_cases,
         test_sibling_nested_modules_are_indented_consistently,
         test_target_literal_assignment_normalized,

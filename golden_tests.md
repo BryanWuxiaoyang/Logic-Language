@@ -11,7 +11,7 @@ List
 "
 ∀{
   | List
-  | Symbol ~ List
+  Symbol ~ List
   Function ~ -
   ∀{
     | list, list1, list2, __tmpfunc_stmt0, __tmpsize1, __tmpsize2, __tmpfunc_stmt3
@@ -99,3 +99,18 @@ sym = {| __sym | __sym >= 0 => __sym + 1}
   sym = __tmpmodule03
 }
 "
+
+## class
+"
+Val
+Class::func: (val1, val2) => (val3, val4)
+Class
+    ::field
+    ::func: (val1, val2) => (val3, val4)
+\all {| class | P(class)}
+"
+=
+"
+
+"
+

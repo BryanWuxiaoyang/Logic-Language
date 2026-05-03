@@ -41,6 +41,7 @@ class Module:
     predicate_statements: list[Statement]
     target_statements: list[Statement]
     quantifier: str | None = None
+    declaration_syms: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -140,6 +141,7 @@ class ModuleCompiler:
         return [f"Function ~ {name}", "∀{\n| " + ", ".join(inputs + outputs) + "\n| " + marker + "\n| " + target + "\n" + block + "\n}"]
 
     def build_module(self, module_type: str, quantifier: str | None, body: str) -> Module:
+        declaration_syms = collect_standalone_declaration_syms(body)
         sections = split_sections(body)
         if not sections:
             raise CompileError("module requires target statements")
@@ -181,6 +183,7 @@ class ModuleCompiler:
             syms=syms,
             predicate_statements=predicate_statements,
             target_statements=target_statements,
+            declaration_syms=dedupe([sym for sym in declaration_syms if sym in syms]),
         )
 
     def parse_image_set(self, body: str) -> Module:
@@ -415,6 +418,40 @@ def split_multiline_sections(body: str) -> list[str]:
     if target_lines:
         sections.append("\n".join(target_lines))
     return sections
+
+
+def collect_standalone_declaration_syms(body: str) -> list[str]:
+    if "\n" not in body:
+        return []
+    syms: list[str] = []
+    section_balance = 0
+    target_balance = 0
+    in_bar_section = False
+    for raw_line in body.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if in_bar_section:
+            section_balance += brace_delta(line)
+            if section_balance <= 0:
+                in_bar_section = False
+                section_balance = 0
+            continue
+        if target_balance > 0:
+            target_balance += brace_delta(line)
+            if target_balance < 0:
+                target_balance = 0
+            continue
+        if line.startswith("|"):
+            section = line[1:].strip()
+            section_balance = brace_delta(section)
+            in_bar_section = section_balance > 0
+            continue
+        if is_plain_sym(line):
+            syms.append(line)
+            continue
+        target_balance = max(0, brace_delta(line))
+    return dedupe(syms)
 
 
 def split_terms(text: str) -> list[str]:

@@ -27,7 +27,7 @@ from compile_pipeline.module_sections import (
 from compile_pipeline.source_utils import LiteralValue, find_quoted_literal_end, is_literal_quote_start, parse_literal_text
 from compile_pipeline.stage1_normalize_source import SourceLoc
 from compile_pipeline.stage4_parse_statements import ParsedStatements, run as parse_statements
-from inheritance_sources import CAPITAL_INTRINSIC_SYMS, LITERAL_CLASSIFIERS
+from inheritance_sources import LITERAL_CLASSIFIERS
 
 AstNode = dict[str, Any]
 
@@ -122,7 +122,7 @@ class AstLowerer:
         target_pss = [*generated_target_nodes, *target_pss]
 
         generated_syms = self.generated_bound_stack.pop()
-        bound_names = [sym_node(sym, self.loc) for sym in module.syms if sym not in intrinsic_syms()]
+        bound_names = [sym_node(sym, self.loc) for sym in module.syms]
         kind = "quantified_stmt" if module.type == "quantifier" else "set_stmt"
         ast: AstNode = {
             "kind": kind,
@@ -497,10 +497,6 @@ def sanitize_temp_name(value: str) -> str:
 
 def is_sym_name_char(char: str) -> bool:
     return char.isalnum() or char in {"_", "'"}
-
-
-def intrinsic_syms() -> set[str]:
-    return set(CAPITAL_INTRINSIC_SYMS) | {"true", "false"}
 
 
 def summarize_ast(node: AstNode, lines: list[str], indent: int) -> None:
