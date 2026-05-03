@@ -8,29 +8,31 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable
 
-from compile_module import (
-    BASIC_ESCAPES,
-    IMPORT_RE,
-    LATEX_CODE_RE,
-    CompileError,
+from compile_pipeline.errors import CompileError
+from compile_pipeline.module_sections import (
     brace_delta,
     call_text,
     collect_indented_block,
     dedupe,
     find_matching,
-    find_quoted_literal_end,
     has_top_level,
-    is_literal_quote_start,
     is_plain_sym,
-    is_raw_string_literal_start,
-    literal_quote_index,
-    load_tokens,
     parse_declaration,
-    remove_comments,
     split_indent,
     split_top_level,
     strip_outer_blank_lines,
     tuple_or_single,
+)
+from compile_pipeline.source_utils import (
+    BASIC_ESCAPES,
+    IMPORT_RE,
+    LATEX_CODE_RE,
+    find_quoted_literal_end,
+    is_literal_quote_start,
+    is_raw_string_literal_start,
+    literal_quote_index,
+    load_tokens,
+    remove_comments,
 )
 
 

@@ -12,7 +12,8 @@ SCRIPTS_DIR = Path(__file__).resolve().parents[1]
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
-from compile_module import CompileError, Module
+from compile_pipeline.errors import CompileError
+from compile_pipeline.module_sections import Module
 from compile_pipeline.stage3_parse_module_sections import ParsedModuleSections, run as parse_sections
 
 

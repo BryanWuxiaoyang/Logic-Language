@@ -57,7 +57,7 @@ class Renderer:
         if kind in {"quantified_stmt", "set_stmt"}:
             return self.render_module(node, indent)
         if kind == "binding_stmt":
-            return [self.indent(indent) + self.render_binding(node)]
+            return self.render_binding_lines(node, indent)
         if kind == "func_stmt":
             return [self.indent(indent) + self.render_func(node)]
         if kind == "sym":
@@ -115,10 +115,19 @@ class Renderer:
     def indent(self, depth: int) -> str:
         return "  " * depth
 
-    def render_binding(self, node: AstNode) -> str:
+    def render_binding_lines(self, node: AstNode, indent: int) -> list[str]:
         dst = self.render_sym(require_sym(node.get("dst_sym"), "binding_stmt.dst_sym"))
-        src = self.render_stmt(require_node(node.get("src_stmt"), "binding_stmt.src_stmt"))
-        return f"{dst} = {src}"
+        src_node = require_node(node.get("src_stmt"), "binding_stmt.src_stmt")
+        src_lines = self.render_lines(src_node, indent)
+        if not src_lines:
+            raise TranslateError("binding_stmt.src_stmt rendered no lines")
+        prefix = self.indent(indent)
+        first_src = src_lines[0]
+        if not first_src.startswith(prefix):
+            raise TranslateError("binding_stmt.src_stmt did not preserve requested indentation")
+        lines = [prefix + f"{dst} = " + first_src[len(prefix):]]
+        lines.extend(src_lines[1:])
+        return lines
 
     def render_func(self, node: AstNode) -> str:
         call_sym = require_sym(node.get("call_sym"), "func_stmt.call_sym")

@@ -68,9 +68,34 @@ F: __sym => (__sym1, __sym2)
     | __sym2 = __tmpF0[__tmpvalue2]
     | P1(__sym, __sym1, __sym2)
     | Tuple ~ __tmpF0
-    | Value ~ __tmpvalue1
-    | Value ~ __tmpvalue2
+    Value ~ __tmpvalue1
+    Value ~ __tmpvalue2
     P2(__sym1, __sym2)
   }
+}
+"
+
+## image-set
+"
+sym = {| __sym | __sym >= 0 => __sym + 1}
+"
+=
+"
+∀{
+  | __tmpmodule03
+  | __tmpmodule03 = {
+    | __logic_language_out0
+    ∃{
+      | __sym, __tmp00, __tmp11, __tmpadd2
+      | __tmp00 = 0
+      | __tmp11 = 1
+      | __tmpadd2 = __sym + __tmp11
+      | __sym ≥ __tmp00
+      Value ~ __tmp00
+      Value ~ __tmp11
+      __logic_language_out0 = __tmpadd2
+    }
+  }
+  sym = __tmpmodule03
 }
 "

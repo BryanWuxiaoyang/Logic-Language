@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import importlib
 import tempfile
 import subprocess
 import sys
@@ -121,11 +122,17 @@ def test_implicit_literal_classifier_predicates() -> None:
     for text, classifier in cases:
         ast = compile_text(text)
         premise_calls = top_level_calls(ast, "~", "premise_PSs")
+        target_calls = top_level_calls(ast, "~", "target_PSs")
         all_classifier_calls = [stmt for stmt in calls(ast, "~") if stmt["arg_sym_list"][0]["name"] == classifier]
         assert all_classifier_calls, (text, classifier, calls(ast, "~"))
         if classifier == "String":
+            assert any(stmt["arg_sym_list"][0]["name"] == "String" for stmt in target_calls), (text, target_calls)
             continue
         assert any(
+            stmt["arg_sym_list"][0]["name"] == classifier and stmt["arg_sym_list"][1].get("generated")
+            for stmt in target_calls
+        ), (text, classifier, target_calls)
+        assert not any(
             stmt["arg_sym_list"][0]["name"] == classifier and stmt["arg_sym_list"][1].get("generated")
             for stmt in premise_calls
         ), (text, classifier, premise_calls)
@@ -408,15 +415,38 @@ def test_target_literal_assignment_normalized() -> None:
     ast = compile_text("∀{| x | x = 1}")
     assert not target_bindings(ast)
     assert any(binding["src_stmt"]["kind"] == "value_literal_stmt" for binding in ast["premise_binding_stmts"])
-    assert any(stmt["arg_sym_list"][0]["name"] == "Value" for stmt in top_level_calls(ast, "~", "premise_PSs"))
+    assert not any(stmt["arg_sym_list"][0]["name"] == "Value" for stmt in top_level_calls(ast, "~", "premise_PSs"))
+    assert any(stmt["arg_sym_list"][0]["name"] == "Value" for stmt in top_level_calls(ast, "~", "target_PSs"))
     assert top_level_calls(ast, "=", "target_PSs")
 
 
-def test_nested_literal_argument_adds_classifier_premise() -> None:
+def test_nested_literal_argument_adds_classifier_target() -> None:
     ast = compile_text("∀{| p, a, b | P((a, b))}")
     assert any(binding["src_stmt"]["kind"] == "tuple_literal_stmt" for binding in ast["premise_binding_stmts"])
     premise_calls = top_level_calls(ast, "~", "premise_PSs")
-    assert any(stmt["arg_sym_list"][0]["name"] == "Tuple" and stmt["arg_sym_list"][1].get("generated") for stmt in premise_calls)
+    target_calls = top_level_calls(ast, "~", "target_PSs")
+    assert not any(stmt["arg_sym_list"][0]["name"] == "Tuple" and stmt["arg_sym_list"][1].get("generated") for stmt in premise_calls)
+    assert any(stmt["arg_sym_list"][0]["name"] == "Tuple" and stmt["arg_sym_list"][1].get("generated") for stmt in target_calls)
+
+
+def test_authored_premise_literal_classifier_keeps_premise_and_adds_target() -> None:
+    ast = compile_text("∀{| x | Value ~ 1 | x = x}")
+    premise_calls = [
+        stmt for stmt in top_level_calls(ast, "~", "premise_PSs")
+        if stmt["arg_sym_list"][0]["name"] == "Value" and stmt["arg_sym_list"][1].get("generated")
+    ]
+    target_calls = [
+        stmt for stmt in top_level_calls(ast, "~", "target_PSs")
+        if stmt["arg_sym_list"][0]["name"] == "Value" and stmt["arg_sym_list"][1].get("generated")
+    ]
+    assert len(premise_calls) == 1, premise_calls
+    assert len(target_calls) == 1, target_calls
+    assert premise_calls[0]["arg_sym_list"][1]["name"] == target_calls[0]["arg_sym_list"][1]["name"]
+
+
+def test_authored_target_literal_classifier_dedupes_generated_target() -> None:
+    source = translate_ast_to_source(compile_text("∀{| x | Value ~ 1}"))
+    assert source.count("\n  Value ~ __tmp10\n") == 1, source
 
 
 def test_target_module_assignment_normalized() -> None:
@@ -424,6 +454,18 @@ def test_target_module_assignment_normalized() -> None:
     assert not target_bindings(ast)
     assert any(binding["src_stmt"]["kind"] == "quantified_stmt" for binding in ast["premise_binding_stmts"])
     assert top_level_calls(ast, "=", "target_PSs")
+
+
+def test_multiline_binding_rhs_disassembly_is_indented() -> None:
+    text = "sym = {| __sym | __sym >= 0 => __sym + 1}"
+    first_source = translate_ast_to_source(compile_text(text))
+    second_source = translate_ast_to_source(compile_text(first_source))
+    assert "\n  | __tmpmodule03 = {\n    | __logic_language_out0\n" in first_source
+    assert "\n    ∃{\n      | __sym, __tmp00, __tmp11, __tmpadd2\n" in first_source
+    assert "\n      Value ~ __tmp00\n      Value ~ __tmp11\n      __logic_language_out0 = __tmpadd2\n" in first_source
+    assert "\n    }\n  }\n  sym = __tmpmodule03\n" in first_source
+    assert "\n}\n  sym = __tmpmodule03\n" not in first_source
+    assert second_source == first_source
 
 
 def test_disassembled_final_ast_preserves_target_placement() -> None:
@@ -471,7 +513,8 @@ def test_tuple_assignment_round_trip_adds_classifier_predicate() -> None:
     text = "x = (a, b)"
     first_source = translate_ast_to_source(compile_text(text))
     second_source = translate_ast_to_source(compile_text(first_source))
-    assert "| Tuple ~ __tmpa_b0" in first_source
+    assert "\n  Tuple ~ __tmpa_b0\n" in first_source
+    assert "| Tuple ~ __tmpa_b0" not in first_source
     assert second_source == first_source
 
 
@@ -586,8 +629,29 @@ raise SystemExit(compile_module.main())
     )
     assert result.returncode == 1
     assert "stage: stage1_normalize_source" in result.stdout
-    assert "stage: stage6_emit_module_ast" in result.stdout
+    assert "stage: stage5_lower_to_module_ast" in result.stdout
     assert "final AST validation failed:" in result.stderr
+
+
+def test_script_modules_import_without_cycles() -> None:
+    modules = [
+        "compile_module",
+        "compile_pipeline.errors",
+        "compile_pipeline.source_utils",
+        "compile_pipeline.module_sections",
+        "compile_pipeline.stage1_normalize_source",
+        "compile_pipeline.stage2_desugar_module_text",
+        "compile_pipeline.stage3_parse_module_sections",
+        "compile_pipeline.stage4_parse_statements",
+        "compile_pipeline.stage5_lower_to_module_ast",
+        "syntax_check",
+        "syntax_check_common",
+        "semantic_check",
+        "translate_AST_to_source",
+        "validate_golden_tests",
+    ]
+    for module in modules:
+        importlib.import_module(module)
 
 
 def main() -> int:
@@ -630,8 +694,11 @@ def main() -> int:
         test_function_output_inheritance_cases,
         test_sibling_nested_modules_are_indented_consistently,
         test_target_literal_assignment_normalized,
-        test_nested_literal_argument_adds_classifier_premise,
+        test_nested_literal_argument_adds_classifier_target,
+        test_authored_premise_literal_classifier_keeps_premise_and_adds_target,
+        test_authored_target_literal_classifier_dedupes_generated_target,
         test_target_module_assignment_normalized,
+        test_multiline_binding_rhs_disassembly_is_indented,
         test_disassembled_final_ast_preserves_target_placement,
         test_round_trip_disassembly_is_idempotent,
         test_generated_temp_round_trip_is_idempotent,
@@ -641,6 +708,7 @@ def main() -> int:
         test_run_compile_pipeline_fails_on_final_ast_validation_conflict,
         test_compile_module_cli_fails_without_ast_json_on_validation_error,
         test_compile_module_cli_debug_stages_prints_summaries_before_validation_error,
+        test_script_modules_import_without_cycles,
     ]
     for test in tests:
         test()

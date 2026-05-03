@@ -13,7 +13,9 @@ SCRIPTS_DIR = Path(__file__).resolve().parents[1]
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
-from compile_module import CompileError, Module, ModuleCompiler, load_lark_parser, strip_artifact_imports
+from compile_pipeline.errors import CompileError
+from compile_pipeline.module_sections import Module, ModuleCompiler
+from compile_pipeline.source_utils import load_lark_parser
 
 
 @dataclass(frozen=True)
@@ -30,6 +32,11 @@ def run(text: str, parser: Any | None = None) -> ParsedModuleSections:
     parser = load_lark_parser() if parser is None else parser
     module = ModuleCompiler(parser).compile(strip_artifact_imports(text))
     return ParsedModuleSections(module=module)
+
+
+def strip_artifact_imports(text: str) -> str:
+    lines = [line for line in text.splitlines() if not line.strip().startswith("$import")]
+    return "\n".join(lines)
 
 
 def summarize_module(module: Module, lines: list[str], indent: int) -> None:

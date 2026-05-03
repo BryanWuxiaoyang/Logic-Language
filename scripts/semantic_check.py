@@ -10,7 +10,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from compile_module import CompileError, FRESH_PREFIX
+from compile_pipeline.errors import CompileError
+from compile_pipeline.module_sections import FRESH_PREFIX
 from inheritance_sources import matched_inheritance_sources
 from syntax_check_common import (
     STDIN_FILE,

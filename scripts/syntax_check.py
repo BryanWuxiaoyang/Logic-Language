@@ -11,18 +11,17 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from compile_module import (
-    CompileError,
+from compile_pipeline.errors import CompileError
+from compile_pipeline.module_sections import ModuleCompiler, strip_outer_blank_lines
+from compile_pipeline.source_utils import (
     IMPORT_RE,
     LATEX_CODE_RE,
-    ModuleCompiler,
     find_quoted_literal_end,
     is_literal_quote_start,
     load_lark_parser,
     load_tokens,
     normalize_latex,
     remove_comments,
-    strip_outer_blank_lines,
 )
 
 

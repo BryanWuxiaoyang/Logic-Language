@@ -14,20 +14,17 @@ SCRIPTS_DIR = Path(__file__).resolve().parents[1]
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
-from compile_module import (
-    CompileError,
-    LiteralValue,
+from compile_pipeline.errors import CompileError
+from compile_pipeline.module_sections import (
     Module,
     Statement,
     find_matching,
-    find_quoted_literal_end,
-    is_literal_quote_start,
     is_plain_sym,
     lower_member_calls,
-    parse_literal_text,
     split_top_level,
     top_level_assignment_index,
 )
+from compile_pipeline.source_utils import LiteralValue, find_quoted_literal_end, is_literal_quote_start, parse_literal_text
 from compile_pipeline.stage1_normalize_source import SourceLoc
 from compile_pipeline.stage4_parse_statements import ParsedStatements, run as parse_statements
 from inheritance_sources import CAPITAL_INTRINSIC_SYMS, LITERAL_CLASSIFIERS
@@ -75,10 +72,12 @@ class AstLowerer:
         self.temp_index = 0
         self.generated_bound_stack: list[list[AstNode]] = []
         self.generated_premise_stack: list[list[AstNode]] = []
+        self.generated_target_stack: list[list[AstNode]] = []
 
     def lower_module(self, module: Module, *, generated: bool = False) -> AstNode:
         self.generated_bound_stack.append([])
         self.generated_premise_stack.append([])
+        self.generated_target_stack.append([])
         premise_bindings: list[AstNode] = []
         premise_pss: list[AstNode] = []
         target_pss: list[AstNode] = []
@@ -108,6 +107,19 @@ class AstLowerer:
         for node in generated_premise_pss:
             if stmt_identity_key(node) not in explicit_predicate_keys:
                 premise_pss.append(node)
+        generated_target_pss = self.generated_target_stack.pop()
+        target_predicate_keys = {
+            stmt_identity_key(node)
+            for node in target_pss
+            if node.get("kind") == "func_stmt"
+        }
+        generated_target_nodes: list[AstNode] = []
+        for node in generated_target_pss:
+            key = stmt_identity_key(node)
+            if key not in target_predicate_keys:
+                generated_target_nodes.append(node)
+                target_predicate_keys.add(key)
+        target_pss = [*generated_target_nodes, *target_pss]
 
         generated_syms = self.generated_bound_stack.pop()
         bound_names = [sym_node(sym, self.loc) for sym in module.syms if sym not in intrinsic_syms()]
@@ -245,8 +257,8 @@ class AstLowerer:
             self.generated_bound_stack[-1].append(temp_sym)
         bindings.append(binding_stmt(temp, expr, self.loc, generated=True))
         classifier = literal_classifier_name(expr.get("kind"))
-        if classifier is not None and self.generated_premise_stack:
-            self.generated_premise_stack[-1].append(func_stmt("~", [sym_node(classifier, self.loc), temp_sym], self.loc, generated=True))
+        if classifier is not None and self.generated_target_stack:
+            self.generated_target_stack[-1].append(func_stmt("~", [sym_node(classifier, self.loc), temp_sym], self.loc, generated=True))
         return temp_sym
 
     def fresh_temp(self, preferred: str) -> str:

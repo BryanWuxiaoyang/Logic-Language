@@ -713,12 +713,10 @@ logic-language module-text semantics, compilation, and diagnostics
     - `stage2_desugar_module_text`: applies surface rewrites such as declarations, literals, operators, member calls, and implicit inheritance.
     - `stage3_parse_module_sections`: parses set/quantified modules, binders, premise sections, and target sections.
     - `stage4_parse_statements`: parses structural statement/term forms before AST lowering.
-    - `stage5_lower_to_module_ast`: lowers to `module_AST`, ANF-lifts non-symbol call arguments, inserts generated bindings, and enforces AST shape.
-    - `stage6_emit_module_ast`: emits final JSON or readable summaries.
+    - `stage5_lower_to_module_ast`: emits the final `module_AST`, ANF-lifts non-symbol call arguments, inserts generated bindings, and enforces AST shape.
 
 - introduce `compile_module`
     - it inputs `module-text` or `module-file` and returns `module_AST` JSON.
-    - `--readable` prints a compact AST summary.
     - `--debug-stages` prints summaries for all compiler stages.
 
 - introduce `translate_AST_to_source`
@@ -731,7 +729,7 @@ logic-language module-text semantics, compilation, and diagnostics
     - path: `scripts/compile_module.py`
     - input: `module-text` via stdin/`--text`, or a `module-file` path.
     - output: root `module_AST` JSON by default.
-    - useful flags: `--pretty`, `--readable`, `--debug-stages`.
+    - useful flags: `--pretty`, `--debug-stages`.
 
 - `stage1_normalize_source`
     - path: `scripts/compile_pipeline/stage1_normalize_source.py`
@@ -756,12 +754,7 @@ logic-language module-text semantics, compilation, and diagnostics
 - `stage5_lower_to_module_ast`
     - path: `scripts/compile_pipeline/stage5_lower_to_module_ast.py`
     - input: parsed statements or raw module text.
-    - output: lowered `module_AST` summary.
-
-- `stage6_emit_module_ast`
-    - path: `scripts/compile_pipeline/stage6_emit_module_ast.py`
-    - input: lowered AST or raw module text.
-    - output: final `module_AST` JSON, or readable summary with `--readable`.
+    - output: final `module_AST` summary using `bound_syms`, `premise_binding_stmts`, `premise_PSs`, and `target_PSs`.
 
 - `translate_AST_to_source`
     - path: `scripts/translate_AST_to_source.py`

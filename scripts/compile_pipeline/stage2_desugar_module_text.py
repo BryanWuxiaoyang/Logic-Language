@@ -13,27 +13,29 @@ SCRIPTS_DIR = Path(__file__).resolve().parents[1]
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
-from compile_module import (
-    CompileError,
+from compile_pipeline.errors import CompileError
+from compile_pipeline.module_sections import (
     DECL_OUTPUT_MARKER,
-    IMPORT_RE,
     Module,
     ModuleCompiler,
     Statement,
     dedupe,
-    expand_imports,
     infer_syms,
+    is_plain_sym,
+    lower_member_calls,
+    parse_signature_terms,
+    strip_outer_blank_lines,
+)
+from compile_pipeline.source_utils import (
+    IMPORT_RE,
+    expand_imports,
     find_quoted_literal_end,
     is_literal_quote_start,
     load_lark_parser,
     load_tokens,
-    lower_member_calls,
     normalize_latex,
-    parse_signature_terms,
-    is_plain_sym,
     remove_comments,
     skill_dir,
-    strip_outer_blank_lines,
 )
 from syntax_check_common import STDIN_FILE, collect_top_level_declarations, make_located_text
 from inheritance_sources import SYMBOL_SOURCE, selected_inheritance_source

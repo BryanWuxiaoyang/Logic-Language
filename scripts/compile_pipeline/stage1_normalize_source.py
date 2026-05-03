@@ -12,7 +12,8 @@ SCRIPTS_DIR = Path(__file__).resolve().parents[1]
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
-from compile_module import CompileError, IMPORT_RE, load_tokens, normalize_latex, remove_comments
+from compile_pipeline.errors import CompileError
+from compile_pipeline.source_utils import IMPORT_RE, load_tokens, normalize_latex, remove_comments
 
 STDIN_SOURCE = "__stdin__"
 
