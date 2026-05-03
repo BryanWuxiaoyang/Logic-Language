@@ -13,7 +13,6 @@ val ~ min_val
 ∀{
   | val1
   | sym ~ val1
-  | val1 ~ val1
   | val ~ val1
   val1 ≥ min_val
   }
@@ -82,6 +81,7 @@ F: __sym => (__sym1, __sym2)
     | __sym1 = __tmpF0[__tmpvalue1]
     | __tmpvalue2 = 1
     | __sym2 = __tmpF0[__tmpvalue2]
+    | tuple ~ __tmpF0
     | P1(__sym, __sym1, __sym2)
     P2(__sym1, __sym2)
   }

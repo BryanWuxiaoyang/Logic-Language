@@ -113,9 +113,17 @@ logic-language module-text semantics, compilation, and diagnostics
     - e.g. `M("∀{TS1, TS2}") = M("TS1 && TS2")`
     - e.g. `M("∀{| sym | TS}") = M("∀{| sym | true | TS}")`
 
-- introduce `~` as intrinsic `binary-operator`
-    - every declared-sym implicitly inherits itself
+- introduce `~` as intrinsic `binary-operator` on all `sym`
+    - `a ~ b` means `b` inherits `a`
+    - `~` is reflexive
+        `∀{| x | x ~ x}`
+    - `~` is transitive
+        `∀{| x, y, z | x ~ y, y ~ z | x ~ z}`
+    - e.g. `∀{| x, y, z | x~y, y~z | x~z}` is a canonical surface axiom expressing transitivity
+    - every declared-sym implicitly inherits itself; this is the `module-text` reflection of reflexivity
     `M("| sym | TS") = M("| sym | sym~sym | TS")`
+    - `~` does not by itself introduce separate primitive syntactic categories for object-sym, function-sym, predicate-sym, or class-sym
+    - those roles are determined by declaration form, usage position, and translation to the target `logic-system`
 
 - introduce `tuple` intrinsic-sym
     - `set~tuple`
@@ -148,7 +156,7 @@ logic-language module-text semantics, compilation, and diagnostics
     )
 
 - introduce `function` as an intrinsic sym in `module-text`.
-    - `function-declaration` adds its function name implicitly add `function~sym`
+    - `function-declaration` adds its function name as an ordinary inheritance fact `function~sym`
     M("sym: sym1 => sym2") = M(
     "
     function~sym
@@ -159,7 +167,7 @@ logic-language module-text semantics, compilation, and diagnostics
 - introduce `sym` as an intrinsic sym in `module-text`
     - all `declared-syms` inherit `sym`
     `M("| sym1, sym2 | PS | TS") = M("| sym1, sym2 | sym~sym1 | sym~sym2 | PS | TS")`
-    - Induction: all `syms` in `module` will have at least `sym` as inheriting `class-sym`, except `sym` itself
+    - Induction: all `syms` in `module` will have at least `sym` as an inheritance-source sym, except `sym` itself
 
 - a `module-text` includes text-replacement rules for translation. Below are `M("...") = M("...")` rules that translate `module-text` to more reduced `normal-module-text`
 
@@ -310,9 +318,9 @@ logic-language module-text semantics, compilation, and diagnostics
     `M("| sym1, sym1 | PS | TS") = M("| sym1 | PS | TS")`
 
 - introduce `implicit-inheritance` that in `PS` and `TS`, a `sym` name can implicitly add `~` predicate-statement
-    - A name-implicit class is applied only when the class part of the name resolves to a visible class-sym.
-    - A visible class-sym is an intrinsic sym or a declared sym that is usable as the first argument of `~` in the current scope.
-    - If the class part does not resolve to a visible class-sym, the name-implicit inheritance rule does not apply.
+    - A name-implicit inheritance is applied only when the base part of the name resolves to a visible inheritance-source sym.
+    - A visible inheritance-source sym is an intrinsic sym or a declared sym that is usable as the first argument of `~` in the current scope.
+    - If the base part does not resolve to a visible inheritance-source sym, the name-implicit inheritance rule does not apply.
     - Regardless, every declared-sym still inherits `sym`, except `sym` itself.
     - `{class}{digit}` inherits `{class}` only when `{class}` is visible.
         `sym1` infers `sym~sym1` only if `sym` is visible.
@@ -368,10 +376,6 @@ logic-language module-text semantics, compilation, and diagnostics
 
 - introduce `binary-operator` as `sym`, such as `M("S1 + S2") = M("+(S1, S2)")`
 
-- introduce `~` as a `binary-operator`
-
-- introduce `class` as a `sym` that appears in first parameter in any `sym ~ sym1`
-
 - introduce `implicit-sym-declaration` rule
     - selected binary-operator `PSs` implicitly add `syms` to current `SMT`/`QMT`.
     - this rule applies only to `PSs`, not final `TSs`.
@@ -379,7 +383,7 @@ logic-language module-text semantics, compilation, and diagnostics
     - inferred `syms` follow the same deduplication and shadowing rule as explicit `syms`.
     - `sym1 = sym2`, `sym1 > sym2`, `sym1 < sym2`, `sym1 >= sym2`, `sym1 <= sym2`, `sym1 ∈ sym2`, `sym1 ∉ sym2`, `sym1 ⊂ sym2`, `sym1 ⊄ sym2`, `sym1 ⊆ sym2`, `sym1 ⊈ sym2`, and `sym1 ≠ sym2` infer `sym1`.
     - the same rule applies before `latex-translation` to `sym1 \in sym2`, `sym1 \notin sym2`, `sym1 \subsetof sym2`, `sym1 \notsubsetof sym2`, `sym1 \includedin sym2`, `sym1 \notincludedin sym2`, and `sym1 \ne sym2`.
-    - `class~sym2` infers `sym2`; `class` must already be declared or intrinsic.
+    - `base~sym2` infers `sym2`; `base` must already be visible as an intrinsic or declared inheritance-source sym.
     - e.g. `M("x = f(y) | P(x)") = M("| x | x = f(y) | P(x)")`
     - e.g. `M("(x, y) = f(z) | P(x, y)") = M("| x, y | (x, y) = f(z) | P(x, y)")`
     - e.g. `M("value~x | P(x)") = M("| x | value~x | P(x)")` because `value` is intrinsic.
@@ -504,6 +508,8 @@ logic-language module-text semantics, compilation, and diagnostics
     - `=>` is part of surface `module-text` only. After rewrite, `image-set-text` is represented by ordinary `set-module-text`.
 
 - introduce `class-declaration`
+    - `class-declaration` is a surface syntax form only. Semantically it is sugar that expands to ordinary declarations and `~` facts.
+    - it does not introduce a new primitive semantic kind named `class`.
     M(
     "
     sym
@@ -697,7 +703,7 @@ logic-language module-text semantics, compilation, and diagnostics
 - introduce `module-file`. Each `.lp` is a `module-file`.
 - introduce `module-import`
     - `$import file-path` simply replace this line with the file-text stored in `file-path`
-    - every `module-file` implicitly imports `standard_library.lp` in this folder
+    - `standard_library.lp` in this folder is a provided library file containing mostly useful functions and class-syms
 
 - introduce `module_AST` as the compiler output form.
     - `compile_module` emits the root `module_stmt` JSON node by default.

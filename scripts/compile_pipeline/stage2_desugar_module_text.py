@@ -37,7 +37,6 @@ from syntax_check_common import STDIN_FILE, collect_top_level_declarations, make
 
 
 NUMERIC_LITERAL_RE = re.compile(r"(?<![\w'])\d+(?:\.\d+)?(?![\w'])")
-STDLIB_IMPORT = "$import standard_library.lp"
 CANONICAL_INFIX_OPERATORS = {"~", "=", "!=", "≠", ">=", "≥", "<=", "≤", ">", "<", "∈", "∉", "⊂", "⊄", "⊆", "⊈"}
 
 
@@ -81,7 +80,7 @@ def run(text: str, base_dir: Path | str = ".") -> DesugarResult:
     base_path = Path(base_dir).resolve()
     tokens = load_tokens()
     import_lines, body_text = split_imports(text)
-    output_imports = dedupe([STDLIB_IMPORT, *[normalize_latex(line, tokens) for line in import_lines]])
+    output_imports = dedupe([normalize_latex(line, tokens) for line in import_lines])
 
     normalized_body = normalize_latex(body_text, tokens)
     visible_text = visible_context_text(text, base_path, tokens)
@@ -118,9 +117,6 @@ def split_imports(text: str) -> tuple[list[str], str]:
 def visible_context_text(text: str, base_dir: Path, tokens: dict[str, str]) -> str:
     import_lines, _ = split_imports(text)
     context_parts: list[str] = []
-    stdlib_path = skill_dir() / "standard_library.lp"
-    if stdlib_path.exists():
-        context_parts.append(stdlib_path.read_text(encoding="utf-8"))
     for import_line in import_lines:
         context_parts.append(desugar_visible_import(import_line, base_dir))
     return normalize_latex("\n".join(context_parts), tokens)
@@ -130,9 +126,6 @@ def desugar_visible_import(import_line: str, base_dir: Path) -> str:
     match = IMPORT_RE.match(import_line)
     if not match:
         return ""
-    raw_path = match.group("path").strip().strip("\"'")
-    if Path(raw_path).name == "standard_library.lp":
-        return (skill_dir() / "standard_library.lp").read_text(encoding="utf-8")
     return expand_imports(import_line, base_dir)
 
 

@@ -27,7 +27,6 @@ from compile_module import (
     load_tokens,
     parse_declaration,
     remove_comments,
-    skill_dir,
     split_indent,
     split_top_level,
     strip_outer_blank_lines,
@@ -36,7 +35,6 @@ from compile_module import (
 
 
 STDIN_FILE = "__stdin__"
-STDLIB_IMPORT = "$import standard_library.lp"
 QUANTIFIERS = {"∀", "∃"}
 
 
@@ -135,7 +133,7 @@ def analyze_module_text(source_text: str, *, file_path: Path | None = None) -> C
         raise CheckError("$import is not supported when semantic_check reads module text from stdin")
 
     expanded = expand_for_checking(normalized, base_dir=file_path.parent if file_path else Path.cwd(), seen=set())
-    import_declarations = collect_import_declarations(expanded, tokens, file_path)
+    import_declarations = collect_import_declarations(expanded)
     cleaned = strip_outer_blank_lines_located(remove_comments_located(expanded))
     if not cleaned.text.strip():
         raise CheckError("empty module text")
@@ -154,14 +152,8 @@ def analyze_module_file(file_path: Path) -> CheckResult:
     return analyze_module_text(absolute.read_text(encoding="utf-8"), file_path=absolute)
 
 
-def collect_import_declarations(expanded: LocatedText, tokens: dict[str, str], file_path: Path | None) -> list[Declaration]:
-    declarations = collect_top_level_declarations(expanded, import_origin_only=True)
-    if file_path is not None and is_standard_library_file(file_path):
-        return declarations
-    stdlib = expand_standard_library(tokens)
-    if not stdlib:
-        return declarations
-    return dedupe_declarations([*collect_top_level_declarations(stdlib, import_origin_only=True), *declarations])
+def collect_import_declarations(expanded: LocatedText) -> list[Declaration]:
+    return collect_top_level_declarations(expanded, import_origin_only=True)
 
 
 def make_located_text(text: str, file_name: str, *, import_origin: bool) -> LocatedText:
@@ -264,26 +256,6 @@ def normalize_literal_latex_located(located: LocatedText, tokens: dict[str, str]
 
 def has_import(text: str) -> bool:
     return any(IMPORT_RE.match(line) for line in text.splitlines())
-
-
-def standard_library_path() -> Path:
-    return (skill_dir() / "standard_library.lp").resolve()
-
-
-def is_standard_library_file(file_path: Path) -> bool:
-    return file_path.resolve() == standard_library_path()
-
-
-def expand_standard_library(tokens: dict[str, str]) -> LocatedText:
-    stdlib_path = standard_library_path()
-    if not stdlib_path.exists():
-        return LocatedText("", tuple())
-    located = make_located_text(stdlib_path.read_text(encoding="utf-8"), str(stdlib_path), import_origin=True)
-    normalized = normalize_latex_located(located, tokens)
-    expanded = expand_for_checking(normalized, base_dir=stdlib_path.parent, seen={stdlib_path})
-    if expanded.text and not expanded.text.endswith("\n"):
-        return concat_located([expanded, synthetic_text("\n", expanded.positions[-1])])
-    return expanded
 
 
 def expand_for_checking(located: LocatedText, *, base_dir: Path, seen: set[Path]) -> LocatedText:

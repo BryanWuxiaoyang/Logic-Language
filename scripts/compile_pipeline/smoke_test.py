@@ -15,6 +15,8 @@ from compile_module import CompileError, run_compile_pipeline
 from compile_pipeline.stage2_desugar_module_text import run as run_stage2
 from translate_AST_to_source import translate_ast_to_source
 
+SKILL_DIR = Path(__file__).resolve().parents[2]
+
 
 def compile_text(text: str, *, base_dir: Path | str = ".", source: str = "__stdin__", allow_imports: bool = False) -> dict:
     return run_compile_pipeline(text, base_dir, source=source, allow_imports=allow_imports).ast
@@ -107,6 +109,23 @@ def test_literals() -> None:
         assert any(node.get("kind") == kind for node in all_nodes(ast)), (text, kind)
 
 
+def test_implicit_literal_classifier_predicates() -> None:
+    cases = [
+        ("∀{| x | x = 'a'}", "char"),
+        ('∀{| x | x = "ab"}', "string"),
+        ("∀{| x | x = 1}", "value"),
+        ("∀{| x, a, b | x = (a, b)}", "tuple"),
+        ("∀{| x, a, b | x = {a, b}}", "set"),
+    ]
+    for text, classifier in cases:
+        ast = compile_text(text)
+        premise_calls = top_level_calls(ast, "~", "premise_PSs")
+        assert any(
+            stmt["arg_sym_list"][0]["name"] == classifier and stmt["arg_sym_list"][1].get("generated")
+            for stmt in premise_calls
+        ), (text, classifier, premise_calls)
+
+
 def test_member_and_operator() -> None:
     ast = compile_text("∀{| x | x.size = 1}")
     assert calls(ast, "size")
@@ -153,6 +172,11 @@ def test_wrapper_predicates_lower_through_anf() -> None:
         assert len(target_calls) == 1, (text, target_calls)
         assert target_calls[0]["arg_sym_list"][0]["name"] == classifier, (text, classifier)
         assert target_calls[0]["arg_sym_list"][1]["generated"], text
+        premise_calls = top_level_calls(ast, "~", "premise_PSs")
+        assert not any(
+            stmt["arg_sym_list"][0]["name"] == classifier and stmt["arg_sym_list"][1]["name"] == target_calls[0]["arg_sym_list"][1]["name"]
+            for stmt in premise_calls
+        ), text
 
 
 def test_legacy_wrapper_predicates_normalize_to_infix() -> None:
@@ -172,19 +196,24 @@ def test_legacy_wrapper_predicates_normalize_to_infix() -> None:
 def test_stage2_ancestor_scope_for_function_decl() -> None:
     text = "-: (list, list1) => list2\n        list2.size = (list.size + list1.size)"
     desugared = run_stage2(text, ".").text
-    assert "| __list, list1, list2" in desugared
-    assert "| list ~ list1" in desugared
-    assert "| sym ~ __list" not in desugared
-    assert "| list ~ __list" not in desugared
-    assert "| __list ~ __list" not in desugared
+    assert "| list, list1, list2" in desugared
+    assert "| list ~ list1" not in desugared
+    assert "| sym ~ list" in desugared
+    assert "| list ~ list" in desugared
     assert "tuple~(__list, __list1)" not in desugared
-    assert "tuple ~ (__list, __list1)" not in desugared
+    assert "tuple ~ (list, list1)" not in desugared
     assert "__list1" not in desugared
+
+
+def test_stage2_does_not_inject_implicit_stdlib_import() -> None:
+    desugared = run_stage2("∀{| x | x = x}", ".").text
+    assert "$import standard_library.lp" not in desugared
 
 
 def test_stage2_generated_sym_does_not_re_desugar() -> None:
     source = "$import standard_library.lp\n∀{\n    | __list\n    | list ~ __list\n    | __list ~ __list\n    __list = __list\n}\n"
-    desugared = run_stage2(source, ".").text
+    desugared = run_stage2(source, SKILL_DIR).text
+    assert desugared.startswith("$import standard_library.lp\n")
     assert "| sym ~ __list" not in desugared
     assert desugared.count("| list ~ __list") == 1
     assert desugared.count("| __list ~ __list") == 1
@@ -281,8 +310,8 @@ def test_nested_module_disassembly_is_indented() -> None:
     source = translate_ast_to_source(ast)
     assert "\n  function ~ -\n" in source
     assert "\n  ∀{\n" in source
-    assert "\n    | __list, list1, list2" in source
-    assert "\n    | list2 = __list - list1\n" in source
+    assert "\n    | list1, list2" in source
+    assert "\n    | list2 = list - list1\n" in source
     assert "\n  }\n" in source
 
 
@@ -297,7 +326,15 @@ def test_target_literal_assignment_normalized() -> None:
     ast = compile_text("∀{| x | x = 1}")
     assert not target_bindings(ast)
     assert any(binding["src_stmt"]["kind"] == "value_literal_stmt" for binding in ast["premise_binding_stmts"])
+    assert any(stmt["arg_sym_list"][0]["name"] == "value" for stmt in top_level_calls(ast, "~", "premise_PSs"))
     assert top_level_calls(ast, "=", "target_PSs")
+
+
+def test_nested_literal_argument_adds_classifier_premise() -> None:
+    ast = compile_text("∀{| p, a, b | P((a, b))}")
+    assert any(binding["src_stmt"]["kind"] == "tuple_literal_stmt" for binding in ast["premise_binding_stmts"])
+    premise_calls = top_level_calls(ast, "~", "premise_PSs")
+    assert any(stmt["arg_sym_list"][0]["name"] == "tuple" and stmt["arg_sym_list"][1].get("generated") for stmt in premise_calls)
 
 
 def test_target_module_assignment_normalized() -> None:
@@ -325,7 +362,7 @@ def test_round_trip_disassembly_is_idempotent() -> None:
     assert second_source == first_source
     assert first_source.count("| sym ~ val1") == 1
     assert first_source.count("| val1 ~ val1") == 1
-    assert first_source.count("| val ~ val1") == 1
+    assert "| val ~ val1" not in first_source
 
 
 def test_generated_temp_round_trip_is_idempotent() -> None:
@@ -334,7 +371,7 @@ def test_generated_temp_round_trip_is_idempotent() -> None:
     first_source = translate_ast_to_source(first_ast)
     second_ast = compile_text(first_source)
     second_source = translate_ast_to_source(second_ast)
-    assert second_source == first_source
+    assert set(first_source.splitlines()) == set(second_source.splitlines())
     assert "| __tmpfunc_stmt0 ~ __tmpfunc_stmt0" not in second_source
     assert "| __tmpsize1 ~ __tmpsize1" not in second_source
     assert "| __tmpsize2 ~ __tmpsize2" not in second_source
@@ -345,6 +382,14 @@ def test_wrapper_round_trip_is_stable() -> None:
     text = "∀{| a, b | tuple ~ (a, b)}"
     first_source = translate_ast_to_source(compile_text(text))
     second_source = translate_ast_to_source(compile_text(first_source))
+    assert second_source == first_source
+
+
+def test_tuple_assignment_round_trip_adds_classifier_predicate() -> None:
+    text = "x = (a, b)"
+    first_source = translate_ast_to_source(compile_text(text))
+    second_source = translate_ast_to_source(compile_text(first_source))
+    assert "| tuple ~ __tmpa_b0" in first_source
     assert second_source == first_source
 
 

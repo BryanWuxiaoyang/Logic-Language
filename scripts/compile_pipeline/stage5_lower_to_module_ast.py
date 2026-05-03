@@ -73,9 +73,11 @@ class AstLowerer:
         self.loc = loc.to_json()
         self.temp_index = 0
         self.generated_bound_stack: list[list[AstNode]] = []
+        self.generated_premise_stack: list[list[AstNode]] = []
 
     def lower_module(self, module: Module, *, generated: bool = False) -> AstNode:
         self.generated_bound_stack.append([])
+        self.generated_premise_stack.append([])
         premise_bindings: list[AstNode] = []
         premise_pss: list[AstNode] = []
         target_pss: list[AstNode] = []
@@ -96,6 +98,16 @@ class AstLowerer:
                     raise CompileError("target_PSs cannot contain binding_stmt")
                 target_pss.append(node)
 
+        generated_premise_pss = self.generated_premise_stack.pop()
+        explicit_predicate_keys = {
+            stmt_identity_key(node)
+            for node in [*premise_pss, *target_pss]
+            if node.get("kind") == "func_stmt"
+        }
+        for node in generated_premise_pss:
+            if stmt_identity_key(node) not in explicit_predicate_keys:
+                premise_pss.append(node)
+
         generated_syms = self.generated_bound_stack.pop()
         bound_names = [sym_node(sym, self.loc) for sym in module.syms if sym not in intrinsic_syms()]
         kind = "quantified_stmt" if module.type == "quantifier" else "set_stmt"
@@ -104,8 +116,8 @@ class AstLowerer:
             "loc": self.loc,
             "bound_syms": [*bound_names, *generated_syms],
             "premise_binding_stmts": premise_bindings,
-            "premise_PSs": premise_pss,
-            "target_PSs": target_pss,
+            "premise_PSs": dedupe_stmt_nodes(premise_pss),
+            "target_PSs": dedupe_stmt_nodes(target_pss),
         }
         if generated:
             ast["generated"] = True
@@ -229,6 +241,9 @@ class AstLowerer:
         if self.generated_bound_stack:
             self.generated_bound_stack[-1].append(temp_sym)
         bindings.append(binding_stmt(temp, expr, self.loc, generated=True))
+        classifier = literal_classifier_name(expr.get("kind"))
+        if classifier is not None and self.generated_premise_stack:
+            self.generated_premise_stack[-1].append(func_stmt("~", [sym_node(classifier, self.loc), temp_sym], self.loc, generated=True))
         return temp_sym
 
     def fresh_temp(self, preferred: str) -> str:
@@ -259,6 +274,44 @@ def func_stmt(name: str, args: list[AstNode], loc: dict[str, Any], *, generated:
     if generated:
         node["generated"] = True
     return node
+
+
+def literal_classifier_name(kind: str | None) -> str | None:
+    return {
+        "tuple_literal_stmt": "tuple",
+        "set_literal_stmt": "set",
+        "value_literal_stmt": "value",
+        "char_literal_stmt": "char",
+        "str_literal_stmt": "string",
+    }.get(kind)
+
+
+def stmt_identity_key(node: AstNode) -> tuple[Any, ...]:
+    kind = node.get("kind")
+    if kind == "func_stmt":
+        call_name = node.get("call_sym", {}).get("name")
+        arg_names = tuple(arg.get("name") for arg in node.get("arg_sym_list", []))
+        return (kind, call_name, arg_names)
+    if kind == "binding_stmt":
+        dst_name = node.get("dst_sym", {}).get("name")
+        src_stmt = node.get("src_stmt", {})
+        return (kind, dst_name, src_stmt.get("kind"))
+    return (kind,)
+
+
+def dedupe_stmt_nodes(nodes: list[AstNode]) -> list[AstNode]:
+    seen: set[tuple[Any, ...]] = set()
+    result: list[AstNode] = []
+    for node in nodes:
+        if node.get("kind") != "func_stmt":
+            result.append(node)
+            continue
+        key = stmt_identity_key(node)
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(node)
+    return result
 
 
 def binding_stmt(dst: str, src: AstNode, loc: dict[str, Any], *, generated: bool = False) -> AstNode:
