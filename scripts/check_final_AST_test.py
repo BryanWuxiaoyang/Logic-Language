@@ -121,6 +121,22 @@ def test_nested_src_stmt_is_checked() -> None:
     assert any(entry["code"] == "bound_sym_name_conflict" for entry in diagnostics)
 
 
+def test_function_output_premise_rule_is_not_final_ast_check() -> None:
+    ast = module(
+        [sym("x"), sym("y")],
+        premise_bindings=[
+            {
+                "kind": "binding_stmt",
+                "loc": loc(),
+                "dst_sym": sym("y"),
+                "src_stmt": func("F", sym("x")),
+            }
+        ],
+        premise_pss=[func("P", sym("y"))],
+    )
+    assert "function_output_in_premise" not in codes(ast)
+
+
 def test_cli_stdin_and_file() -> None:
     payload = json.dumps(module([sym("x")]))
     stdin_result = run_cli(["--pretty"], stdin=payload)
@@ -153,6 +169,7 @@ def main() -> int:
         test_ancestor_conflict,
         test_sibling_non_conflict,
         test_nested_src_stmt_is_checked,
+        test_function_output_premise_rule_is_not_final_ast_check,
         test_cli_stdin_and_file,
         test_cli_malformed_json_and_shape_fail,
     ]

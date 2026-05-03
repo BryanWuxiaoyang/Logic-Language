@@ -395,6 +395,32 @@ def test_semantic_warning_for_multiple_inheritance_candidates() -> None:
     )
 
 
+def test_semantic_error_for_function_output_in_authored_premise() -> None:
+    diagnostics = collect_semantic_diagnostics_from_text("F: x => y\n    | P(y)\n    y = y")
+    assert any(
+        entry["type"] == "error"
+        and entry["code"] == "function_output_in_premise"
+        and entry["lineno"] == 1
+        and entry["col_start_no"] == 8
+        for entry in diagnostics
+    )
+
+
+def test_semantic_error_for_nested_function_output_in_premise() -> None:
+    diagnostics = collect_semantic_diagnostics_from_text("F: x => y\n    | P(G(y))\n    y = y")
+    assert any(entry["code"] == "function_output_in_premise" and entry["col_start_no"] == 10 for entry in diagnostics)
+
+
+def test_semantic_error_for_predicate_output_in_authored_premise() -> None:
+    diagnostics = collect_semantic_diagnostics_from_text("P: x => bool\n    | Q(bool)\n    P(x)")
+    assert any(entry["code"] == "function_output_in_premise" and "bool" in entry["reason"] for entry in diagnostics)
+
+
+def test_semantic_allows_function_output_in_target_and_generated_binding() -> None:
+    diagnostics = collect_semantic_diagnostics_from_text("F: x => y\n    y = F(x)")
+    assert not any(entry["code"] == "function_output_in_premise" for entry in diagnostics)
+
+
 def test_sibling_submodules_can_reuse_name() -> None:
     source = translate_ast_to_source(compile_text("∀{\n∀{| x | x = x}\n∀{| x | x = x}\n}"))
     assert source.count("\n    | x\n") == 2
@@ -763,6 +789,10 @@ def main() -> int:
         test_duplicate_binders_deduplicate,
         test_nested_ancestor_conflict_is_invalid,
         test_semantic_warning_for_multiple_inheritance_candidates,
+        test_semantic_error_for_function_output_in_authored_premise,
+        test_semantic_error_for_nested_function_output_in_premise,
+        test_semantic_error_for_predicate_output_in_authored_premise,
+        test_semantic_allows_function_output_in_target_and_generated_binding,
         test_sibling_submodules_can_reuse_name,
         test_authored_generated_sym_is_accepted,
         test_translate_omits_empty_binder_bar,

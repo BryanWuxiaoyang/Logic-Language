@@ -403,7 +403,6 @@ logic-language module-text semantics, compilation, and diagnostics
         | sym1, sym2
         | sym2 = sym(sym1)
         | PS
-        implicit-output-inheritance(sym2)
         TS
     ")
 
@@ -418,8 +417,6 @@ logic-language module-text semantics, compilation, and diagnostics
         | sym1, sym2, sym3, sym4
         | (sym3, sym4) = sym(sym1, sym2)
         | PS
-        implicit-output-inheritance(sym3)
-        implicit-output-inheritance(sym4)
         TS
     ")
     

@@ -66,6 +66,15 @@ class Binder:
 class CheckStatement:
     text: str
     sub_modules: list["CheckModule"] = field(default_factory=list)
+    located: LocatedText | None = None
+
+
+@dataclass(frozen=True)
+class CheckDeclaration:
+    kind: str
+    name: str
+    inputs: tuple[str, ...]
+    outputs: tuple[str, ...]
 
 
 @dataclass
@@ -75,6 +84,8 @@ class CheckModule:
     predicate_statements: list[CheckStatement]
     target_statements: list[CheckStatement]
     quantifier: str | None = None
+    premise_binding_statements: list[CheckStatement] = field(default_factory=list)
+    declaration: CheckDeclaration | None = None
 
 
 @dataclass(frozen=True)
@@ -193,6 +204,17 @@ def concat_located(parts: Iterable[LocatedText]) -> LocatedText:
         texts.append(part.text)
         positions.extend(part.positions)
     return LocatedText("".join(texts), tuple(positions))
+
+
+def located_key(located: LocatedText) -> tuple[str, SourcePosition | None]:
+    return (located.text, located.positions[0] if located.positions else None)
+
+
+def generated_declaration_binding_text(declaration: CheckDeclaration) -> str:
+    call = call_text(declaration.name, list(declaration.inputs))
+    if declaration.outputs == ("bool",):
+        return call
+    return f"{tuple_or_single(list(declaration.outputs))} = {call}"
 
 
 def normalize_latex_located(located: LocatedText, tokens: dict[str, str]) -> LocatedText:
@@ -433,6 +455,7 @@ def dedupe_declarations(declarations: Iterable[Declaration]) -> list[Declaration
 class LocatedModuleParser:
     def __init__(self) -> None:
         self.fresh_index = 0
+        self.declarations_by_module: dict[tuple[str, SourcePosition | None], CheckDeclaration] = {}
 
     def parse_module(self, located: LocatedText, default_quantifier: str = "∀") -> CheckModule:
         located = strip_outer_blank_lines_located(located).strip()
@@ -443,6 +466,7 @@ class LocatedModuleParser:
 
     def try_parse_wrapped_module(self, located: LocatedText) -> CheckModule | None:
         located = located.strip()
+        declaration = self.declarations_by_module.get(located_key(located))
         quantifier: str | None = None
         body_start = 0
         if located.text.startswith(("∀", "∃")):
@@ -456,7 +480,7 @@ class LocatedModuleParser:
         body = located.slice(body_start + 1, close)
         if self.is_image_set_body(body.text):
             return self.parse_image_set(body)
-        return self.build_module("quantifier" if quantifier else "set", quantifier, body)
+        return self.build_module("quantifier" if quantifier else "set", quantifier, body, declaration=declaration)
 
     def parse_line_module(self, located: LocatedText, quantifier: str) -> CheckModule:
         lines = logical_lines_located(located)
@@ -523,9 +547,16 @@ class LocatedModuleParser:
             if block is not None:
                 body_parts.extend([synthetic_text("\n", origin), block])
             body_parts.append(synthetic_text("\n}", origin))
+            module_text = concat_located(body_parts)
+            self.declarations_by_module[located_key(module_text)] = CheckDeclaration(
+                kind="function",
+                name=name,
+                inputs=tuple(inputs),
+                outputs=tuple(outputs),
+            )
             return [
                 synthetic_text(f"{name}: {tuple_or_single(inputs)} => {tuple_or_single(outputs)}", origin),
-                concat_located(body_parts),
+                module_text,
             ]
         call = call_text(name, inputs)
         target = f"{tuple_or_single(outputs)} = {call}" if outputs != ["bool"] else call
@@ -539,9 +570,16 @@ class LocatedModuleParser:
         if block is not None:
             body_parts.extend([synthetic_text("\n", origin), block])
         body_parts.append(synthetic_text("\n}", origin))
+        module_text = concat_located(body_parts)
+        self.declarations_by_module[located_key(module_text)] = CheckDeclaration(
+            kind="predicate" if outputs == ["bool"] else "function",
+            name=name,
+            inputs=tuple(inputs),
+            outputs=tuple(outputs),
+        )
         return [
             synthetic_text(f"Function ~ {name}", origin),
-            concat_located(body_parts),
+            module_text,
         ]
 
     def lower_class_block(self, header: LocatedText, class_sym: str, block: LocatedText) -> list[LocatedText]:
@@ -564,7 +602,14 @@ class LocatedModuleParser:
     def lower_nested_block(self, block: LocatedText) -> LocatedText:
         return join_lines_located(self.lower_line_blocks(logical_lines_located(block)))
 
-    def build_module(self, module_type: str, quantifier: str | None, body: LocatedText) -> CheckModule:
+    def build_module(
+        self,
+        module_type: str,
+        quantifier: str | None,
+        body: LocatedText,
+        *,
+        declaration: CheckDeclaration | None = None,
+    ) -> CheckModule:
         sections = split_sections_located(body)
         if not sections:
             raise CheckError("module requires target statements")
@@ -586,12 +631,20 @@ class LocatedModuleParser:
             raise CheckError("set module requires non-empty syms")
         if not target_texts:
             raise CheckError("module requires non-empty target_statements")
+        predicate_statements = [self.compile_statement(term) for term in predicate_texts]
+        premise_binding_statements: list[CheckStatement] = []
+        if declaration is not None and predicate_statements:
+            generated_binding = generated_declaration_binding_text(declaration)
+            if predicate_statements[0].text == generated_binding:
+                premise_binding_statements.append(predicate_statements.pop(0))
         return CheckModule(
             type=module_type,
             quantifier=quantifier if module_type == "quantifier" else None,
             binders=binders,
-            predicate_statements=[self.compile_statement(term) for term in predicate_texts],
+            predicate_statements=predicate_statements,
             target_statements=[self.compile_statement(term) for term in target_texts],
+            premise_binding_statements=premise_binding_statements,
+            declaration=declaration,
         )
 
     def parse_image_set(self, body: LocatedText) -> CheckModule:
@@ -605,7 +658,8 @@ class LocatedModuleParser:
     def compile_statement(self, located: LocatedText) -> CheckStatement:
         text, submodules = self.extract_sub_modules(located.strip())
         reject_unsupported_coloncolon(text.text)
-        return CheckStatement(text.text.strip(), submodules)
+        stripped = text.strip()
+        return CheckStatement(stripped.text, submodules, stripped)
 
     def extract_sub_modules(self, located: LocatedText) -> tuple[LocatedText, list[CheckModule]]:
         output: list[LocatedText] = []

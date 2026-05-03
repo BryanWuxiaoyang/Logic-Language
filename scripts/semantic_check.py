@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -99,12 +100,49 @@ class SemanticChecker:
             declaration = VisibleDeclaration(binder.text, binder.position, context.scope_id)
             current_declarations.append(declaration)
             self.add_visible(declaration)
+        self.check_function_output_premises(module)
         child_context = ScopeContext(self.allocate_scope(), (*context.ancestors, context.scope_id))
-        for statement in [*module.predicate_statements, *module.target_statements]:
+        for statement in [*module.premise_binding_statements, *module.predicate_statements, *module.target_statements]:
             for submodule in statement.sub_modules:
                 self.visit_module(submodule, child_context)
         for declaration in current_declarations:
             self.visible[declaration.name].remove(declaration)
+
+    def check_function_output_premises(self, module: CheckModule) -> None:
+        if module.declaration is None:
+            return
+        output_syms = {output for output in module.declaration.outputs if output}
+        if not output_syms:
+            return
+        for statement in module.predicate_statements:
+            self.check_output_occurrences_in_statement(statement, output_syms)
+
+    def check_output_occurrences_in_statement(self, statement: Any, output_syms: set[str]) -> None:
+        located = getattr(statement, "located", None)
+        if located is not None:
+            for name, position in output_sym_occurrences(located, output_syms):
+                self.diagnostics.append(
+                    Diagnostic(
+                        file=position.file,
+                        lineno=max(position.line - 1, 0),
+                        col_start_no=max(position.column - 1, 0),
+                        col_end_no=max(position.column - 1 + len(name), 1),
+                        type="error",
+                        code="function_output_in_premise",
+                        reason=f"function output sym '{name}' cannot appear in declaration premise",
+                    )
+                )
+        for submodule in getattr(statement, "sub_modules", []):
+            shadowed = {binder.text for binder in submodule.binders}
+            nested_outputs = output_syms - shadowed
+            if not nested_outputs:
+                continue
+            for nested_statement in [
+                *submodule.premise_binding_statements,
+                *submodule.predicate_statements,
+                *submodule.target_statements,
+            ]:
+                self.check_output_occurrences_in_statement(nested_statement, nested_outputs)
 
     def check_binder(self, binder: Binder, ancestors: set[int]) -> None:
         if binder.text.startswith(FRESH_PREFIX):
@@ -190,6 +228,15 @@ def dedupe_join(values: list[str]) -> str:
         seen.add(value)
         output.append(value)
     return ", ".join(output)
+
+
+def output_sym_occurrences(located: Any, output_syms: set[str]) -> list[tuple[str, SourcePosition]]:
+    output: list[tuple[str, SourcePosition]] = []
+    for name in sorted(output_syms, key=len, reverse=True):
+        pattern = re.compile(rf"(?<![\w']){re.escape(name)}(?![\w'])", re.UNICODE)
+        for match in pattern.finditer(located.text):
+            output.append((name, located.positions[match.start()]))
+    return sorted(output, key=lambda item: (item[1].file, item[1].line, item[1].column, item[0]))
 
 
 def collect_semantic_diagnostics_from_text(text: str) -> list[dict[str, object]]:
