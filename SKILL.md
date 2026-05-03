@@ -391,16 +391,56 @@ logic-language module-text semantics, compilation, and diagnostics
     - e.g. `foo ~ x` is invalid when `foo` is not declared.
 
 - introduce `function-declaration` as form `sym: (sym1, ...) => (sym2, ...)`
-    - `"sym(sym1)"` is a `function-statement`
     M(
     "
-    sym: sym1 => sym2
+    Sym
+    F: (sym1, sym2) => sym3
+    "
+    ) = M(
+    "
+    Sym
+    Function ~ F
+    \all
+        | sym1, sym2, sym3
+        | Sym ~ sym1, Sym ~ sym2
+        | sym3 = F(sym1, sym2)
+        Sym ~ sym3
+    "
+    )
+
+    M(
+    "
+    Sym
+    F: (sym1, sym2) => (sym3, sym4)
+    ") = M(
+    "
+    Sym
+    Function ~ F
+    \all
+        | sym1, sym2, sym3, sym4, __tmp_ret
+        | Sym ~ sym1, Sym ~ sym2
+        | __tmp_ret = F(sym1, sym2)
+        | sym3 = __tmp_ret[0], sym4 = __tmp_ret[1]
+        Sym ~ sym3
+        Sym ~ sym4
+    "
+    )
+
+- introduce `function-body`
+    M(
+    "
+    Sym
+    F: sym1 => sym2
         | PS
         TS
     "
     ) = M("
+    Sym
+    F: sym1 => sym2
+
     ∀
         | sym1, sym2
+        | Sym ~ sym1
         | sym2 = sym(sym1)
         | PS
         TS
@@ -408,14 +448,16 @@ logic-language module-text semantics, compilation, and diagnostics
 
     M(
     "
-    sym: (sym1, sym2) => (sym3, sym4)
+    Sym
+    F: (sym1, sym2) => (sym3, sym4)
         | PS
         TS
     "
     ) = M("
     ∀
-        | sym1, sym2, sym3, sym4
-        | (sym3, sym4) = sym(sym1, sym2)
+        | sym1, sym2, sym3, sym4, __tmp_ret
+        | __tmp_ret = sym(sym1, sym2)
+        | sym3 = __tmp_ret[0], sym4 = __tmp_ret[1]
         | PS
         TS
     ")
@@ -438,32 +480,9 @@ logic-language module-text semantics, compilation, and diagnostics
     - e.g. with visible `Value`, `M("sym: (value, value1) => out_value")` adds premise facts `Value ~ value` and `Value ~ value1`, and target fact `Value ~ out_value`.
 
 - introduce `predicate-declaration`
-    `predicate` is a special form of `function` which returns a output sym inheriting `bool`. i.e. `P: sym => bool`
+    `predicate` is a special form of `function` which returns a output sym inheriting `Bool`. i.e. `P: sym => bool`
     `predicate` follows the same rule as `function-declaration`, but `sym(...)` is a `predicate-statement`, not `function-statement`
-    M(
-    "
-    sym: sym1 => bool
-        | PS
-        bool = TS
-    "
-    ) = M(
-    "
-    \all
-        | sym1, bool
-        | bool = sym(sym1)
-        | PS
-        Bool ~ bool
-        bool = TS
-    "
-    ) = M(
-    "
-    \all
-        | sym1
-        | PS
-        TS
-    "
-    )
-
+    
 - introduce `set-module-text` as identical to `SMT`
 - introduce `image-set-text`
     - `image-set-text` is a derived `module-text`

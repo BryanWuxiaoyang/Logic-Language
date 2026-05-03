@@ -183,8 +183,11 @@ class AstLowerer:
             raise CompileError("tuple/list assignment left-hand side must contain only symbols")
         bindings: list[AstNode] = []
         rhs_sym = self.ensure_sym(self.parse_expr(rhs, statement), bindings, preferred=preferred_temp_name(rhs))
-        if self.generated_premise_stack:
-            self.generated_premise_stack[-1].append(func_stmt("~", [sym_node("Tuple", self.loc), rhs_sym], self.loc, generated=True))
+        tuple_classifier = func_stmt("~", [sym_node("Tuple", self.loc), rhs_sym], self.loc, generated=True)
+        if target_section and self.generated_target_stack:
+            self.generated_target_stack[-1].append(tuple_classifier)
+        elif self.generated_premise_stack:
+            self.generated_premise_stack[-1].append(tuple_classifier)
         target_nodes: list[AstNode] = []
         for index, lhs in enumerate(lhs_items):
             index_literal = literal_stmt(LiteralValue("value", str(index), str(index)), self.loc)

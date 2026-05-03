@@ -14,16 +14,23 @@ List
   Symbol ~ List
   Function ~ -
   ∀{
-    | list, list1, list2, __tmpfunc_stmt0, __tmpsize1, __tmpsize2, __tmpfunc_stmt3
-    | list2 = list - list1
-    | __tmpfunc_stmt0 = size(list2)
-    | __tmpsize1 = size(list)
-    | __tmpsize2 = size(list1)
-    | __tmpfunc_stmt3 = __tmpsize1 + __tmpsize2
+    | list, list1, list2, __tmpsub0
+    | __tmpsub0 = list - list1
     | List ~ list
     | List ~ list1
     List ~ list2
-    __tmpfunc_stmt0 = __tmpfunc_stmt3
+    list2 = __tmpsub0
+  }
+  ∀{
+    | list, list1, list2, __tmpfunc_stmt1, __tmpsize2, __tmpsize3, __tmpfunc_stmt4
+    | list2 = list - list1
+    | __tmpfunc_stmt1 = size(list2)
+    | __tmpsize2 = size(list)
+    | __tmpsize3 = size(list1)
+    | __tmpfunc_stmt4 = __tmpsize2 + __tmpsize3
+    | List ~ list
+    | List ~ list1
+    __tmpfunc_stmt1 = __tmpfunc_stmt4
   }
 }
 "
@@ -38,13 +45,18 @@ List
 ∀{
   Function ~ -
   ∀{
-    | __list, __list1, __list2, __tmpfunc_stmt0, __tmpsize1, __tmpsize2, __tmpfunc_stmt3
+    | __list, __list1, __list2, __tmpsub0
+    | __tmpsub0 = __list - __list1
+    __list2 = __tmpsub0
+  }
+  ∀{
+    | __list, __list1, __list2, __tmpfunc_stmt1, __tmpsize2, __tmpsize3, __tmpfunc_stmt4
     | __list2 = __list - __list1
-    | __tmpfunc_stmt0 = size(__list2)
-    | __tmpsize1 = size(__list)
-    | __tmpsize2 = size(__list1)
-    | __tmpfunc_stmt3 = __tmpsize1 + __tmpsize2
-    __tmpfunc_stmt0 = __tmpfunc_stmt3
+    | __tmpfunc_stmt1 = size(__list2)
+    | __tmpsize2 = size(__list)
+    | __tmpsize3 = size(__list1)
+    | __tmpfunc_stmt4 = __tmpsize2 + __tmpsize3
+    __tmpfunc_stmt1 = __tmpfunc_stmt4
   }
 }
 "
@@ -52,7 +64,7 @@ List
 ## tuple-target
 "
 F: __sym => (__sym1, __sym2)
-    | P1(__sym, __sym1, __sym2)
+    | P1(__sym)
     P2(__sym1, __sym2)
 "
 =
@@ -60,16 +72,29 @@ F: __sym => (__sym1, __sym2)
 ∀{
   Function ~ F
   ∀{
-    | __sym, __sym1, __sym2, __tmpF0, __tmpvalue1, __tmpvalue2
+    | __sym, __sym1, __sym2, __tmpF0, __tmpvalue1, __tmpindex2, __tmpvalue3, __tmpindex4
     | __tmpF0 = F(__sym)
     | __tmpvalue1 = 0
-    | __sym1 = __tmpF0[__tmpvalue1]
-    | __tmpvalue2 = 1
-    | __sym2 = __tmpF0[__tmpvalue2]
-    | P1(__sym, __sym1, __sym2)
-    | Tuple ~ __tmpF0
+    | __tmpindex2 = __tmpF0[__tmpvalue1]
+    | __tmpvalue3 = 1
+    | __tmpindex4 = __tmpF0[__tmpvalue3]
+    Tuple ~ __tmpF0
     Value ~ __tmpvalue1
-    Value ~ __tmpvalue2
+    Value ~ __tmpvalue3
+    __sym1 = __tmpindex2
+    __sym2 = __tmpindex4
+  }
+  ∀{
+    | __sym, __sym1, __sym2, __tmpF5, __tmpvalue6, __tmpvalue7
+    | __tmpF5 = F(__sym)
+    | __tmpvalue6 = 0
+    | __sym1 = __tmpF5[__tmpvalue6]
+    | __tmpvalue7 = 1
+    | __sym2 = __tmpF5[__tmpvalue7]
+    | P1(__sym)
+    | Tuple ~ __tmpF5
+    Value ~ __tmpvalue6
+    Value ~ __tmpvalue7
     P2(__sym1, __sym2)
   }
 }
@@ -122,7 +147,7 @@ Class
     | __tmpindex4 = __tmpfunc0[__tmpvalue3]
     | Val ~ val1
     | Val ~ val2
-    | Tuple ~ __tmpfunc0
+    Tuple ~ __tmpfunc0
     Value ~ __tmpvalue1
     Value ~ __tmpvalue3
     Val ~ val3
@@ -143,7 +168,7 @@ Class
     | __tmpindex9 = __tmpfunc5[__tmpvalue8]
     | Val ~ val1
     | Val ~ val2
-    | Tuple ~ __tmpfunc5
+    Tuple ~ __tmpfunc5
     Value ~ __tmpvalue6
     Value ~ __tmpvalue8
     Val ~ val3

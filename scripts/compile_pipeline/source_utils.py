@@ -47,6 +47,26 @@ def skill_dir() -> Path:
     return Path(__file__).resolve().parents[2]
 
 
+def skills_dir() -> Path:
+    return skill_dir().parent
+
+
+def resolve_import_path(raw_path: str, base_dir: Path) -> Path:
+    stripped = raw_path.strip().strip("\"'")
+    import_path = Path(stripped)
+    if import_path.is_absolute():
+        return import_path.resolve()
+
+    candidates = [base_dir / import_path]
+    if not stripped.startswith(("./", "../")) and stripped not in {".", ".."}:
+        candidates.extend([skill_dir() / import_path, skills_dir() / import_path])
+    for candidate in candidates:
+        resolved = candidate.resolve()
+        if resolved.exists():
+            return resolved
+    return candidates[0].resolve()
+
+
 def load_lark_parser() -> Any:
     if Lark is None:
         raise CompileError("missing dependency: install skills/logic-language/requirements.txt")
@@ -145,10 +165,7 @@ def expand_imports(text: str, base_dir: Path, seen: set[Path] | None = None) -> 
         if not match:
             output_lines.append(line)
             continue
-        import_path = Path(match.group("path").strip().strip("\"'"))
-        if not import_path.is_absolute():
-            import_path = base_dir / import_path
-        import_path = import_path.resolve()
+        import_path = resolve_import_path(match.group("path"), base_dir)
         if import_path in seen:
             raise CompileError(f"cyclic import: {import_path}")
         if not import_path.exists():

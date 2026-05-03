@@ -13,7 +13,7 @@ if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
 from compile_pipeline.errors import CompileError
-from compile_pipeline.source_utils import IMPORT_RE, load_tokens, normalize_latex, remove_comments
+from compile_pipeline.source_utils import IMPORT_RE, load_tokens, normalize_latex, remove_comments, resolve_import_path
 
 STDIN_SOURCE = "__stdin__"
 
@@ -77,10 +77,7 @@ def imported_only_source(text: str, base_dir: Path) -> str | None:
         if match is None:
             return None
         raw_path = match.group("path").strip().strip("\"'")
-        import_path = Path(raw_path)
-        if not import_path.is_absolute():
-            import_path = base_dir / import_path
-        imports.append(import_path.resolve())
+        imports.append(resolve_import_path(raw_path, base_dir))
     if len(imports) == 1:
         return str(imports[0])
     return None
@@ -95,10 +92,7 @@ def expand_imports_text(text: str, base_dir: Path, seen: set[Path]) -> tuple[str
             output_lines.append(line)
             continue
         raw_path = match.group("path").strip().strip("\"'")
-        import_path = Path(raw_path)
-        if not import_path.is_absolute():
-            import_path = base_dir / import_path
-        import_path = import_path.resolve()
+        import_path = resolve_import_path(raw_path, base_dir)
         if import_path in seen:
             raise CompileError(f"cyclic import: {import_path}")
         if not import_path.exists():

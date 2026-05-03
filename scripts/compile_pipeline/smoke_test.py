@@ -13,6 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import compile_module as compile_module_script
 from compile_module import CompileError, run_compile_pipeline
+from compile_pipeline.stage1_normalize_source import run as run_stage1
 from compile_pipeline.stage2_desugar_module_text import run as run_stage2
 from semantic_check import collect_semantic_diagnostics_from_text
 from translate_AST_to_source import translate_ast_to_source
@@ -178,6 +179,8 @@ def test_class_coloncolon_top_level_function_declaration() -> None:
     assert "func(val1, val2)" in source
     assert "| Val ~ val1" in source
     assert "| Val ~ val2" in source
+    assert "\n    Tuple ~ __tmpfunc0\n" in source
+    assert "\n    | Tuple ~ __tmpfunc0\n" not in source
     assert "\n    Val ~ val3\n" in source
     assert "\n    Val ~ val4\n" in source
 
@@ -196,6 +199,38 @@ def test_class_method_body_is_preserved() -> None:
     assert "Function ~ func" in source
     assert "\n    | y = func(x)\n" in source
     assert "\n    y = x\n" in source
+
+
+def test_function_declaration_and_body_are_separate_rules() -> None:
+    text = "Val\nClass::func: (val1, val2) => (val3, val4)\n    | val1 = val2\n    P(val3)"
+    desugared = run_stage2(text, SKILL_DIR).text
+    assert desugared.count("∀{") == 3
+    assert desugared.count("Val ~ val3") == 1
+    assert desugared.count("Val ~ val4") == 1
+    assert "| val1 = val2" in desugared
+    assert "P(val3)" in desugared
+
+    declaration_index = desugared.index("Val ~ val3")
+    body_index = desugared.index("| val1 = val2")
+    assert declaration_index < body_index
+
+
+def test_repeated_function_bodies_are_conditional_facts() -> None:
+    text = "F: input => output\n    | input = 1\n    P(output)\n\nF: input => output\n    | input = 2\n    Q(output)"
+    source = translate_ast_to_source(compile_text(text, base_dir=SKILL_DIR))
+    assert source.count("| input = 1") == 1
+    assert source.count("| input = 2") == 1
+    assert source.count("P(output)") == 1
+    assert source.count("Q(output)") == 1
+    assert source.count("Symbol ~ output") == 2
+
+
+def test_function_arrow_shorthand_splits_into_declaration_and_body() -> None:
+    source = translate_ast_to_source(compile_text("f: x -> g(x)", base_dir=SKILL_DIR))
+    assert "Function ~ f" in source
+    assert "__logic_language_out0 = __tmpf0" in source
+    assert "| __logic_language_out0 = f(x)" in source
+    assert "__logic_language_out0 = __tmpg1" in source
 
 
 def test_inline_inheritance_class_body() -> None:
@@ -352,6 +387,20 @@ def test_import_file_locations() -> None:
         assert calls(ast, "=")
 
 
+def test_import_searches_skill_dir_for_standard_library() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        normalized = run_stage1(
+            "$import standard_library.lp\n∀{| x | x = x}",
+            base_dir=root,
+            source=str(root / "main.lp"),
+            allow_imports=True,
+        )
+        assert normalized.import_count == 1
+        assert "Symbol" in normalized.text
+        assert "∀{| x | x = x}" in normalized.text
+
+
 def test_stdin_import_rejected() -> None:
     try:
         compile_text("$import missing.lp")
@@ -395,25 +444,19 @@ def test_semantic_warning_for_multiple_inheritance_candidates() -> None:
     )
 
 
-def test_semantic_error_for_function_output_in_authored_premise() -> None:
+def test_semantic_allows_function_output_in_body_premise() -> None:
     diagnostics = collect_semantic_diagnostics_from_text("F: x => y\n    | P(y)\n    y = y")
-    assert any(
-        entry["type"] == "error"
-        and entry["code"] == "function_output_in_premise"
-        and entry["lineno"] == 1
-        and entry["col_start_no"] == 8
-        for entry in diagnostics
-    )
+    assert not any(entry["code"] == "function_output_in_premise" for entry in diagnostics)
 
 
-def test_semantic_error_for_nested_function_output_in_premise() -> None:
+def test_semantic_allows_nested_function_output_in_body_premise() -> None:
     diagnostics = collect_semantic_diagnostics_from_text("F: x => y\n    | P(G(y))\n    y = y")
-    assert any(entry["code"] == "function_output_in_premise" and entry["col_start_no"] == 10 for entry in diagnostics)
+    assert not any(entry["code"] == "function_output_in_premise" for entry in diagnostics)
 
 
-def test_semantic_error_for_predicate_output_in_authored_premise() -> None:
+def test_semantic_allows_predicate_output_in_body_premise() -> None:
     diagnostics = collect_semantic_diagnostics_from_text("P: x => bool\n    | Q(bool)\n    P(x)")
-    assert any(entry["code"] == "function_output_in_premise" and "bool" in entry["reason"] for entry in diagnostics)
+    assert not any(entry["code"] == "function_output_in_premise" for entry in diagnostics)
 
 
 def test_semantic_allows_function_output_in_target_and_generated_binding() -> None:
@@ -768,6 +811,9 @@ def main() -> int:
         test_class_coloncolon_top_level_function_declaration,
         test_class_block_expands_to_current_scope,
         test_class_method_body_is_preserved,
+        test_function_declaration_and_body_are_separate_rules,
+        test_repeated_function_bodies_are_conditional_facts,
+        test_function_arrow_shorthand_splits_into_declaration_and_body,
         test_inline_inheritance_class_body,
         test_class_operator_suffix_declaration,
         test_invalid_class_body_lines_fail,
@@ -784,14 +830,15 @@ def main() -> int:
         test_stage2_omits_symbol_when_inheritance_premise_exists,
         test_stage2_legacy_unspaced_infix_still_compiles,
         test_import_file_locations,
+        test_import_searches_skill_dir_for_standard_library,
         test_stdin_import_rejected,
         test_multiline_bar_semantics,
         test_duplicate_binders_deduplicate,
         test_nested_ancestor_conflict_is_invalid,
         test_semantic_warning_for_multiple_inheritance_candidates,
-        test_semantic_error_for_function_output_in_authored_premise,
-        test_semantic_error_for_nested_function_output_in_premise,
-        test_semantic_error_for_predicate_output_in_authored_premise,
+        test_semantic_allows_function_output_in_body_premise,
+        test_semantic_allows_nested_function_output_in_body_premise,
+        test_semantic_allows_predicate_output_in_body_premise,
         test_semantic_allows_function_output_in_target_and_generated_binding,
         test_sibling_submodules_can_reuse_name,
         test_authored_generated_sym_is_accepted,

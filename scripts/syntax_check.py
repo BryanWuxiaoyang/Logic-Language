@@ -22,6 +22,7 @@ from compile_pipeline.source_utils import (
     load_tokens,
     normalize_latex,
     remove_comments,
+    resolve_import_path,
 )
 
 
@@ -115,10 +116,7 @@ def split_imports_with_diagnostics(
 
         raw_path = match.group("path").strip().strip("\"'")
         path_start = line.find(match.group("path"))
-        import_path = Path(raw_path)
-        if not import_path.is_absolute():
-            import_path = base_dir / import_path
-        import_path = import_path.resolve()
+        import_path = resolve_import_path(raw_path, base_dir)
         if import_path in seen:
             diagnostics.append(
                 make_diagnostic(

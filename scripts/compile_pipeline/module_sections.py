@@ -25,6 +25,7 @@ from inheritance_sources import CAPITAL_INTRINSIC_SYMS
 INFER_OPERATORS = ("=", ">", "<", ">=", "<=", "≤", "≥", "∈", "∉", "⊂", "⊄", "⊆", "⊈", "≠")
 FRESH_PREFIX = "__logic_language_out"
 DECL_OUTPUT_MARKER = "__compiler_function_outputs"
+DECL_BODY_OUTPUT_MARKER = "__compiler_function_body_outputs"
 INTRINSIC_SYMS = tuple(sorted(CAPITAL_INTRINSIC_SYMS | {"true", "false"}))
 
 
@@ -145,15 +146,27 @@ class ModuleCompiler:
     def lower_declaration(self, declaration: tuple[str, list[str], list[str], str], block: str | None) -> list[str]:
         name, inputs, outputs, arrow = declaration
         if arrow == "->":
-            call = call_text(name, inputs)
-            target = f"{tuple_or_single(outputs)} = {call}"
-            block_text = "" if block is None else "\n" + block
-            return [f"{name}: {tuple_or_single(inputs)} => {tuple_or_single(outputs)}", "∀{\n" + target + block_text + "\n}"]
+            expression = tuple_or_single(outputs)
+            generated_output = self.fresh_sym(name + expression)
+            body_target = f"{generated_output} = {expression}"
+            outputs = [generated_output]
+            block = body_target if block is None else body_target + "\n" + block
+        declaration_module = self.declaration_module_text(name, inputs, outputs)
+        if block is None:
+            return [f"Function ~ {name}", declaration_module]
+        return [f"Function ~ {name}", declaration_module, self.function_body_module_text(name, inputs, outputs, block)]
+
+    def declaration_module_text(self, name: str, inputs: list[str], outputs: list[str]) -> str:
         call = call_text(name, inputs)
         target = f"{tuple_or_single(outputs)} = {call}" if outputs != ["bool"] else call
         marker = f"{DECL_OUTPUT_MARKER}({', '.join(outputs)})"
-        block_text = "" if block is None else "\n" + block
-        return [f"Function ~ {name}", "∀{\n| " + ", ".join(inputs + outputs) + "\n| " + marker + "\n| " + target + block_text + "\n}"]
+        return "∀{\n| " + ", ".join(inputs + outputs) + "\n| " + marker + "\n| " + target + "\n}"
+
+    def function_body_module_text(self, name: str, inputs: list[str], outputs: list[str], block: str) -> str:
+        call = call_text(name, inputs)
+        binding = f"{tuple_or_single(outputs)} = {call}" if outputs != ["bool"] else call
+        marker = f"{DECL_BODY_OUTPUT_MARKER}({', '.join(outputs)})"
+        return "∀{\n| " + ", ".join(inputs + outputs) + "\n| " + marker + "\n| " + binding + "\n" + block + "\n}"
 
     def lower_class_block(self, header: str, class_sym: str, block: str) -> list[str]:
         expanded_lines = class_block_prefix_lines(header, class_sym)

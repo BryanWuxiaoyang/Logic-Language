@@ -37,6 +37,7 @@ from compile_pipeline.source_utils import (
     literal_quote_index,
     load_tokens,
     remove_comments,
+    resolve_import_path,
 )
 
 
@@ -313,13 +314,6 @@ def expand_for_checking(located: LocatedText, *, base_dir: Path, seen: set[Path]
     return concat_located(output)
 
 
-def resolve_import_path(raw_path: str, base_dir: Path) -> Path:
-    import_path = Path(raw_path.strip().strip("\"'"))
-    if not import_path.is_absolute():
-        import_path = base_dir / import_path
-    return import_path.resolve()
-
-
 def indent_located(located: LocatedText, origin: SourcePosition, indent: str) -> LocatedText:
     lines = split_lines_located(located)
     output: list[LocatedText] = []
@@ -541,23 +535,27 @@ class LocatedModuleParser:
         name, inputs, outputs, arrow = declaration
         origin = header.positions[0]
         if arrow == "->":
-            call = call_text(name, inputs)
-            target = f"{tuple_or_single(outputs)} = {call}"
-            body_parts = [synthetic_text("∀{\n", origin), synthetic_text(target, origin)]
-            if block is not None:
-                body_parts.extend([synthetic_text("\n", origin), block])
-            body_parts.append(synthetic_text("\n}", origin))
-            module_text = concat_located(body_parts)
-            self.declarations_by_module[located_key(module_text)] = CheckDeclaration(
-                kind="function",
-                name=name,
-                inputs=tuple(inputs),
-                outputs=tuple(outputs),
-            )
-            return [
-                synthetic_text(f"{name}: {tuple_or_single(inputs)} => {tuple_or_single(outputs)}", origin),
-                module_text,
-            ]
+            expression = tuple_or_single(outputs)
+            outputs = [self.fresh_sym(name + expression)]
+            body_target = synthetic_text(f"{tuple_or_single(outputs)} = {expression}", origin)
+            block = body_target if block is None else concat_located([body_target, synthetic_text("\n", origin), block])
+        module_text = self.declaration_module_located(header, name, inputs, outputs)
+        self.declarations_by_module[located_key(module_text)] = CheckDeclaration(
+            kind="predicate" if outputs == ["bool"] else "function",
+            name=name,
+            inputs=tuple(inputs),
+            outputs=tuple(outputs),
+        )
+        output = [
+            synthetic_text(f"Function ~ {name}", origin),
+            module_text,
+        ]
+        if block is not None:
+            output.append(self.function_body_module_located(header, name, inputs, outputs, block))
+        return output
+
+    def declaration_module_located(self, header: LocatedText, name: str, inputs: list[str], outputs: list[str]) -> LocatedText:
+        origin = header.positions[0]
         call = call_text(name, inputs)
         target = f"{tuple_or_single(outputs)} = {call}" if outputs != ["bool"] else call
         binder_line = located_binder_line_from_header(header, inputs + outputs)
@@ -567,20 +565,32 @@ class LocatedModuleParser:
             synthetic_text("\n| ", origin),
             synthetic_text(target, origin),
         ]
-        if block is not None:
-            body_parts.extend([synthetic_text("\n", origin), block])
         body_parts.append(synthetic_text("\n}", origin))
-        module_text = concat_located(body_parts)
-        self.declarations_by_module[located_key(module_text)] = CheckDeclaration(
-            kind="predicate" if outputs == ["bool"] else "function",
-            name=name,
-            inputs=tuple(inputs),
-            outputs=tuple(outputs),
+        return concat_located(body_parts)
+
+    def function_body_module_located(
+        self,
+        header: LocatedText,
+        name: str,
+        inputs: list[str],
+        outputs: list[str],
+        block: LocatedText,
+    ) -> LocatedText:
+        origin = header.positions[0]
+        call = call_text(name, inputs)
+        binding = f"{tuple_or_single(outputs)} = {call}" if outputs != ["bool"] else call
+        binder_line = located_binder_line_from_header(header, inputs + outputs)
+        return concat_located(
+            [
+                synthetic_text("∀{\n", origin),
+                binder_line,
+                synthetic_text("\n| ", origin),
+                synthetic_text(binding, origin),
+                synthetic_text("\n", origin),
+                block,
+                synthetic_text("\n}", origin),
+            ]
         )
-        return [
-            synthetic_text(f"Function ~ {name}", origin),
-            module_text,
-        ]
 
     def lower_class_block(self, header: LocatedText, class_sym: str, block: LocatedText) -> list[LocatedText]:
         expanded_lines = class_block_prefix_lines_located(header, class_sym)
