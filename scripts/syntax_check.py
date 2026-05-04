@@ -24,7 +24,7 @@ from compile_pipeline.source_utils import (
     remove_comments,
     resolve_import_path,
 )
-from syntax_check_common import CheckError, analyze_module_text
+from syntax_check_common import CheckError, analyze_module_text, token_for_compile_error
 
 
 STDIN_FILE = "<stdin>"
@@ -84,7 +84,7 @@ def check_text(
         body = strip_outer_blank_lines(cleaned_body)
         ModuleCompiler(parser).compile(body)
     except CompileError as error:
-        diagnostics.append(compile_error_to_diagnostic(error, file_label, body_line_offset))
+        diagnostics.append(compile_error_to_diagnostic(error, file_label, body_line_offset, source_text=text))
 
     return diagnostics
 
@@ -259,7 +259,13 @@ def strip_comment_for_scan(line: str) -> str:
     return line
 
 
-def compile_error_to_diagnostic(error: CompileError | str, file_label: str, line_offset: int) -> Diagnostic:
+def compile_error_to_diagnostic(
+    error: CompileError | str,
+    file_label: str,
+    line_offset: int,
+    *,
+    source_text: str | None = None,
+) -> Diagnostic:
     if isinstance(error, CheckError) and error.position is not None:
         position = error.position
         reason = str(error)
@@ -267,12 +273,17 @@ def compile_error_to_diagnostic(error: CompileError | str, file_label: str, line
             position.file,
             position.line - 1,
             position.column - 1,
-            position.column,
+            position.column - 1 + error.width,
             "error",
             code_for_reason(reason),
             reason,
         )
     message = str(error)
+    if source_text is not None:
+        source_position = source_position_for_compile_message(message, source_text)
+        if source_position is not None:
+            line, column, width = source_position
+            return make_diagnostic(file_label, line, column, column + width, "error", code_for_reason(message), message)
     match = re.match(r"^(?P<line>\d+):(?P<column>\d+):\s*(?P<reason>.+)$", message)
     if match is not None:
         line = max(int(match.group("line")) - 1 + line_offset, 0)
@@ -280,6 +291,46 @@ def compile_error_to_diagnostic(error: CompileError | str, file_label: str, line
         reason = match.group("reason")
         return make_diagnostic(file_label, line, column, column + 1, "error", code_for_reason(reason), reason)
     return make_diagnostic(file_label, 0, 0, 1, "error", code_for_reason(message), message)
+
+
+def source_position_for_compile_message(message: str, source_text: str) -> tuple[int, int, int] | None:
+    fragment = source_fragment_for_compile_message(message, source_text)
+    if not fragment:
+        return None
+    offset = source_text.find(fragment)
+    if offset < 0:
+        return None
+    line, column = zero_based_line_column(source_text, offset)
+    return line, column, len(fragment)
+
+
+def source_fragment_for_compile_message(message: str, source_text: str) -> str | None:
+    token = token_for_compile_error(message, source_text)
+    if token:
+        return token
+    for prefix in (
+        "unsupported expression: ",
+        "unsupported assignment RHS: ",
+        "unsupported non-call statement: ",
+    ):
+        if message.startswith(prefix):
+            fragment = message[len(prefix) :].strip()
+            if fragment in source_text:
+                return fragment
+            if prefix == "unsupported non-call statement: " and fragment.startswith("^logic_language_out"):
+                quote = first_literal_quote_fragment(source_text)
+                if quote is not None:
+                    return quote
+    return None
+
+
+def first_literal_quote_fragment(source_text: str) -> str | None:
+    index = 0
+    while index < len(source_text):
+        if is_literal_quote_start(source_text, index):
+            return source_text[index]
+        index += 1
+    return None
 
 
 def code_for_reason(reason: str) -> str:

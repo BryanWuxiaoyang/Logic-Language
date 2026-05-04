@@ -81,9 +81,10 @@ List
     list1.size = val2 - val1
     list1[_val - val1] = list[_val]
 
-Set ~ List
+List
     ::∈: (sym, list) => bool
         bool = ∃{| i | list[i] = sym}
+Set ~ List
 Set::lists: set => lists
     lists = {
         | list1

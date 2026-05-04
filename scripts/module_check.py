@@ -14,7 +14,7 @@ from compile_module import FinalAstValidationCompileError, run_compile_pipeline
 from compile_pipeline.errors import CompileError
 from compile_pipeline.source_utils import load_lark_parser, load_tokens
 from semantic_check import collect_semantic_diagnostics_from_file, collect_semantic_diagnostics_from_text
-from syntax_check import STDIN_FILE, Diagnostic, check_text, make_diagnostic
+from syntax_check import STDIN_FILE, Diagnostic, check_text, make_diagnostic, source_position_for_compile_message
 from syntax_check_common import CheckError
 
 
@@ -73,7 +73,27 @@ def fallback_entry(file_label: str, stage: str, code: str, reason: str) -> Entry
     return with_stage(make_diagnostic(file_label, 0, 0, 1, "error", code, reason).to_json(), stage)
 
 
-def compile_error_entry(error: CompileError | OSError, file_label: str) -> Entry:
+def positioned_error_entry(error: CheckError, stage: str, code: str) -> Entry | None:
+    if error.position is None:
+        return None
+    position = error.position
+    diagnostic = make_diagnostic(
+        position.file,
+        position.line - 1,
+        position.column - 1,
+        position.column - 1 + error.width,
+        "error",
+        code,
+        str(error),
+    )
+    return diagnostic_with_stage(diagnostic, stage)
+
+
+def compile_error_entry(error: CompileError | OSError, file_label: str, source: str | None = None) -> Entry:
+    if isinstance(error, CheckError):
+        positioned = positioned_error_entry(error, "compile", "compile_error")
+        if positioned is not None:
+            return positioned
     message = str(error)
     match = re.match(r"^(?P<line>\d+):(?P<column>\d+):\s*(?P<reason>.+)$", message)
     if match is not None:
@@ -82,6 +102,12 @@ def compile_error_entry(error: CompileError | OSError, file_label: str) -> Entry
         reason = match.group("reason")
         diagnostic = make_diagnostic(file_label, line, column, column + 1, "error", "compile_error", reason)
         return diagnostic_with_stage(diagnostic, "compile")
+    if source is not None:
+        source_position = source_position_for_compile_message(message, source)
+        if source_position is not None:
+            line, column, width = source_position
+            diagnostic = make_diagnostic(file_label, line, column, column + width, "error", "compile_error", message)
+            return diagnostic_with_stage(diagnostic, "compile")
     return fallback_entry(file_label, "compile", "compile_error", message)
 
 
@@ -113,7 +139,7 @@ def compile_entries(source: str, file_label: str, base_dir: Path) -> list[Entry]
     except FinalAstValidationCompileError as error:
         return final_ast_entries(error, file_label)
     except (CompileError, OSError) as error:
-        return [compile_error_entry(error, file_label)]
+        return [compile_error_entry(error, file_label, source)]
     return []
 
 
@@ -125,7 +151,8 @@ def check_module(source: str, file_label: str, base_dir: Path, *, is_file: bool)
     try:
         entries.extend(semantic_entries(source, file_label, base_dir, is_file))
     except (CheckError, CompileError, OSError, ValueError) as error:
-        entries.append(fallback_entry(file_label, "semantic", "semantic_error", str(error)))
+        positioned = positioned_error_entry(error, "semantic", "semantic_error") if isinstance(error, CheckError) else None
+        entries.append(positioned or fallback_entry(file_label, "semantic", "semantic_error", str(error)))
     if has_errors(entries):
         return output_payload(entries)
 

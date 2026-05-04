@@ -34,31 +34,36 @@ from compile_pipeline.stage4_parse_statements import ParsedStatements, run as pa
 from inheritance_sources import LITERAL_CLASSIFIERS
 
 AstNode = dict[str, Any]
+OperatorSpec = tuple[str, str]
 
-OPERATOR_CALLS: tuple[tuple[str, str], ...] = (
-    ("≠", "!="),
-    ("!=", "!="),
-    ("≥", ">="),
-    (">=", ">="),
-    ("≤", "<="),
-    ("<=", "<="),
-    ("&&", "&&"),
-    ("||", "||"),
-    ("=", "="),
-    ("+", "+"),
-    ("-", "-"),
-    ("*", "*"),
-    ("/", "/"),
-    ("∉", "∉"),
-    ("∈", "∈"),
-    ("⊄", "⊄"),
-    ("⊂", "⊂"),
-    ("⊈", "⊈"),
-    ("⊆", "⊆"),
-    (">", ">"),
-    ("<", "<"),
-    ("~", "~"),
+PRECEDENCE_GROUPS: tuple[tuple[OperatorSpec, ...], ...] = (
+    (("||", "||"), ("∨", "∨")),
+    (("&&", "&&"), ("∧", "∧")),
+    (
+        ("≠", "!="),
+        ("!=", "!="),
+        ("≥", ">="),
+        (">=", ">="),
+        ("≤", "<="),
+        ("<=", "<="),
+        ("∉", "∉"),
+        ("∈", "∈"),
+        ("⊄", "⊄"),
+        ("⊂", "⊂"),
+        ("⊈", "⊈"),
+        ("⊆", "⊆"),
+        ("=", "="),
+        (">", ">"),
+        ("<", "<"),
+        ("~", "~"),
+    ),
+    (("∪", "∪"),),
+    (("+", "+"), ("-", "-")),
+    (("∩", "∩"),),
+    (("*", "*"), ("/", "/")),
 )
+ORDERED_COMPARISON_OPS = {"<", "<=", ">", ">="}
+PREFIX_UNARY_OPERATORS = ("!", "-", "*")
 
 
 @dataclass(frozen=True)
@@ -283,10 +288,12 @@ class AstLowerer:
         grouped = strip_outer_grouping_parens(text)
         if grouped is not None:
             return self.parse_expr(grouped, statement)
-        operator = split_operator(text)
-        if operator is not None:
-            lhs, op, rhs = operator
-            return self.call_expr(op, [lhs, rhs], statement)
+        infix_expr = self.parse_infix_expr(text, statement)
+        if infix_expr is not None:
+            return infix_expr
+        unary_expr = self.parse_prefix_unary_expr(text, statement)
+        if unary_expr is not None:
+            return unary_expr
         index_call = parse_index_call(text)
         if index_call is not None:
             receiver, index = index_call
@@ -302,6 +309,27 @@ class AstLowerer:
         if is_sym_name(text):
             return sym_node(text, self.loc)
         raise CompileError(f"unsupported expression: {text}")
+
+    def parse_infix_expr(self, text: str, statement: Statement) -> AstNode | None:
+        for operators in PRECEDENCE_GROUPS:
+            matches = find_top_level_operator_matches(text, operators)
+            if not matches:
+                continue
+            ordered_chain = ordered_comparison_chain_text(text, matches)
+            if ordered_chain is not None:
+                return self.parse_expr(ordered_chain, statement)
+            for index, raw, op in reversed(matches):
+                lhs, rhs = text[:index].strip(), text[index + len(raw) :].strip()
+                if lhs and rhs:
+                    return self.call_expr(op, [lhs, rhs], statement)
+        return None
+
+    def parse_prefix_unary_expr(self, text: str, statement: Statement) -> AstNode | None:
+        unary = parse_prefix_unary(text)
+        if unary is None:
+            return None
+        op, operand = unary
+        return self.call_expr(op, [operand], statement)
 
     def call_expr(self, name: str, arg_texts: list[str], statement: Statement) -> AstNode:
         bindings: list[AstNode] = []
@@ -490,6 +518,22 @@ def strip_outer_grouping_parens(text: str) -> str | None:
     return inner
 
 
+def parse_prefix_unary(text: str) -> tuple[str, str] | None:
+    text = text.strip()
+    for op in PREFIX_UNARY_OPERATORS:
+        if not text.startswith(op):
+            continue
+        if text[len(op) :].startswith("("):
+            return None
+        operand = text[len(op) :].strip()
+        if not operand:
+            return None
+        if op == "!" and operand.startswith("="):
+            return None
+        return op, operand
+    return None
+
+
 def parse_call(text: str) -> tuple[str, list[str]] | None:
     text = text.strip()
     if not text.endswith(")"):
@@ -518,26 +562,9 @@ def parse_index_call(text: str) -> tuple[str, str] | None:
     return text[:open_index].strip(), index
 
 
-def split_operator(text: str) -> tuple[str, str, str] | None:
-    for raw, canonical in OPERATOR_CALLS:
-        if raw == "=":
-            index = top_level_assignment_index(text)
-            if index is None:
-                continue
-            lhs, rhs = text[:index].strip(), text[index + 1 :].strip()
-        else:
-            parts = split_top_level_token(text, raw) if raw.isalpha() else split_top_level(text, raw)
-            if len(parts) != 2:
-                continue
-            lhs, rhs = parts[0].strip(), parts[1].strip()
-        if lhs and rhs:
-            return lhs, canonical, rhs
-    return None
-
-
-def split_top_level_token(text: str, separator: str) -> list[str]:
-    parts: list[str] = []
-    start = 0
+def find_top_level_operator_matches(text: str, operators: tuple[OperatorSpec, ...]) -> list[tuple[int, str, str]]:
+    matches: list[tuple[int, str, str]] = []
+    ordered_operators = sorted(operators, key=lambda operator: len(operator[0]), reverse=True)
     stack: list[str] = []
     index = 0
     while index < len(text):
@@ -547,20 +574,95 @@ def split_top_level_token(text: str, separator: str) -> list[str]:
             continue
         if char in "({[":
             stack.append({"(": ")", "{": "}", "[": "]"}[char])
-        elif stack and char == stack[-1]:
+            index += 1
+            continue
+        if stack and char == stack[-1]:
             stack.pop()
-        elif not stack and text.startswith(separator, index):
-            left_ok = index == 0 or not is_sym_name_char(text[index - 1])
-            right_index = index + len(separator)
-            right_ok = right_index >= len(text) or not is_sym_name_char(text[right_index])
-            if left_ok and right_ok:
-                parts.append(text[start:index])
-                index += len(separator)
-                start = index
-                continue
-        index += 1
-    parts.append(text[start:])
-    return parts
+            index += 1
+            continue
+        if stack:
+            index += 1
+            continue
+        matched = False
+        for raw, canonical in ordered_operators:
+            if text.startswith(raw, index) and is_operator_match(text, index, raw):
+                matches.append((index, raw, canonical))
+                index += len(raw)
+                matched = True
+                break
+        if not matched:
+            index += 1
+    return matches
+
+
+def is_operator_match(text: str, index: int, raw: str) -> bool:
+    if raw.isalpha():
+        left_ok = index == 0 or not is_sym_name_char(text[index - 1])
+        right_index = index + len(raw)
+        right_ok = right_index >= len(text) or not is_sym_name_char(text[right_index])
+        return left_ok and right_ok
+    previous_char = text[index - 1] if index > 0 else ""
+    next_index = index + len(raw)
+    next_char = text[next_index] if next_index < len(text) else ""
+    if raw in {"+", "-", "*"}:
+        previous_token = previous_nonspace_char(text, index)
+        next_token = next_nonspace_char(text, next_index)
+        return bool(previous_token and next_token) and previous_token not in "([{!+-*/=<>&|∧∨∪∩~"
+    if raw == "=":
+        return previous_char not in {"<", ">", "!", "="} and next_char not in {">", "="}
+    if raw in {"<", ">"}:
+        return previous_char != "=" and next_char != "="
+    return True
+
+
+def previous_nonspace_char(text: str, index: int) -> str:
+    cursor = index - 1
+    while cursor >= 0 and text[cursor].isspace():
+        cursor -= 1
+    return text[cursor] if cursor >= 0 else ""
+
+
+def next_nonspace_char(text: str, index: int) -> str:
+    cursor = index
+    while cursor < len(text) and text[cursor].isspace():
+        cursor += 1
+    return text[cursor] if cursor < len(text) else ""
+
+
+def ordered_comparison_chain_text(text: str, matches: list[tuple[int, str, str]]) -> str | None:
+    if len(matches) < 2 or any(canonical not in ORDERED_COMPARISON_OPS for _, _, canonical in matches):
+        return None
+    operands: list[str] = []
+    operators: list[str] = []
+    start = 0
+    for index, raw, canonical in matches:
+        operand = text[start:index].strip()
+        if not operand:
+            return None
+        operands.append(operand)
+        operators.append(canonical)
+        start = index + len(raw)
+    final_operand = text[start:].strip()
+    if not final_operand:
+        return None
+    operands.append(final_operand)
+    comparisons = [f"({operands[index]} {operators[index]} {operands[index + 1]})" for index in range(len(operators))]
+    return " && ".join(comparisons)
+
+
+def preferred_operator_name(text: str) -> str | None:
+    for operators in PRECEDENCE_GROUPS:
+        matches = find_top_level_operator_matches(text, operators)
+        if not matches:
+            continue
+        ordered_chain = ordered_comparison_chain_text(text, matches)
+        if ordered_chain is not None:
+            return "&&"
+        return matches[-1][2]
+    unary = parse_prefix_unary(text)
+    if unary is not None:
+        return unary[0]
+    return None
 
 
 def is_sym_name(text: str) -> bool:
@@ -572,12 +674,12 @@ def is_sym_name(text: str) -> bool:
 
 
 def preferred_temp_name(text: str) -> str:
+    operator = preferred_operator_name(str(text))
+    if operator is not None:
+        return operator
     call = parse_call(str(text))
     if call is not None:
         return call[0]
-    operator = split_operator(str(text))
-    if operator is not None:
-        return operator[1]
     if isinstance(text, str):
         return text
     return "tmp"
@@ -593,6 +695,7 @@ def sanitize_temp_name(value: str) -> str:
         "-": "sub",
         "*": "mul",
         "/": "div",
+        "!": "not",
         "&&": "and",
         "||": "or",
         "=": "eq",
@@ -601,6 +704,17 @@ def sanitize_temp_name(value: str) -> str:
         ">": "gt",
         "<=": "le",
         ">=": "ge",
+        "!=": "neq",
+        "∪": "union",
+        "∩": "intersect",
+        "∧": "land",
+        "∨": "lor",
+        "∈": "in",
+        "∉": "notin",
+        "⊂": "subset",
+        "⊄": "notsubset",
+        "⊆": "subseteq",
+        "⊈": "notsubseteq",
     }
     value = aliases.get(value, value)
     sanitized = re.sub(r"\W+", "_", value, flags=re.UNICODE).strip("_")

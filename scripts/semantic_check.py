@@ -12,7 +12,6 @@ from pathlib import Path
 from typing import Any
 
 from compile_pipeline.errors import CompileError
-from inheritance_sources import matched_inheritance_sources
 from syntax_check_common import (
     STDIN_FILE,
     Binder,
@@ -99,7 +98,6 @@ class SemanticChecker:
         ancestor_set = set(context.ancestors)
         for binder in module.binders:
             self.check_binder(binder, ancestor_set)
-            self.check_implicit_inheritance_candidates(binder, ancestor_set)
             self.check_bare_index_operator_binder(binder)
             declaration = VisibleDeclaration(binder.text, binder.position, context.scope_id)
             current_declarations.append(declaration)
@@ -120,6 +118,7 @@ class SemanticChecker:
             conflict
             for conflict in self.visible.get(binder.text, [])
             if conflict.is_imported or conflict.scope_id in ancestors
+            if not same_source_position(conflict.position, binder.position)
         ]
         if not conflicts:
             return
@@ -133,31 +132,6 @@ class SemanticChecker:
                 type="warning",
                 code="name_override",
                 reason=message,
-            )
-        )
-
-    def check_implicit_inheritance_candidates(self, binder: Binder, ancestors: set[int]) -> None:
-        if binder.text.startswith("^"):
-            return
-        visible_names = {
-            declaration.name
-            for declarations in self.visible.values()
-            for declaration in declarations
-            if declaration.is_imported or declaration.scope_id in ancestors
-        }
-        matches = [candidate for candidate in matched_inheritance_sources(binder.text, visible_names) if candidate != binder.text]
-        if len(matches) < 2:
-            return
-        selected = matches[0]
-        self.diagnostics.append(
-            Diagnostic(
-                file=binder.position.file,
-                lineno=max(binder.position.line - 1, 0),
-                col_start_no=max(binder.position.column - 1, 0),
-                col_end_no=max(binder.position.column - 1 + len(binder.text), 1),
-                type="warning",
-                code="implicit_inheritance_candidates",
-                reason=f"{binder.text} may inherit {', '.join(matches)}; selected {selected}",
             )
         )
 
@@ -223,6 +197,10 @@ class SemanticChecker:
 
 def format_prior_location(position: SourcePosition) -> str:
     return f"{position.file}:{position.line}"
+
+
+def same_source_position(left: SourcePosition, right: SourcePosition) -> bool:
+    return left.file == right.file and left.line == right.line and left.column == right.column
 
 
 def format_conflict_message(name: str, conflicts: list[VisibleDeclaration]) -> str:

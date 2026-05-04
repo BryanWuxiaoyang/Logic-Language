@@ -699,19 +699,11 @@ def class_header_sym(header: str) -> str | None:
     header = header.strip()
     if is_plain_sym(header):
         return header
-    parts = split_top_level(header, "~")
-    if len(parts) == 2:
-        rhs = parts[1].strip()
-        if is_plain_sym(rhs):
-            return rhs
     return None
 
 
 def class_block_prefix_lines(header: str, class_sym: str) -> list[str]:
-    header = header.strip()
-    if is_plain_sym(header):
-        return [header]
-    return [header, class_sym]
+    return [header.strip()]
 
 
 def erase_coloncolon_statement_head(text: str) -> str:

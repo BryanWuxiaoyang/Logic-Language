@@ -54,9 +54,10 @@ QUANTIFIERS = {"∀", "∃"}
 class CheckError(CompileError):
     """Raised when shared checker syntax analysis cannot continue."""
 
-    def __init__(self, message: str, *, position: SourcePosition | None = None) -> None:
+    def __init__(self, message: str, *, position: SourcePosition | None = None, width: int = 1) -> None:
         super().__init__(message)
         self.position = position
+        self.width = max(width, 1)
 
 
 @dataclass(frozen=True)
@@ -161,9 +162,52 @@ def first_position(located: LocatedText) -> SourcePosition | None:
     return None
 
 
-def raise_located_error(message: str, located: LocatedText | SourcePosition) -> None:
+def raise_located_error(message: str, located: LocatedText | SourcePosition, *, width: int = 1) -> None:
     position = located if isinstance(located, SourcePosition) else first_position(located)
-    raise CheckError(message, position=position)
+    raise CheckError(message, position=position, width=width)
+
+
+def raise_located_token_error(message: str, located: LocatedText, token: str | None = None) -> None:
+    position = first_position(located)
+    width = 1
+    if token:
+        index = located.text.find(token)
+        if index >= 0 and index < len(located.positions):
+            position = located.positions[index]
+            width = len(token)
+    raise CheckError(message, position=position, width=width)
+
+
+def raise_compile_error_located(error: CompileError, located: LocatedText) -> None:
+    message = str(error)
+    token = token_for_compile_error(message, located.text)
+    raise_located_token_error(message, located, token)
+
+
+def token_for_compile_error(message: str, text: str) -> str | None:
+    if "unsupported '::' usage" in message or "class-field assignment with '::'" in message:
+        return "::"
+    if "bare class-field shorthand" in message or "missing declaration name after '::'" in message:
+        return "::"
+    if message.startswith("function-assign '->'"):
+        return "->"
+    if message == "branch header requires an indented block":
+        return "|-"
+    if "invalid escape sequence " in message:
+        escape = message.rsplit(" ", 1)[-1]
+        if escape in text:
+            return escape
+    if message.startswith("char literal") or message.startswith("invalid literal"):
+        quote_index = next((index for index, char in enumerate(text) if char in {"'", '"'}), -1)
+        if quote_index >= 0:
+            return text[quote_index]
+    if message == "literal cannot appear on assignment left-hand side":
+        quote_index = next((index for index, char in enumerate(text) if char in {"'", '"'}), -1)
+        if quote_index >= 0:
+            return text[quote_index]
+    if message.startswith("set module requires") and "{" in text:
+        return "{"
+    return None
 
 
 def analyze_module_text(
@@ -452,7 +496,7 @@ def scan_line_declarations(line: LocatedText, *, import_origin_only: bool) -> li
                     declarations.append(declaration_at_text(stripped, term, import_origin_only=import_origin_only))
         return [declaration for declaration in declarations if declaration is not None]
 
-    for separator in ("=", "~", "::"):
+    for separator in ("=", "::"):
         if separator in stripped.text:
             for part in split_top_level(stripped.text.replace("::", separator), separator):
                 term = part.strip()
@@ -568,7 +612,7 @@ class LocatedModuleParser:
                     index = next_index
                     continue
             if content.text.startswith("|-"):
-                raise_located_error("branch header requires an indented block", content)
+                raise_located_error("branch header requires an indented block", content, width=2)
             premise_declaration = parse_premise_declaration(content.text)
             if premise_declaration is not None:
                 output.extend(self.lower_premise_declaration(content, premise_declaration, block=None))
@@ -578,7 +622,7 @@ class LocatedModuleParser:
             if declaration is not None:
                 output.extend(self.lower_declaration(content, declaration, block=None))
             else:
-                reject_unsupported_coloncolon(content.text)
+                reject_unsupported_coloncolon_located(content)
                 output.append(content)
             index += 1
         return output
@@ -604,13 +648,14 @@ class LocatedModuleParser:
             raise_located_error(
                 "class-field shorthand cannot have a function body; use Class::field: input => output for an explicit function declaration",
                 header,
+                width=2,
             )
         class_sym = class_header_sym(header.text)
         if class_sym is not None:
             return self.lower_class_block(header, class_sym, block)
         declaration = parse_declaration(header.text)
         if declaration is None:
-            reject_unsupported_coloncolon(header.text)
+            reject_unsupported_coloncolon_located(header)
             return [header, concat_located([synthetic_text("∀{\n", header.positions[0]), block, synthetic_text("\n}", header.positions[0])])]
         return self.lower_declaration(header, declaration, block=self.lower_nested_block(block))
 
@@ -624,7 +669,7 @@ class LocatedModuleParser:
         name, inputs, outputs, arrow = declaration
         origin = header.positions[0]
         if arrow != "=>":
-            raise_located_error("function-assign '->' is not supported; use '=>' with an indented function body", header)
+            raise_located_token_error("function-assign '->' is not supported; use '=>' with an indented function body", header, "->")
         module_text = self.declaration_module_located(header, name, inputs, outputs)
         declaration_info = CheckDeclaration(
             kind="predicate" if outputs == ["bool"] else "function",
@@ -781,7 +826,7 @@ class LocatedModuleParser:
 
     def compile_statement(self, located: LocatedText) -> CheckStatement:
         text, submodules = self.extract_sub_modules(located.strip())
-        reject_unsupported_coloncolon(text.text)
+        reject_unsupported_coloncolon_located(text)
         stripped = text.strip()
         return CheckStatement(stripped.text, submodules, stripped)
 
@@ -875,7 +920,10 @@ def join_lines_located(lines: Iterable[LocatedText]) -> LocatedText:
 
 def erase_coloncolon_statement_head_located(located: LocatedText) -> LocatedText:
     stripped = located.strip()
-    rewritten = erase_coloncolon_statement_head(stripped.text)
+    try:
+        rewritten = erase_coloncolon_statement_head(stripped.text)
+    except CompileError as error:
+        raise_compile_error_located(error, stripped)
     if rewritten == stripped.text:
         return stripped
     if "::" in stripped.text:
@@ -889,11 +937,15 @@ def erase_coloncolon_statement_head_located(located: LocatedText) -> LocatedText
     return synthetic_text(rewritten, stripped.positions[0])
 
 
+def reject_unsupported_coloncolon_located(located: LocatedText) -> None:
+    try:
+        reject_unsupported_coloncolon(located.text)
+    except CompileError as error:
+        raise_compile_error_located(error, located)
+
+
 def class_block_prefix_lines_located(header: LocatedText, class_sym: str) -> list[LocatedText]:
-    prefix_texts = class_block_prefix_lines(header.text, class_sym)
-    if len(prefix_texts) == 1:
-        return [header]
-    return [header, synthetic_text(class_sym, header.positions[0])]
+    return [header]
 
 
 def split_sections_located(body: LocatedText) -> list[LocatedText]:

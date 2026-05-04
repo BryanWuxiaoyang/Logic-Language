@@ -315,5 +315,89 @@ sym14 = sym1[1: 2]
 "
 =
 "
-
+∀{
+  | ^logic_language_out0, ^logic_language_out1, ^logic_language_out2, ^tmp1_2_30, ^tmp1_2_31, ^tmpfunc_stmt2, ^tmpvalue_literal_stmt3, ^tmp04, ^tmpfunc_stmt5, ^tmp16, ^tmpfunc_stmt7, ^tmp28, ^tmpfunc_stmt9, ^tmp110, ^tmptmp11, ^tmp1_2_312, ^tmptmp13, ^tmptmp14, ^tmptmp15, ^tmpfunc_stmt16, ^tmpvalue_literal_stmt17, ^tmp118, ^tmp219, ^tmp1_220, ^tmp1_221, ^tmp122, ^tmp223, ^tmp1_2_1_224, ^tmp1_225, ^tmp126, ^tmp227, ^tmp1_2_1_228, ^tmp129, ^tmp230, ^tmpsym1_1_231
+  | ^logic_language_out0 = '1'
+  | ^logic_language_out1 = '2'
+  | ^logic_language_out2 = '3'
+  | ^tmp1_2_30 = (1, 2, 3)
+  | ^tmp1_2_31 = {1, 2, 3}
+  | ^tmpfunc_stmt2 = size(sym3)
+  | ^tmpvalue_literal_stmt3 = 3
+  | ^tmp04 = 0
+  | ^tmpfunc_stmt5 = sym3[^tmp04]
+  | ^tmp16 = 1
+  | ^tmpfunc_stmt7 = sym3[^tmp16]
+  | ^tmp28 = 2
+  | ^tmpfunc_stmt9 = sym3[^tmp28]
+  | ^tmp110 = '1'
+  | ^tmptmp11 = '∀'
+  | ^tmp1_2_312 = (1, 2, 3)
+  | ^tmptmp13 = {}
+  | ^tmptmp14 = ()
+  | ^tmptmp15 = ()
+  | ^tmpfunc_stmt16 = size(sym10)
+  | ^tmpvalue_literal_stmt17 = 0
+  | ^tmp118 = 1
+  | ^tmp219 = 2
+  | ^tmp1_220 = [:](^tmp118, ^tmp219)
+  | ^tmp1_221 = (1, 2)
+  | ^tmp122 = 1
+  | ^tmp223 = 2
+  | ^tmp1_2_1_224 = [:](^tmp1_221, ^tmp122, ^tmp223)
+  | ^tmp1_225 = (1, 2)
+  | ^tmp126 = 1
+  | ^tmp227 = 2
+  | ^tmp1_2_1_228 = [:](^tmp1_225, ^tmp126, ^tmp227)
+  | ^tmp129 = 1
+  | ^tmp230 = 2
+  | ^tmpsym1_1_231 = [:](sym1, ^tmp129, ^tmp230)
+  | Char ~ ^logic_language_out0
+  | Char ~ ^logic_language_out1
+  | Char ~ ^logic_language_out2
+  Tuple ~ ^tmp1_2_30
+  Set ~ ^tmp1_2_31
+  Value ~ ^tmpvalue_literal_stmt3
+  Value ~ ^tmp04
+  Value ~ ^tmp16
+  Value ~ ^tmp28
+  Char ~ ^tmp110
+  Char ~ ^tmptmp11
+  Tuple ~ ^tmp1_2_312
+  Set ~ ^tmptmp13
+  Tuple ~ ^tmptmp14
+  Tuple ~ ^tmptmp15
+  Value ~ ^tmpvalue_literal_stmt17
+  Value ~ ^tmp118
+  Value ~ ^tmp219
+  Tuple ~ ^tmp1_221
+  Value ~ ^tmp122
+  Value ~ ^tmp223
+  Tuple ~ ^tmp1_225
+  Value ~ ^tmp126
+  Value ~ ^tmp227
+  Value ~ ^tmp129
+  Value ~ ^tmp230
+  sym1 = ^tmp1_2_30
+  sym2 = ^tmp1_2_31
+  String ~ sym3
+  ^tmpfunc_stmt2 = ^tmpvalue_literal_stmt3
+  ^tmpfunc_stmt5 = ^logic_language_out0
+  ^tmpfunc_stmt7 = ^logic_language_out1
+  ^tmpfunc_stmt9 = ^logic_language_out2
+  Char ~ sym4
+  sym4 = ^tmp110
+  Char ~ sym5
+  sym5 = ^tmptmp11
+  sym6 = ^tmp1_2_312
+  sym7 = ^tmptmp13
+  sym8 = ^tmptmp14
+  sym9 = ^tmptmp15
+  String ~ sym10
+  ^tmpfunc_stmt16 = ^tmpvalue_literal_stmt17
+  sym11 = ^tmp1_220
+  sym12 = ^tmp1_2_1_224
+  sym13 = ^tmp1_2_1_228
+  sym14 = ^tmpsym1_1_231
+}
 "

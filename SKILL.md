@@ -571,19 +571,14 @@ The AST is intended as a precise intermediate logic form that can support human-
     - Induction: `::` itself has no semantics, it's just for readability for OOP programmers. in `module-text` it is omitted.
     - to mimic `class-method` behavior, make `sym::sym2`'s first-parameter as `sym` will make it work like `class-method` or `class-field`
 
-- `~` and `class-declaration` can be inlined
-    M(
-    "
-    Sym1 ~ Sym2
-        ::sym3: (sym2, sym4) => sym5
-    "
-    ) = M(
-    "
-    Sym1 ~ Sym2
-    Sym2
-        ::sym3: (sym2, sym4) => sym5
-    "
-    )
+- `~` inheritance facts do not introduce class declarations for `::` bodies.
+    - `A ~ B` is only an inheritance statement.
+    - To attach fields or methods to `B`, declare `B` explicitly:
+        ```
+        B
+            ::field
+        A ~ B
+        ```
 
 - introduce `class-method-call` as sugar
     `M("sym1.sym2(sym3)") = M("sym2(sym1, sym3)")`
@@ -826,3 +821,10 @@ The AST is intended as a precise intermediate logic form that can support human-
     - `expected-expanded-source` should be the canonical output of `expand_module(source-text)`.
     - `expand_module` output must be closure-identical:
         `expand_module(source-text) = expand_module(expand_module(source-text))`
+- `smoke_test.py` is the executable compiler regression suite.
+    - path: `scripts/compile_pipeline/smoke_test.py`
+    - it must pass before compiler behavior is considered valid.
+- `standard_library.lp` is part of compiler validation.
+    - `module_check.py --file standard_library.lp` must return:
+        `{"error_count": 0, "warning_count": 0}`
+    - this means the standard library must pass syntax, semantic, compile, and final-AST checks with no diagnostics.
