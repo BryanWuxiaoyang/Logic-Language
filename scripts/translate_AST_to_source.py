@@ -49,6 +49,9 @@ def translate_ast_to_source(ast: AstNode) -> str:
 
 
 class Renderer:
+    def __init__(self) -> None:
+        self.bound_scopes: list[set[str]] = []
+
     def render_stmt(self, node: AstNode) -> str:
         return "\n".join(self.render_lines(node, 0))
 
@@ -75,19 +78,24 @@ class Renderer:
         if not target_pss:
             raise TranslateError(f"{kind} requires at least one target_PSs item")
 
-        binders = ", ".join(self.render_sym(require_sym(sym, "bound_syms item")) for sym in bound_syms)
+        local_bound_names = {require_sym(sym, "bound_syms item")["name"] for sym in bound_syms}
+        binders = ", ".join(self.render_bound_sym(require_sym(sym, "bound_syms item")) for sym in bound_syms)
         premise_nodes = [require_node(stmt, "premise_binding_stmts item") for stmt in premise_bindings]
         premise_nodes.extend(require_node(stmt, "premise_PSs item") for stmt in premise_pss)
         target_nodes = [require_node(stmt, "target_PSs item") for stmt in target_pss]
 
         lines = [self.indent(indent) + self.module_opener(node)]
-        if binders:
-            lines.append(self.indent(indent + 1) + "| " + binders)
-        if premise_nodes:
-            lines.extend(self.section_lines(premise_nodes, indent=indent + 1, item_prefix="| "))
-        lines.extend(self.section_lines(target_nodes, indent=indent + 1, item_prefix=""))
-        lines.append(self.indent(indent) + "}")
-        return lines
+        self.bound_scopes.append(local_bound_names)
+        try:
+            if binders:
+                lines.append(self.indent(indent + 1) + "| " + binders)
+            if premise_nodes:
+                lines.extend(self.section_lines(premise_nodes, indent=indent + 1, item_prefix="| "))
+            lines.extend(self.section_lines(target_nodes, indent=indent + 1, item_prefix=""))
+            lines.append(self.indent(indent) + "}")
+            return lines
+        finally:
+            self.bound_scopes.pop()
 
     def module_opener(self, node: AstNode) -> str:
         kind = require_kind(node)
@@ -140,7 +148,7 @@ class Renderer:
             return f"{rendered_args[0]}[{rendered_args[1]}]"
         if call_name in BINARY_OPERATORS and len(rendered_args) == 2:
             return f"{rendered_args[0]} {BINARY_OPERATORS[call_name]} {rendered_args[1]}"
-        return f"{call_name}({', '.join(rendered_args)})"
+        return f"{self.render_sym(call_sym)}({', '.join(rendered_args)})"
 
     def render_literal(self, node: AstNode) -> str:
         kind = require_kind(node)
@@ -165,7 +173,21 @@ class Renderer:
 
     def render_sym(self, node: AstNode) -> str:
         sym = require_sym(node, "sym")
-        return sym["name"]
+        name = sym["name"]
+        if self.is_lexically_bound(name):
+            return generated_source_name(name)
+        return name
+
+    def render_bound_sym(self, node: AstNode) -> str:
+        sym = require_sym(node, "bound_syms item")
+        return generated_source_name(sym["name"])
+
+    def is_lexically_bound(self, name: str) -> bool:
+        return any(name in scope for scope in reversed(self.bound_scopes))
+
+
+def generated_source_name(name: str) -> str:
+    return name if name.startswith("^") else "^" + name
 
 
 def quote_literal(value: str, quote: str) -> str:

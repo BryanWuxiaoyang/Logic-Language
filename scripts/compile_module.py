@@ -20,9 +20,15 @@ if __name__ == "__main__":
 class FinalAstValidationCompileError(CompileError):
     """Raised when final module_AST validation fails after compilation."""
 
-    def __init__(self, message: str, stage_summaries: list[str]) -> None:
+    def __init__(
+        self,
+        message: str,
+        stage_summaries: list[str],
+        diagnostics: list[dict[str, object]] | None = None,
+    ) -> None:
         super().__init__(message)
         self.stage_summaries = stage_summaries
+        self.diagnostics = diagnostics or []
 
 
 @dataclass(frozen=True)
@@ -73,6 +79,7 @@ def run_compile_pipeline(
         raise FinalAstValidationCompileError(
             format_final_ast_validation_error(diagnostics),
             stage_summaries,
+            diagnostics,
         )
     return CompilePipelineResult(ast=lowered.ast, stage_summaries=stage_summaries)
 

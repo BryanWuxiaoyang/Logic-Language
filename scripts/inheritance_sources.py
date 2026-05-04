@@ -31,10 +31,12 @@ def is_capital_head(name: str) -> bool:
 
 
 def visible_inheritance_sources(visible_syms: set[str]) -> set[str]:
-    return {sym for sym in visible_syms if is_capital_head(sym) and not sym.startswith("__")}
+    return {sym for sym in visible_syms if is_capital_head(sym) and not sym.startswith("^")}
 
 
 def inheritance_candidate_chain(name: str) -> list[str]:
+    if name.startswith("^"):
+        return []
     base = name.rstrip("'")
     base = re.sub(r"\d+$", "", base)
     if not base:

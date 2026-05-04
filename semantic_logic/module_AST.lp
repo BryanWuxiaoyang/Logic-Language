@@ -1,59 +1,67 @@
 
-str~sym
+Str~Sym
 
-stmt
+Stmt
     ::bound_syms
     ::free_syms
     ::sub_stmts
-
-    ::all_stmts
+    ::all_stmts: stmt => stmts
         |- stmt.sub_stmts = {}
-            all_stmts = {stmt}
+            stmts = {stmt}
         |- stmt.sub_stmts \neq {}
-            all_stmts = {stmt' \in stmt.sub_stmts => stmt'.all_stmts}
+            stmts = {stmt' \in stmt.sub_stmts => stmt'.all_stmts}
         # in the final module_AST, bound-symbol names must not conflict with
         # current-statement or ancestor bound-symbol names.
 
-    ::all_bound_syms = {| stmt' \in stmt.all_stmts => stmt'.bound_syms}
+    ::all_bound_syms: stmt => syms
+        syms = {| stmt' \in stmt.all_stmts => stmt'.bound_syms}
 
-    ::all_free_syms = {| stmt' \in stmt.all_stmts => stmt'.free_syms}
+    ::all_free_syms: stmt => syms
+        syms = {| stmt' \in stmt.all_stmts => stmt'.free_syms}
 
-    ::active_free_syms = stmt.all_free_syms - stmt.all_bound_syms
+    ::active_free_syms: stmt => syms
+        syms = stmt.all_free_syms - stmt.all_bound_syms
 
-stmt~binding_stmt
+Stmt~Binding_stmt
     ::dst_sym
     ::src_stmt
-    ::bound_syms = {}
-    ::free_syms = {binding_stmt.dst_sym}
-    ::sub_stmts = {binding_stmt.src_stmt}
+    ::bound_syms: binding_stmt => syms
+        syms = {}
+    ::free_syms: binding_stmt => syms
+        syms = {binding_stmt.dst_sym}
+    ::sub_stmts: binding_stmt => stmts
+        stmts = {binding_stmt.src_stmt}
 
-stmt~literal_stmt
+Stmt~Literal_stmt
 
-stmt~func_stmt
+Stmt~Func_stmt
     ::call_sym
     ::arg_sym_list
-    ::bound_syms = {}
-    ::free_syms = func_stmt.arg_sym_list \union {func_stmt.call_sym}
-    ::sub_stmts = {}
-FS = func_stmt
+    ::bound_syms: func_stmt => syms
+        syms = {}
+    ::free_syms: func_stmt => syms
+        syms = func_stmt.arg_sym_list \union {func_stmt.call_sym}
+    ::sub_stmts: func_stmt => stmts
+        stmts = {}
 
-stmt ~ proposition_stmt
+Stmt ~ Proposition_stmt
 
-func_stmt~pred_stmt
-proposition_stmt ~ pred_stmt
-PS = proposition_stmt
+Func_stmt~Pred_stmt
+Proposition_stmt ~ Pred_stmt
 
-stmt~module_stmt
+Stmt~Module_stmt
     ::bound_syms
-    ::free_syms = {}
+    ::free_syms: module_stmt => syms
+        syms = {}
 
     ::premise_binding_stmts
-    ::premise_PSs
-    ::target_PSs
-    ::sub_stmts = module_stmt.premise_binding_stmts \union module_stmt.premise_PSs \union module_stmt.target_PSs
+    ::premise_proposition_stmts
+    ::target_proposition_stmts
+    ::sub_stmts: module_stmt => stmts
+        stmts = module_stmt.premise_binding_stmts \union module_stmt.premise_proposition_stmts \union module_stmt.target_proposition_stmts
 
-module_stmt~set_stmt
+Module_stmt~Set_stmt
 
-module_stmt~quantified_stmt
+Module_stmt~Quantified_stmt
     ::quantifier_sym
-proposition_stmt~quantified_stmt
+Proposition_stmt~Quantified_stmt

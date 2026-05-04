@@ -23,9 +23,13 @@ from compile_pipeline.source_utils import (
 from inheritance_sources import CAPITAL_INTRINSIC_SYMS
 
 INFER_OPERATORS = ("=", ">", "<", ">=", "<=", "≤", "≥", "∈", "∉", "⊂", "⊄", "⊆", "⊈", "≠")
-FRESH_PREFIX = "__logic_language_out"
+GENERATED_SYM_PREFIX = "^"
+SPECIAL_IDENTIFIER_SYMS = {"[:]", "[]"}
+FRESH_PREFIX = "^logic_language_out"
 DECL_OUTPUT_MARKER = "__compiler_function_outputs"
 DECL_BODY_OUTPUT_MARKER = "__compiler_function_body_outputs"
+BRANCH_MODULE_MARKER = "__compiler_branch_module"
+CLASS_FIELD_MARKER = "__compiler_class_field"
 INTRINSIC_SYMS = tuple(sorted(CAPITAL_INTRINSIC_SYMS | {"true", "false"}))
 
 
@@ -43,6 +47,7 @@ class Module:
     target_statements: list[Statement]
     quantifier: str | None = None
     declaration_syms: list[str] = field(default_factory=list)
+    suppress_inferred_syms: bool = False
 
 
 @dataclass
@@ -109,16 +114,28 @@ class ModuleCompiler:
             if content in {"∀", "∃"} and index + 1 < len(lines):
                 block, next_index = collect_indented_block(lines, index + 1, indent)
                 if block:
-                    module_text = content + "{\n" + unindent_block(block) + "\n}"
+                    module_text = content + "{\n" + self.lower_nested_block(unindent_block(block)) + "\n}"
                     output.append(module_text)
                     index = next_index
                     continue
             if index + 1 < len(lines):
                 block, next_index = collect_indented_block(lines, index + 1, indent)
                 if block:
+                    premise_declaration = parse_premise_declaration(content)
+                    if premise_declaration is not None:
+                        output.extend(self.lower_premise_declaration(premise_declaration, block=self.lower_nested_block(unindent_block(block))))
+                        index = next_index
+                        continue
                     output.extend(self.lower_header_with_block(content, unindent_block(block)))
                     index = next_index
                     continue
+            if content.startswith("|-"):
+                raise CompileError("branch header requires an indented block")
+            premise_declaration = parse_premise_declaration(content)
+            if premise_declaration is not None:
+                output.extend(self.lower_premise_declaration(premise_declaration, block=None))
+                index += 1
+                continue
             declaration = parse_declaration(content)
             if declaration is not None:
                 output.extend(self.lower_declaration(declaration, block=None))
@@ -133,7 +150,9 @@ class ModuleCompiler:
             return ["∀{\n" + block + "\n}"]
         if header.startswith("|-"):
             branch_ps = header[2:].strip()
-            return ["∀{\n| " + branch_ps + "\n" + block + "\n}"]
+            return ["| ∀{\n| " + BRANCH_MODULE_MARKER + "\n| " + branch_ps + "\n" + self.lower_nested_block(block) + "\n}"]
+        if is_class_field_marker(header):
+            raise CompileError("class-field shorthand cannot have a function body; use Class::field: input => output for an explicit function declaration")
         class_sym = class_header_sym(header)
         if class_sym is not None:
             return self.lower_class_block(header, class_sym, block)
@@ -145,22 +164,21 @@ class ModuleCompiler:
 
     def lower_declaration(self, declaration: tuple[str, list[str], list[str], str], block: str | None) -> list[str]:
         name, inputs, outputs, arrow = declaration
-        if arrow == "->":
-            expression = tuple_or_single(outputs)
-            generated_output = self.fresh_sym(name + expression)
-            body_target = f"{generated_output} = {expression}"
-            outputs = [generated_output]
-            block = body_target if block is None else body_target + "\n" + block
-        declaration_module = self.declaration_module_text(name, inputs, outputs)
-        if block is None:
-            return [f"Function ~ {name}", declaration_module]
-        return [f"Function ~ {name}", declaration_module, self.function_body_module_text(name, inputs, outputs, block)]
+        if arrow != "=>":
+            raise CompileError("function-assign '->' is not supported; use '=>' with an indented function body")
+        output = [declaration_kind_fact(name, outputs), self.declaration_module_text(name, inputs, outputs)]
+        if block is not None:
+            output.append(self.function_body_module_text(name, inputs, outputs, block))
+        return output
+
+    def lower_premise_declaration(self, declaration: tuple[str, list[str], list[str], str], block: str | None) -> list[str]:
+        return [premise_artifact(artifact) for artifact in self.lower_declaration(declaration, block)]
 
     def declaration_module_text(self, name: str, inputs: list[str], outputs: list[str]) -> str:
         call = call_text(name, inputs)
-        target = f"{tuple_or_single(outputs)} = {call}" if outputs != ["bool"] else call
+        binding = f"{tuple_or_single(outputs)} = {call}" if outputs != ["bool"] else call
         marker = f"{DECL_OUTPUT_MARKER}({', '.join(outputs)})"
-        return "∀{\n| " + ", ".join(inputs + outputs) + "\n| " + marker + "\n| " + target + "\n}"
+        return "∀{\n| " + ", ".join(inputs + outputs) + "\n| " + marker + "\n| " + binding + "\n" + marker + "\n}"
 
     def function_body_module_text(self, name: str, inputs: list[str], outputs: list[str], block: str) -> str:
         call = call_text(name, inputs)
@@ -200,15 +218,21 @@ class ModuleCompiler:
         before_target = sections[:-1]
         syms: list[str] = []
         predicate_sections: list[str] = []
+        suppress_inferred_syms = False
         for section in before_target:
+            if section == BRANCH_MODULE_MARKER:
+                suppress_inferred_syms = True
+                continue
             candidates = parse_binder_list(section)
             if candidates:
                 syms.extend(candidates)
             else:
                 predicate_sections.append(section)
         predicate_texts = split_terms("\n".join(predicate_sections))
+        suppress_inferred_syms = suppress_inferred_syms or BRANCH_MODULE_MARKER in predicate_texts
+        predicate_texts = [text for text in predicate_texts if text != BRANCH_MODULE_MARKER]
         target_texts = split_terms(target_section)
-        if not syms:
+        if not syms and not suppress_inferred_syms:
             syms = infer_syms(predicate_texts)
         predicate_statements: list[Statement] = []
         target_statements: list[Statement] = []
@@ -235,6 +259,7 @@ class ModuleCompiler:
             predicate_statements=predicate_statements,
             target_statements=target_statements,
             declaration_syms=dedupe([sym for sym in declaration_syms if sym in syms]),
+            suppress_inferred_syms=suppress_inferred_syms,
         )
 
     def parse_image_set(self, body: str) -> Module:
@@ -631,9 +656,26 @@ def parse_binder_list(section: str) -> list[str] | None:
 
 
 def is_plain_sym(text: str) -> bool:
-    if re.fullmatch(r"[^\W\d]\w*'?", text, flags=re.UNICODE) is not None:
+    if text in SPECIAL_IDENTIFIER_SYMS:
         return True
-    return len(text) == 1 and not text.isspace() and not text.isdigit() and text not in {"(", ")", "[", "]", "{", "}", ",", '"', "'"}
+    if is_generated_sym_name(text):
+        return True
+    if "^" in text:
+        return False
+    if re.fullmatch(r"[^\W\d]\w*'*", text, flags=re.UNICODE) is not None:
+        return True
+    return len(text) == 1 and not text.isspace() and not text.isdigit() and text not in {"(", ")", "[", "]", "{", "}", ",", '"', "'", "^"}
+
+
+def is_generated_sym_name(text: str) -> bool:
+    if not text.startswith(GENERATED_SYM_PREFIX) or text == GENERATED_SYM_PREFIX:
+        return False
+    base = text[len(GENERATED_SYM_PREFIX) :]
+    if base.startswith(GENERATED_SYM_PREFIX) or GENERATED_SYM_PREFIX in base:
+        return False
+    if re.fullmatch(r"[^\W\d]\w*'*", base, flags=re.UNICODE) is not None:
+        return True
+    return False
 
 
 def infer_syms(predicate_texts: list[str]) -> list[str]:
@@ -688,8 +730,8 @@ def erase_coloncolon_statement_head(text: str) -> str:
         reject_unsupported_coloncolon(stripped)
         return stripped
 
-    if is_coloncolon_name(stripped):
-        return erase_coloncolon_name(stripped)
+    if is_bare_coloncolon_field_shorthand(stripped):
+        return coloncolon_field_marker(stripped)
     reject_unsupported_coloncolon(stripped)
     return stripped
 
@@ -706,6 +748,47 @@ def erase_coloncolon_name(name: str) -> str:
     if not suffix:
         raise CompileError("unsupported '::' usage; missing declaration name after '::'")
     return suffix
+
+
+def coloncolon_field_declaration(name: str) -> str:
+    if not is_coloncolon_name(name):
+        raise CompileError("unsupported '::' usage; '::' is only supported in declaration heads")
+    class_name, field_name = (part.strip() for part in name.split("::", 1))
+    param_name = lower_head(class_name)
+    return f"{field_name}: {param_name} => {field_name}'"
+
+
+def coloncolon_field_marker(name: str) -> str:
+    if not is_bare_coloncolon_field_shorthand(name):
+        raise CompileError("unsupported '::' usage; bare class-field shorthand requires ordinary symbol names")
+    class_name, field_name = (part.strip() for part in name.split("::", 1))
+    return f"{CLASS_FIELD_MARKER}({class_name}, {field_name})"
+
+
+def lower_head(name: str) -> str:
+    return name[:1].lower() + name[1:]
+
+
+def is_bare_coloncolon_field_shorthand(name: str) -> bool:
+    if name.count("::") != 1:
+        return False
+    prefix, suffix = (part.strip() for part in name.split("::", 1))
+    return bool(prefix and suffix and is_plain_sym(prefix) and is_plain_sym(suffix))
+
+
+def is_class_field_marker(text: str) -> bool:
+    return parse_class_field_marker(text) is not None
+
+
+def parse_class_field_marker(text: str) -> tuple[str, str] | None:
+    stripped = text.strip()
+    if not stripped.startswith(CLASS_FIELD_MARKER + "(") or not stripped.endswith(")"):
+        return None
+    inner = stripped[len(CLASS_FIELD_MARKER) + 1 : -1]
+    terms = parse_signature_terms(inner)
+    if len(terms) != 2 or not all(is_plain_sym(term) for term in terms):
+        return None
+    return terms[0], terms[1]
 
 
 def is_coloncolon_name(name: str) -> bool:
@@ -737,7 +820,9 @@ def parse_declaration(text: str) -> tuple[str, list[str], list[str], str] | None
         return None
     name = text[:colon_index].strip()
     rest = text[colon_index + 1 :].strip()
-    match = re.match(r"^(?P<inputs>.+?)\s*(?P<arrow>=>|->)\s*(?P<outputs>.+)$", rest)
+    if re.match(r"^.+?\s*->\s*.+$", rest):
+        raise CompileError("function-assign '->' is not supported; use '=>' with an indented function body")
+    match = re.match(r"^(?P<inputs>.+?)\s*(?P<arrow>=>)\s*(?P<outputs>.+)$", rest)
     if not name or not match:
         return None
     if "::" in name:
@@ -748,6 +833,22 @@ def parse_declaration(text: str) -> tuple[str, list[str], list[str], str] | None
         parse_signature_terms(match.group("outputs")),
         match.group("arrow"),
     )
+
+
+def parse_premise_declaration(text: str) -> tuple[str, list[str], list[str], str] | None:
+    stripped = text.strip()
+    if not stripped.startswith("|") or stripped.startswith("|-"):
+        return None
+    return parse_declaration(stripped[1:].strip())
+
+
+def declaration_kind_fact(name: str, outputs: list[str]) -> str:
+    classifier = "Predicate" if outputs == ["bool"] else "Function"
+    return f"{classifier} ~ {name}"
+
+
+def premise_artifact(text: str) -> str:
+    return "| " + text
 
 
 def declaration_colon_index(text: str) -> int | None:
@@ -821,7 +922,8 @@ def call_text(name: str, inputs: list[str]) -> str:
 
 
 def lower_member_calls(text: str) -> str:
-    pattern = re.compile(r"\b(?P<recv>[A-Za-z_][A-Za-z0-9_']*)\.(?P<name>[A-Za-z_][A-Za-z0-9_']*)(?:\((?P<args>[^()]*)\))?")
+    text = lower_compound_member_calls(text)
+    pattern = re.compile(r"(?<![\w'^])(?P<recv>\^?[A-Za-z_][A-Za-z0-9_']*)\.(?P<name>[A-Za-z_][A-Za-z0-9_']*)(?:\((?P<args>[^()]*)\))?")
 
     def replace(match: re.Match[str]) -> str:
         receiver = match.group("recv")
@@ -840,3 +942,106 @@ def lower_member_calls(text: str) -> str:
         previous = current
         current = pattern.sub(replace, current)
     return current
+
+
+def lower_compound_member_calls(text: str) -> str:
+    previous = None
+    current = text
+    while previous != current:
+        previous = current
+        current = lower_one_compound_member_call(current)
+    return current
+
+
+def lower_one_compound_member_call(text: str) -> str:
+    index = 0
+    while index < len(text):
+        if text[index] != ".":
+            index += 1
+            continue
+        name_start = index + 1
+        name_end = scan_identifier(text, name_start)
+        if name_end is None:
+            index += 1
+            continue
+        args_start = name_end
+        args = None
+        args_end = name_end
+        if args_start < len(text) and text[args_start] == "(":
+            close = find_matching(text, args_start, "(", ")")
+            args = text[args_start + 1 : close].strip()
+            args_end = close + 1
+        recv_start = compound_member_receiver_start(text, index)
+        if recv_start is None:
+            index += 1
+            continue
+        receiver = text[recv_start:index].strip()
+        if is_simple_member_receiver(receiver):
+            index += 1
+            continue
+        name = text[name_start:name_end]
+        if args is None or not args:
+            replacement = f"{name}({receiver})"
+        else:
+            replacement = f"{name}({receiver}, {args})"
+        return text[:recv_start] + replacement + text[args_end:]
+    return text
+
+
+def compound_member_receiver_start(text: str, dot_index: int) -> int | None:
+    end = dot_index
+    while end > 0 and text[end - 1].isspace():
+        end -= 1
+    if end <= 0:
+        return None
+    close_char = text[end - 1]
+    pairs = {")": "(", "]": "[", "}": "{"}
+    if close_char in pairs:
+        start = find_matching_open(text, end - 1, pairs[close_char], close_char)
+        if start is None:
+            return None
+        prefix_start = start - 1
+        while prefix_start >= 0 and is_member_receiver_char(text[prefix_start]):
+            prefix_start -= 1
+        return prefix_start + 1
+    start = end - 1
+    while start >= 0 and is_member_receiver_char(text[start]):
+        start -= 1
+    return start + 1
+
+
+def find_matching_open(text: str, close_index: int, open_char: str, close_char: str) -> int | None:
+    depth = 0
+    index = close_index
+    while index >= 0:
+        char = text[index]
+        if is_literal_quote_start(text, index):
+            quote_start = literal_quote_index(text[: index + 1])
+            if quote_start is not None:
+                index = quote_start - 1
+                continue
+        if char == close_char:
+            depth += 1
+        elif char == open_char:
+            depth -= 1
+            if depth == 0:
+                return index
+        index -= 1
+    return None
+
+
+def is_simple_member_receiver(text: str) -> bool:
+    return re.fullmatch(r"\^?[A-Za-z_][A-Za-z0-9_']*", text) is not None
+
+
+def is_member_receiver_char(char: str) -> bool:
+    return char.isalnum() or char in {"_", "'", GENERATED_SYM_PREFIX}
+
+
+def scan_identifier(text: str, start: int) -> int | None:
+    if start >= len(text) or not re.match(r"[A-Za-z_]", text[start]):
+        return None
+    index = start + 1
+    while index < len(text) and re.match(r"[A-Za-z0-9_']", text[index]):
+        index += 1
+    return index

@@ -15,13 +15,18 @@ if str(SCRIPTS_DIR) not in sys.path:
 
 from compile_pipeline.errors import CompileError
 from compile_pipeline.module_sections import (
+    BRANCH_MODULE_MARKER,
     DECL_BODY_OUTPUT_MARKER,
     DECL_OUTPUT_MARKER,
     Module,
     ModuleCompiler,
     Statement,
+    call_text,
     dedupe,
     infer_syms,
+    lower_head,
+    parse_class_field_marker,
+    GENERATED_SYM_PREFIX,
     is_plain_sym,
     lower_member_calls,
     parse_signature_terms,
@@ -150,7 +155,8 @@ class ModuleDesugarer:
         output_sym_set = set(output_syms)
         body_output_sym_set = set(body_output_syms)
         declaration_sym_set = set(module.declaration_syms)
-        original_syms = dedupe([*module.syms, *self.infer_statement_syms(predicate_statements)])
+        inferred_syms = [] if module.suppress_inferred_syms else self.infer_statement_syms(predicate_statements)
+        original_syms = dedupe([*module.syms, *inferred_syms])
         ancestor_bound_syms = set(scope.ancestor_bound_syms)
         local_bindings: list[BindingInfo] = []
         local_syms_set: set[str] = set()
@@ -164,7 +170,9 @@ class ModuleDesugarer:
         current_scope = ScopeState(ancestor_bound_syms | local_syms_set)
         local_syms = [binding.name for binding in local_bindings]
         rendered_predicates = [self.render_statement(statement, current_scope) for statement in predicate_statements]
-        rendered_targets = [self.render_statement(statement, current_scope) for statement in module.target_statements]
+        rendered_targets: list[str] = []
+        for statement in module.target_statements:
+            rendered_targets.extend(self.render_target_statement(statement, current_scope))
         target_inheritance_rhs = inheritance_rhs_names(rendered_targets)
         premise_binding_lhs = set() if body_output_sym_set else leading_premise_binding_lhs_names(rendered_predicates)
         target_binding_names = output_sym_set | declaration_sym_set
@@ -183,7 +191,13 @@ class ModuleDesugarer:
         predicates.extend(rendered_predicates)
         predicates.extend(self.local_wrapper_predicates(rendered_predicates + targets))
         predicates = dedupe_statements([predicate for predicate in predicates if predicate])
+        if module.suppress_inferred_syms:
+            predicates = [BRANCH_MODULE_MARKER, *predicates]
         targets = [target for target in targets if target]
+        if output_sym_set and len(output_syms) > 1 and not targets:
+            targets.append(f"{DECL_OUTPUT_MARKER}({', '.join(output_syms)})")
+        if output_sym_set and len(output_syms) == 1 and not targets:
+            return ""
 
         opener = module.quantifier + "{" if module.type == "quantifier" else "{"
         return self.format_module(opener, local_syms, predicates, targets, indent)
@@ -204,6 +218,7 @@ class ModuleDesugarer:
                 declaration_output_syms.extend(parsed)
             else:
                 body_output_syms.extend(parsed)
+                remaining.append(statement)
         return dedupe(declaration_output_syms), dedupe(body_output_syms), remaining
 
     def function_output_marker_name(self, text: str) -> str | None:
@@ -221,6 +236,35 @@ class ModuleDesugarer:
             rendered = self.render_module(submodule, scope, indent=0)
             text = text.replace(f"$module{index}", rendered)
         return text
+
+    def render_target_statement(self, statement: Statement, scope: ScopeState) -> list[str]:
+        if not statement.sub_modules and self.function_output_marker_name(statement.text.strip()) is not None:
+            return []
+        parsed = parse_class_field_marker(statement.text)
+        if not statement.sub_modules and parsed is not None:
+            return self.render_class_field_shorthand(parsed, scope)
+        return [self.render_statement(statement, scope)]
+
+    def render_class_field_shorthand(self, parsed: tuple[str, str], scope: ScopeState) -> list[str]:
+        class_name, field_name = parsed
+        param_name = lower_head(class_name)
+        output_name = self.class_field_output_name(field_name, {param_name, *scope.ancestor_bound_syms})
+        call = f"{output_name} = {call_text(field_name, [param_name])}"
+        premise_bindings = [BindingInfo(param_name)]
+        output_bindings = [BindingInfo(output_name)]
+        predicates = [
+            *self.implicit_predicates(premise_bindings, scope.ancestor_bound_syms, []),
+            call,
+        ]
+        targets = self.implicit_predicates(output_bindings, scope.ancestor_bound_syms, [])
+        declaration_module = self.format_module("∀{", [param_name, output_name], predicates, targets, indent=0)
+        return [render_infix("Function", "~", field_name), declaration_module]
+
+    def class_field_output_name(self, field_name: str, unavailable: set[str]) -> str:
+        candidate = field_name + "'"
+        while candidate in unavailable:
+            candidate += "'"
+        return candidate
 
     def rewrite_statement_text(self, statement: Statement, scope: ScopeState) -> str:
         return normalize_legacy_wrapper_statement(lower_member_calls(statement.text))
@@ -337,14 +381,26 @@ def is_numeric_literal_text(text: str) -> bool:
 
 def is_tuple_literal_text(text: str) -> bool:
     text = text.strip()
-    if len(text) < 2 or not text.startswith("(") or not text.endswith(")"):
+    if len(text) < 2:
+        return False
+    if text.startswith("("):
+        close = ")"
+    elif text.startswith("["):
+        close = "]"
+    else:
+        return False
+    if not text.endswith(close):
         return False
     try:
-        if matching_close(text, 0, "(", ")") != len(text) - 1:
+        if matching_close(text, 0, text[0], close) != len(text) - 1:
             return False
     except DesugarError:
         return False
     inner = text[1:-1]
+    if text[0] == "[" and ":" in inner:
+        return False
+    if text == "[,]":
+        return True
     terms = parse_signature_terms(inner)
     return len(terms) > 1 and "," in inner
 
@@ -359,7 +415,7 @@ def is_set_literal_text(text: str) -> bool:
     except DesugarError:
         return False
     inner = text[1:-1].strip()
-    if not inner or "|" in inner or "=>" in inner:
+    if "|" in inner or "=>" in inner:
         return False
     return True
 
@@ -381,7 +437,7 @@ def replace_symbols(text: str, replacements: dict[str, str]) -> str:
             output.append(char)
             index += 1
             continue
-        match = re.match(r"[^\W\d]\w*'?", text[index:], flags=re.UNICODE)
+        match = re.match(r"[^\W\d]\w*'*", text[index:], flags=re.UNICODE)
         if match is None:
             output.append(char)
             index += 1
@@ -492,7 +548,7 @@ def render_infix(lhs: str, operator: str, rhs: str) -> str:
 
 
 def is_generated_sym(sym: str) -> bool:
-    return sym.startswith("__")
+    return sym.startswith(GENERATED_SYM_PREFIX)
 
 
 def main() -> int:

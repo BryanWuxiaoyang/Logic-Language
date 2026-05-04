@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import importlib
+import json
 import tempfile
 import subprocess
 import sys
@@ -12,6 +13,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import compile_module as compile_module_script
+import module_check
 from compile_module import CompileError, run_compile_pipeline
 from compile_pipeline.stage1_normalize_source import run as run_stage1
 from compile_pipeline.stage2_desugar_module_text import run as run_stage2
@@ -19,6 +21,7 @@ from semantic_check import collect_semantic_diagnostics_from_text
 from translate_AST_to_source import translate_ast_to_source
 
 SKILL_DIR = Path(__file__).resolve().parents[2]
+SCRIPTS_DIR = SKILL_DIR / "scripts"
 
 
 def compile_text(text: str, *, base_dir: Path | str = ".", source: str = "__stdin__", allow_imports: bool = False) -> dict:
@@ -82,13 +85,13 @@ def test_binding_call() -> None:
 def test_target_call_assignment_normalized() -> None:
     ast = compile_text("∀{| x, y | y = f(x)}")
     assert not target_bindings(ast)
-    assert any(binding["dst_sym"]["name"].startswith("__tmpf") for binding in ast["premise_binding_stmts"])
+    assert any(binding["dst_sym"]["name"].startswith("^tmpf") for binding in ast["premise_binding_stmts"])
     assert top_level_calls(ast, "=", "target_PSs")
 
 
 def test_nested_call_anf() -> None:
     ast = compile_text("∀{| x | P(f(x))}")
-    assert any(sym["name"].startswith("__tmpf") for sym in ast["bound_syms"])
+    assert any(sym["name"].startswith("^tmpf") for sym in ast["bound_syms"])
     assert any(binding.get("generated") for binding in ast["premise_binding_stmts"])
 
 
@@ -107,9 +110,16 @@ def test_literals() -> None:
         ("∀{| x | x = 1}", "value_literal_stmt"),
         ("∀{| x, a, b | x = (a, b)}", "tuple_literal_stmt"),
         ("∀{| x, a, b | x = {a, b}}", "set_literal_stmt"),
+        ("∀{| x | x = {}}", "set_literal_stmt"),
+        ("∀{| x | x = [,]}", "tuple_literal_stmt"),
     ]:
         ast = compile_text(text)
         assert any(node.get("kind") == kind for node in all_nodes(ast)), (text, kind)
+    assert any(node.get("kind") == "tuple_literal_stmt" and node.get("item_stmts") == [] for node in all_nodes(compile_text("x = [,]")))
+    assert any(node.get("kind") == "set_literal_stmt" and node.get("item_stmts") == [] for node in all_nodes(compile_text("x = {}")))
+    assert any(node.get("kind") == "sym" and node.get("name") == "[]" for node in all_nodes(compile_text("x = []")))
+    for text in ["P({})", "P({1, 2})", "P([,])"]:
+        compile_text(text)
 
 
 def test_implicit_literal_classifier_predicates() -> None:
@@ -163,6 +173,38 @@ def test_missing_infix_support_round_trip() -> None:
         assert calls(reparsed, call_name), (text, source)
 
 
+def test_nested_equality_expressions() -> None:
+    member_source = translate_ast_to_source(compile_text("∀{| bool, eq_stmt, sym1 | bool = eq_stmt.dst_sym = sym1}"))
+    assert "^tmpdst_sym0 = dst_sym(^eq_stmt)" in member_source
+    assert "^tmpeq1 = ^tmpdst_sym0 = ^sym1" in member_source
+    assert "^bool = ^tmpeq1" in member_source
+
+    grouped_ast = compile_text("∀{| bool, a, b, c, d | bool = (a = b) && (c = d)}")
+    grouped_source = translate_ast_to_source(grouped_ast)
+    assert "^tmpa_b0 = ^a = ^b" in grouped_source
+    assert "^tmpc_d1 = ^c = ^d" in grouped_source
+    assert top_level_calls(grouped_ast, "=", "target_PSs")
+
+    precedence_source = translate_ast_to_source(compile_text("∀{| bool, a, b, c, d | bool = a = b && c = d}"))
+    assert "^tmpeq0 = ^a = ^b" in precedence_source
+    assert "^tmpeq1 = ^c = ^d" in precedence_source
+    assert "^tmpand2 = ^tmpeq0 && ^tmpeq1" in precedence_source
+
+
+def test_lifted_resolver_equality_expression_compiles() -> None:
+    text = """Stmt::has_direct_sym_alias: (stmt, sym1, sym2) => bool
+    bool = ∃{
+        | eq_stmt
+        | eq_stmt ∈ stmt.all_stmts
+        | Eq_stmt ~ eq_stmt
+        (eq_stmt.dst_sym = sym1 && eq_stmt.src_sym = sym2) || (eq_stmt.src_sym = sym1 && eq_stmt.dst_sym = sym2)
+    }"""
+    ast = compile_text(text)
+    assert calls(ast, "=")
+    assert calls(ast, "&&")
+    assert calls(ast, "||")
+
+
 def test_operator_head_declaration_round_trip() -> None:
     text = "+: (list, list1) => list2\n        list2 = list"
     ast = compile_text(text)
@@ -172,33 +214,102 @@ def test_operator_head_declaration_round_trip() -> None:
     assert calls(reparsed, "+")
 
 
+def test_slice_operator_identifier_sym_compiles_everywhere() -> None:
+    ast = compile_text("∀{| [:] | [:] = [:]}")
+    assert [sym["name"] for sym in ast["bound_syms"] if not sym.get("generated")] == ["[:]"]
+    assert calls(ast, "=")
+    assert compile_text("Function ~ [:]")
+    ast = compile_text("∀{| [] | [] = x}")
+    assert [sym["name"] for sym in ast["bound_syms"] if not sym.get("generated")] == ["[]"]
+    assert compile_text("Function ~ []")
+
+
+def test_slice_operator_declaration_and_call_compile() -> None:
+    ast = compile_text("[:]: (val1, val2) => list\n    list = [:](val1, val2)")
+    assert calls(ast, "[:]")
+    assert any(
+        stmt["call_sym"]["name"] == "~" and stmt["arg_sym_list"][1]["name"] == "[:]"
+        for stmt in ast["target_PSs"]
+    )
+
+
+def test_range_and_slice_surface_forms_lower_to_slice_operator() -> None:
+    ast = compile_text("x = [1: n]\ny = list[1: list.size]")
+    slice_calls = calls(ast, "[:]")
+    assert len(slice_calls) == 2
+    assert any(len(call["arg_sym_list"]) == 2 for call in slice_calls)
+    assert any(len(call["arg_sym_list"]) == 3 for call in slice_calls)
+
+
+def test_compound_slice_member_call_lowers_to_ordinary_call() -> None:
+    ast = compile_text("z = list[1: list.size].sum(merge_f)")
+    assert calls(ast, "[:]")
+    assert calls(ast, "sum")
+    assert not calls(ast, "listsum")
+
+
 def test_class_coloncolon_top_level_function_declaration() -> None:
     source = translate_ast_to_source(compile_text("Val\nClass::func: (val1, val2) => (val3, val4)"))
     assert "Class::func" not in source
     assert "Function ~ func" in source
-    assert "func(val1, val2)" in source
-    assert "| Val ~ val1" in source
-    assert "| Val ~ val2" in source
-    assert "\n    Tuple ~ __tmpfunc0\n" in source
-    assert "\n    | Tuple ~ __tmpfunc0\n" not in source
-    assert "\n    Val ~ val3\n" in source
-    assert "\n    Val ~ val4\n" in source
+    assert "func(^val1, ^val2)" in source
+    assert "| ^Val ~ ^val1" in source
+    assert "| ^Val ~ ^val2" in source
+    assert "\n    Tuple ~ ^tmpfunc0\n" in source
+    assert "\n    | Tuple ~ ^tmpfunc0\n" not in source
+    assert "\n    ^Val ~ ^val3\n" in source
+    assert "\n    ^Val ~ ^val4\n" in source
 
 
 def test_class_block_expands_to_current_scope() -> None:
     source = translate_ast_to_source(compile_text("Class\n    ::field\n    ::func: (val1, val2) => (val3, val4)"))
     assert "Class::" not in source
-    assert "\n  | Class, field\n" in source
+    assert "\n  | ^Class\n" in source
+    assert "Function ~ field" in source
+    assert "field(^class)" in source
+    assert "| ^Class ~ ^class" in source
+    assert "Symbol ~ ^field'" in source
     assert "Function ~ func" in source
-    assert "func(val1, val2)" in source
+    assert "func(^val1, ^val2)" in source
+
+
+def test_class_field_shorthand_compiles() -> None:
+    source = translate_ast_to_source(compile_text("Class::field"))
+    assert "Class::field" not in source
+    assert "Function ~ field" in source
+    assert "field(^class)" in source
+    assert "Symbol ~ ^class" in source
+    assert "Symbol ~ ^field'" in source
+    assert "^field' = field(^class)" in source
+
+
+def test_class_field_shorthand_uses_collision_safe_prime_output() -> None:
+    source = translate_ast_to_source(compile_text("field'\nClass::field"))
+    assert "\n  | ^field'\n" in source
+    assert "| ^class, ^field''" in source
+    assert "Symbol ~ ^field''" in source
+    assert "^field'' = field(^class)" in source
+
+    source = translate_ast_to_source(compile_text("field'\nfield''\nClass::field"))
+    assert "| ^class, ^field'''" in source
+    assert "Symbol ~ ^field'''" in source
+    assert "^field''' = field(^class)" in source
+
+
+def test_prime_suffix_names_compile_and_infer_from_base() -> None:
+    source = translate_ast_to_source(compile_text("List\n∀{| list', x'', y | y = list'}"))
+    assert "\n    | ^list', ^x'', ^y\n" in source
+    assert "| ^List ~ ^list'" in source
+    assert "invalid_bound_sym_name" not in source
+    assert "^y = ^list'" in source
 
 
 def test_class_method_body_is_preserved() -> None:
     source = translate_ast_to_source(compile_text("Class\n    ::func: x => y\n        y = x"))
     assert "Class::func" not in source
     assert "Function ~ func" in source
-    assert "\n    | y = func(x)\n" in source
-    assert "\n    y = x\n" in source
+    assert "\n    | ^y = func(^x)\n" in source
+    assert "\n    ^y = ^x\n" in source
 
 
 def test_function_declaration_and_body_are_separate_rules() -> None:
@@ -207,6 +318,7 @@ def test_function_declaration_and_body_are_separate_rules() -> None:
     assert desugared.count("∀{") == 3
     assert desugared.count("Val ~ val3") == 1
     assert desugared.count("Val ~ val4") == 1
+    assert "| (val3, val4) = func(val1, val2)" in desugared
     assert "| val1 = val2" in desugared
     assert "P(val3)" in desugared
 
@@ -218,34 +330,35 @@ def test_function_declaration_and_body_are_separate_rules() -> None:
 def test_repeated_function_bodies_are_conditional_facts() -> None:
     text = "F: input => output\n    | input = 1\n    P(output)\n\nF: input => output\n    | input = 2\n    Q(output)"
     source = translate_ast_to_source(compile_text(text, base_dir=SKILL_DIR))
-    assert source.count("| input = 1") == 1
-    assert source.count("| input = 2") == 1
-    assert source.count("P(output)") == 1
-    assert source.count("Q(output)") == 1
-    assert source.count("Symbol ~ output") == 2
+    assert source.count("| ^input = 1") == 1
+    assert source.count("| ^input = 2") == 1
+    assert source.count("P(^output)") == 1
+    assert source.count("Q(^output)") == 1
+    assert source.count("Symbol ~ ^output") == 2
 
 
-def test_function_arrow_shorthand_splits_into_declaration_and_body() -> None:
-    source = translate_ast_to_source(compile_text("f: x -> g(x)", base_dir=SKILL_DIR))
-    assert "Function ~ f" in source
-    assert "__logic_language_out0 = __tmpf0" in source
-    assert "| __logic_language_out0 = f(x)" in source
-    assert "__logic_language_out0 = __tmpg1" in source
+def test_function_arrow_shorthand_is_invalid() -> None:
+    try:
+        compile_text("f: x -> g(x)", base_dir=SKILL_DIR)
+    except CompileError as error:
+        assert "function-assign '->' is not supported" in str(error)
+        return
+    raise AssertionError("expected function-assign shorthand to fail")
 
 
 def test_inline_inheritance_class_body() -> None:
     source = translate_ast_to_source(compile_text("A ~ B\n    ::func: b => out"))
-    assert "\n  | B\n" in source
-    assert "\n  | A ~ B\n" in source
+    assert "\n  | ^B\n" in source
+    assert "\n  | A ~ ^B\n" in source
     assert "Function ~ func" in source
-    assert "\n    | B ~ b\n" in source
+    assert "\n    | ^B ~ ^b\n" in source
 
 
 def test_class_operator_suffix_declaration() -> None:
     source = translate_ast_to_source(compile_text("List::[]: (list, id) => sym"))
     assert "List::[]" not in source
     assert "Function ~ []" in source
-    assert "list[id]" in source
+    assert "^list[^id]" in source
 
 
 def test_invalid_class_body_lines_fail() -> None:
@@ -253,6 +366,8 @@ def test_invalid_class_body_lines_fail() -> None:
         "Class\n    P(class)",
         "Class\n    : (class, x) => y",
         "Class::field = value",
+        "Class::field\n    P(field)",
+        "Class\n    ::field\n        P(field)",
     ]
     for text in cases:
         try:
@@ -260,6 +375,13 @@ def test_invalid_class_body_lines_fail() -> None:
         except CompileError:
             continue
         raise AssertionError(f"expected invalid class-declaration source to fail: {text!r}")
+
+
+def test_explicit_class_field_declaration_may_have_body() -> None:
+    source = translate_ast_to_source(compile_text("Class::field: class => field'\n    P(field')"))
+    assert "Class::field" not in source
+    assert "Function ~ field" in source
+    assert "\n    P(^field')\n" in source
 
 
 def test_wrapper_predicates_lower_through_anf() -> None:
@@ -336,24 +458,29 @@ def test_stage2_does_not_inject_implicit_stdlib_import() -> None:
 
 def test_standard_library_supplies_universal_inheritance_axioms() -> None:
     stdlib = (SKILL_DIR / "standard_library.lp").read_text(encoding="utf-8")
-    assert "__sym ~ __sym" in stdlib
-    assert "Symbol ~ __sym" in stdlib
+    assert "^sym ~ ^sym" in stdlib
+    assert "Symbol ~ ^sym" in stdlib
 
 
 def test_stage2_generated_sym_does_not_re_desugar() -> None:
-    source = "$import standard_library.lp\n∀{\n    | __list\n    | list ~ __list\n    | __list ~ __list\n    __list = __list\n}\n"
+    source = "$import standard_library.lp\n∀{\n    | ^list\n    | list ~ ^list\n    | ^list ~ ^list\n    ^list = ^list\n}\n"
     desugared = run_stage2(source, SKILL_DIR).text
     assert desugared.startswith("$import standard_library.lp\n")
-    assert "| Symbol ~ __list" not in desugared
-    assert desugared.count("| list ~ __list") == 1
-    assert desugared.count("| __list ~ __list") == 1
+    assert "| Symbol ~ ^list" not in desugared
+    assert desugared.count("| list ~ ^list") == 1
+    assert desugared.count("| ^list ~ ^list") == 1
 
 
 def test_stage2_authored_generated_sym_gets_no_implicit_facts() -> None:
+    desugared = run_stage2("∀{| ^x | ^x = ^x}", ".").text
+    assert "| ^x" in desugared
+    assert "| Symbol ~ ^x" not in desugared
+    assert "| ^x ~ ^x" not in desugared
+
+
+def test_double_underscore_sym_is_ordinary() -> None:
     desugared = run_stage2("∀{| __x | __x = __x}", ".").text
-    assert "| __x" in desugared
-    assert "| Symbol ~ __x" not in desugared
-    assert "| __x ~ __x" not in desugared
+    assert "| Symbol ~ __x" in desugared
 
 
 def test_stage2_synthesized_infixes_are_spaced() -> None:
@@ -416,6 +543,78 @@ def test_multiline_bar_semantics() -> None:
     assert top_level_calls(ast, "=", "target_PSs")
 
 
+def test_branch_header_lowers_to_parent_premise_module() -> None:
+    source = "| x\n|- P(x)\n    y = x\nz = z"
+    desugared = run_stage2(source, ".").text
+    assert "| - P(x)" not in desugared
+    ast = compile_text(source)
+    branch_modules = [node for node in ast["premise_PSs"] if node.get("kind") == "quantified_stmt"]
+    assert len(branch_modules) == 1
+    branch = branch_modules[0]
+    assert not branch["bound_syms"]
+    assert top_level_calls(branch, "P", "premise_PSs")
+    assert top_level_calls(branch, "=", "target_PSs")
+    assert top_level_calls(ast, "=", "target_PSs")
+    assert not any(node.get("name") == "__compiler_branch_module" for node in all_nodes(ast))
+
+
+def test_sibling_branches_are_parent_premises() -> None:
+    ast = compile_text("| x\n|- P(x)\n    y = x\n|- Q(x)\n    y = x\nz = z")
+    branch_modules = [node for node in ast["premise_PSs"] if node.get("kind") == "quantified_stmt"]
+    assert len(branch_modules) == 2
+    assert top_level_calls(branch_modules[0], "P", "premise_PSs")
+    assert top_level_calls(branch_modules[1], "Q", "premise_PSs")
+    assert top_level_calls(ast, "=", "target_PSs")
+
+
+def test_branch_requires_indented_block() -> None:
+    payload = module_check.check_module("| x\n|- P(x)\nz = z", module_check.STDIN_FILE, Path("."), is_file=False)
+    assert payload["summary"]["error_count"] == 1
+    entry = payload["entries"][0]
+    assert entry["stage"] == "syntax"
+    assert entry["code"] == "syntax_error"
+    assert entry["reason"] == "branch header requires an indented block"
+
+
+def test_branch_allows_function_output_in_nested_target() -> None:
+    payload = module_check.check_module("F: x => y\n    |- P(x)\n        y = 1", module_check.STDIN_FILE, Path("."), is_file=False)
+    assert payload["summary"]["error_count"] == 0
+    assert not any(entry["code"] == "function_output_in_premise" for entry in payload["entries"])
+
+
+def test_target_nested_declaration_expands_in_function_body() -> None:
+    source = translate_ast_to_source(compile_text("F: x => y\n  G: a => b\n    P(b)\n  y = G(x)", base_dir=SKILL_DIR))
+    assert "\n    Function ~ G\n" in source
+    assert "\n      | ^b = G(^a)\n" in source
+    assert "\n      P(^b)\n" in source
+    assert "unsupported expression: |" not in source
+
+
+def test_premise_nested_declaration_expands_in_function_body() -> None:
+    source = translate_ast_to_source(compile_text("F: func => y\n  | func: a => b\n    P(b)\n  P(func)", base_dir=SKILL_DIR))
+    assert "\n    | Function ~ ^func\n" in source
+    assert "\n    | ∀{\n" in source
+    assert "\n      | ^b = ^func(^a)\n" in source
+    assert "\n      P(^b)\n" in source
+    assert "Function ~ | func" not in source
+
+
+def test_no_body_premise_declaration_expands_signature() -> None:
+    source = translate_ast_to_source(compile_text("F: x => y\n  | f: a => b\n  y = x", base_dir=SKILL_DIR))
+    assert "\n    | Function ~ ^f\n" in source
+    assert "\n      | ^b = ^f(^a)\n" in source
+
+
+def test_bool_declarations_emit_predicate_fact() -> None:
+    source = translate_ast_to_source(compile_text("P: x => bool\n  P(x)", base_dir=SKILL_DIR))
+    assert "\n  Predicate ~ P\n" in source
+    assert "\n  Function ~ P\n" not in source
+
+    premise_source = translate_ast_to_source(compile_text("F: x => y\n  | P: a => bool\n  y = x", base_dir=SKILL_DIR))
+    assert "\n    | Predicate ~ ^P\n" in premise_source
+    assert "\n    | Function ~ ^P\n" not in premise_source
+
+
 def test_duplicate_binders_deduplicate() -> None:
     ast = compile_text("∀{| x, x | x = x}")
     assert [sym["name"] for sym in ast["bound_syms"] if not sym.get("generated")] == ["x"]
@@ -444,19 +643,36 @@ def test_semantic_warning_for_multiple_inheritance_candidates() -> None:
     )
 
 
-def test_semantic_allows_function_output_in_body_premise() -> None:
+def test_semantic_warning_for_bare_index_operator_symbol() -> None:
+    for text in ["sym = []", "P([])", "∀{| [] | [] = x}"]:
+        diagnostics = collect_semantic_diagnostics_from_text(text)
+        assert any(entry["code"] == "bare_index_operator_symbol" and entry["type"] == "warning" for entry in diagnostics), text
+
+
+def test_semantic_bare_index_operator_symbol_exempts_definitions() -> None:
+    for text in [
+        "List::[]: (list, id) => sym",
+        "[]: (list, id) => sym",
+        "Function ~ []",
+        "x = [](list, id)",
+    ]:
+        diagnostics = collect_semantic_diagnostics_from_text(text)
+        assert not any(entry["code"] == "bare_index_operator_symbol" for entry in diagnostics), text
+
+
+def test_semantic_flags_function_output_in_body_premise() -> None:
     diagnostics = collect_semantic_diagnostics_from_text("F: x => y\n    | P(y)\n    y = y")
-    assert not any(entry["code"] == "function_output_in_premise" for entry in diagnostics)
+    assert any(entry["code"] == "function_output_in_premise" for entry in diagnostics)
 
 
-def test_semantic_allows_nested_function_output_in_body_premise() -> None:
+def test_semantic_flags_nested_function_output_in_body_premise() -> None:
     diagnostics = collect_semantic_diagnostics_from_text("F: x => y\n    | P(G(y))\n    y = y")
-    assert not any(entry["code"] == "function_output_in_premise" for entry in diagnostics)
+    assert any(entry["code"] == "function_output_in_premise" for entry in diagnostics)
 
 
-def test_semantic_allows_predicate_output_in_body_premise() -> None:
+def test_semantic_flags_predicate_output_in_body_premise() -> None:
     diagnostics = collect_semantic_diagnostics_from_text("P: x => bool\n    | Q(bool)\n    P(x)")
-    assert not any(entry["code"] == "function_output_in_premise" for entry in diagnostics)
+    assert any(entry["code"] == "function_output_in_premise" for entry in diagnostics)
 
 
 def test_semantic_allows_function_output_in_target_and_generated_binding() -> None:
@@ -464,12 +680,25 @@ def test_semantic_allows_function_output_in_target_and_generated_binding() -> No
     assert not any(entry["code"] == "function_output_in_premise" for entry in diagnostics)
 
 
+def test_semantic_nested_premise_declaration_output_rule() -> None:
+    ok = collect_semantic_diagnostics_from_text("F: x => y\n    | G: a => b\n        Q(b)\n    y = x")
+    assert not any(entry["code"] == "function_output_in_premise" for entry in ok)
+
+    failing = collect_semantic_diagnostics_from_text("F: x => y\n    | G: a => b\n        | P(b)\n        Q(b)\n    y = x")
+    assert any(entry["code"] == "function_output_in_premise" for entry in failing)
+
+
 def test_sibling_submodules_can_reuse_name() -> None:
     source = translate_ast_to_source(compile_text("∀{\n∀{| x | x = x}\n∀{| x | x = x}\n}"))
-    assert source.count("\n    | x\n") == 2
+    assert source.count("\n    | ^x\n") == 2
 
 
-def test_authored_generated_sym_is_accepted() -> None:
+def test_authored_caret_generated_sym_is_accepted() -> None:
+    ast = compile_text("∀{| ^x | ^x = ^x}")
+    assert [sym["name"] for sym in ast["bound_syms"] if sym.get("generated")] == ["^x"]
+
+
+def test_double_underscore_sym_is_not_generated() -> None:
     ast = compile_text("∀{| __x | __x = __x}")
     assert [sym["name"] for sym in ast["bound_syms"] if not sym.get("generated")] == ["__x"]
 
@@ -481,15 +710,15 @@ def test_translate_omits_empty_binder_bar() -> None:
     assert "|" not in [line.strip() for line in lines]
     assert any(line.strip() == "Val ~ min_val" for line in lines)
     assert not any(line.strip() == "| Val ~ min_val" for line in lines)
-    assert any(line.strip() == "| val1" for line in lines)
-    assert any(line.strip() == "| Symbol ~ val1" for line in lines)
-    assert any(line.strip() == "val1 ≥ min_val" for line in lines)
+    assert any(line.strip() == "| ^val1" for line in lines)
+    assert any(line.strip() == "| Symbol ~ ^val1" for line in lines)
+    assert any(line.strip() == "^val1 ≥ min_val" for line in lines)
 
 
 def test_translate_keeps_binder_line_when_present() -> None:
     ast = compile_text("∀{| x | x = x}")
     source = translate_ast_to_source(ast)
-    assert "\n  | x" in source
+    assert "\n  | ^x" in source
 
 
 def test_nested_module_disassembly_is_indented() -> None:
@@ -497,8 +726,8 @@ def test_nested_module_disassembly_is_indented() -> None:
     source = translate_ast_to_source(ast)
     assert "\n  Function ~ -\n" in source
     assert "\n  ∀{\n" in source
-    assert "\n    | list, list1, list2" in source
-    assert "\n    | list2 = list - list1\n" in source
+    assert "\n    | ^list, ^list1, ^list2" in source
+    assert "\n    | ^list2 = ^list - ^list1\n" in source
     assert "\n  }\n" in source
 
 
@@ -506,13 +735,13 @@ def test_function_output_inheritance_disassembles_as_target() -> None:
     text = "List\n-: (list, list1) => list2\n        list2.size = (list.size + list1.size)"
     first_source = translate_ast_to_source(compile_text(text, base_dir=SKILL_DIR))
     second_source = translate_ast_to_source(compile_text(first_source, base_dir=SKILL_DIR))
-    assert "\n  | List\n" in first_source
-    assert "\n  | Symbol ~ List\n" not in first_source
-    assert "\n  Symbol ~ List\n" in first_source
-    assert "\n    | List ~ list\n" in first_source
-    assert "\n    | List ~ list1\n" in first_source
-    assert "\n    | List ~ list2\n" not in first_source
-    assert "\n    List ~ list2\n" in first_source
+    assert "\n  | ^List\n" in first_source
+    assert "\n  | Symbol ~ ^List\n" not in first_source
+    assert "\n  Symbol ~ ^List\n" in first_source
+    assert "\n    | ^List ~ ^list\n" in first_source
+    assert "\n    | ^List ~ ^list1\n" in first_source
+    assert "\n    | ^List ~ ^list2\n" not in first_source
+    assert "\n    ^List ~ ^list2\n" in first_source
     assert second_source == first_source
 
 
@@ -528,28 +757,83 @@ def test_free_classifier_syms_are_not_auto_bound() -> None:
 
 def test_function_output_inheritance_cases() -> None:
     value_source = translate_ast_to_source(compile_text("Value\nF: value => out_value\n    out_value = out_value", base_dir=SKILL_DIR))
-    assert "\n    | Value ~ value\n" in value_source
-    assert "\n    Value ~ out_value\n" in value_source
-    assert "\n    | Value ~ out_value\n" not in value_source
+    assert "\n    | ^Value ~ ^value\n" in value_source
+    assert "\n    | ^out_value = F(^value)\n" in value_source
+    assert "\n    ^Value ~ ^out_value\n" in value_source
+    assert "\n    | ^Value ~ ^out_value\n" not in value_source
 
     symbol_source = translate_ast_to_source(compile_text("F: x => y\n    y = y", base_dir=SKILL_DIR))
-    assert "\n    | Symbol ~ x\n" in symbol_source
-    assert "\n    Symbol ~ y\n" in symbol_source
+    assert "\n    | Symbol ~ ^x\n" in symbol_source
+    assert "\n    | ^y = F(^x)\n" in symbol_source
+    assert "\n    Symbol ~ ^y\n" in symbol_source
 
-    generated_source = translate_ast_to_source(compile_text("F: __x => __y\n    __y = __y", base_dir=SKILL_DIR))
-    assert "Symbol ~ __x" not in generated_source
-    assert "Symbol ~ __y" not in generated_source
+    generated_source = translate_ast_to_source(compile_text("F: ^x => ^y\n    ^y = ^y", base_dir=SKILL_DIR))
+    assert "Symbol ~ ^x" not in generated_source
+    assert "Symbol ~ ^y" not in generated_source
 
     bool_source = translate_ast_to_source(compile_text("Bool\nP: x => bool\n    P(x)", base_dir=SKILL_DIR))
-    assert "\n    Bool ~ bool\n" in bool_source
-    assert "\n    | Bool ~ bool\n" not in bool_source
+    assert "\n    ^Bool ~ ^bool\n" in bool_source
+    assert "\n    | ^Bool ~ ^bool\n" not in bool_source
+
+
+def test_function_declaration_without_output_guarantee_omits_rule() -> None:
+    source = translate_ast_to_source(compile_text("F: ^x => ^y", base_dir=SKILL_DIR))
+    assert source.strip() == "∀{\n  Function ~ F\n}"
+
+
+def test_tuple_function_declaration_call_and_destructure_are_premises() -> None:
+    source = translate_ast_to_source(compile_text("F: x => (y, z)", base_dir=SKILL_DIR))
+    assert "\n    | ^tmpF0 = F(^x)\n" in source
+    assert "\n    | ^y = ^tmpF0[^tmpvalue1]\n" in source
+    assert "\n    | ^z = ^tmpF0[^tmpvalue2]\n" in source
+    assert "\n    Tuple ~ ^tmpF0\n" in source
+    assert "\n    Symbol ~ ^y\n" in source
+    assert "\n    Symbol ~ ^z\n" in source
+
+
+def test_generated_tuple_function_declaration_keeps_tuple_guarantee() -> None:
+    source = translate_ast_to_source(compile_text("F: ^sym => (^sym1, ^sym2)", base_dir=SKILL_DIR))
+    assert "\n  ∀{\n" in source
+    assert "\n    | ^tmpF0 = F(^sym)\n" in source
+    assert "\n    | ^sym1 = ^tmpF0[^tmpvalue1]\n" in source
+    assert "\n    | ^sym2 = ^tmpF0[^tmpvalue2]\n" in source
+    assert "\n    Tuple ~ ^tmpF0\n" in source
+    assert "\n    Value ~ ^tmpvalue1\n" in source
+    assert "\n    Value ~ ^tmpvalue2\n" in source
+    assert "Symbol ~ ^sym" not in source
+    assert "Symbol ~ ^sym1" not in source
+    assert "Symbol ~ ^sym2" not in source
+    assert "\n    | Tuple ~ ^tmpF0\n" not in source
+
+
+def test_function_body_return_destructuring_omits_redundant_classifiers() -> None:
+    source = translate_ast_to_source(
+        compile_text("Sym\nF: sym => (sym1, sym2)\n    | P1(sym)\n    P2(sym1, sym2)", base_dir=SKILL_DIR)
+    )
+    assert "\n    | ^tmpF0 = F(^sym)\n" in source
+    assert "\n    Tuple ~ ^tmpF0\n" in source
+    assert "\n    Value ~ ^tmpvalue1\n" in source
+    assert "\n    Value ~ ^tmpvalue2\n" in source
+    assert "\n    | ^tmpF3 = F(^sym)\n" in source
+    assert "\n    | ^sym1 = ^tmpF3[^tmpvalue4]\n" in source
+    assert "\n    | ^sym2 = ^tmpF3[^tmpvalue5]\n" in source
+    assert source.count("Tuple ~ ^tmpF") == 1
+    assert source.count("Value ~ ^tmpvalue") == 2
+    assert "\n    P2(^sym1, ^sym2)\n" in source
+
+
+def test_function_body_local_literal_classifier_is_preserved() -> None:
+    source = translate_ast_to_source(compile_text("Sym\nF: sym => out\n    P((sym, out))", base_dir=SKILL_DIR))
+    assert source.count("Tuple ~ ") == 1
+    assert "\n    Tuple ~ ^tmpsym_out" in source
+    assert "P(^tmpsym_out" in source
 
 
 def test_sibling_nested_modules_are_indented_consistently() -> None:
     source = translate_ast_to_source(compile_text("∀{\n∀{| x | x = x}\n∀{| y | y = y}\n}"))
     assert source.count("\n  ∀{\n") == 2
-    assert "\n    | x\n" in source
-    assert "\n    | y\n" in source
+    assert "\n    | ^x\n" in source
+    assert "\n    | ^y\n" in source
 
 
 def test_target_literal_assignment_normalized() -> None:
@@ -587,7 +871,7 @@ def test_authored_premise_literal_classifier_keeps_premise_and_adds_target() -> 
 
 def test_authored_target_literal_classifier_dedupes_generated_target() -> None:
     source = translate_ast_to_source(compile_text("∀{| x | Value ~ 1}"))
-    assert source.count("\n  Value ~ __tmp10\n") == 1, source
+    assert source.count("\n  Value ~ ^tmp10\n") == 1, source
 
 
 def test_target_module_assignment_normalized() -> None:
@@ -598,14 +882,14 @@ def test_target_module_assignment_normalized() -> None:
 
 
 def test_multiline_binding_rhs_disassembly_is_indented() -> None:
-    text = "sym = {| __sym | __sym >= 0 => __sym + 1}"
+    text = "sym = {| ^sym | ^sym >= 0 => ^sym + 1}"
     first_source = translate_ast_to_source(compile_text(text))
     second_source = translate_ast_to_source(compile_text(first_source))
-    assert "\n  | __tmpmodule03 = {\n    | __logic_language_out0\n" in first_source
-    assert "\n    ∃{\n      | __sym, __tmp00, __tmp11, __tmpadd2\n" in first_source
-    assert "\n      Value ~ __tmp00\n      Value ~ __tmp11\n      __logic_language_out0 = __tmpadd2\n" in first_source
-    assert "\n    }\n  }\n  sym = __tmpmodule03\n" in first_source
-    assert "\n}\n  sym = __tmpmodule03\n" not in first_source
+    assert "\n  | ^tmpmodule03 = {\n    | ^logic_language_out0\n" in first_source
+    assert "\n    ∃{\n      | ^sym, ^tmp00, ^tmp11, ^tmpadd2\n" in first_source
+    assert "\n      Value ~ ^tmp00\n      Value ~ ^tmp11\n      ^logic_language_out0 = ^tmpadd2\n" in first_source
+    assert "\n    }\n  }\n  sym = ^tmpmodule03\n" in first_source
+    assert "\n}\n  sym = ^tmpmodule03\n" not in first_source
     assert second_source == first_source
 
 
@@ -625,9 +909,9 @@ def test_round_trip_disassembly_is_idempotent() -> None:
     second_ast = compile_text(first_source)
     second_source = translate_ast_to_source(second_ast)
     assert second_source == first_source
-    assert first_source.count("| Symbol ~ val1") == 1
-    assert "| val1 ~ val1" not in first_source
-    assert "| Val ~ val1" not in first_source
+    assert first_source.count("| Symbol ~ ^val1") == 1
+    assert "| ^val1 ~ ^val1" not in first_source
+    assert "| Val ~ ^val1" not in first_source
 
 
 def test_generated_temp_round_trip_is_idempotent() -> None:
@@ -636,11 +920,11 @@ def test_generated_temp_round_trip_is_idempotent() -> None:
     first_source = translate_ast_to_source(first_ast)
     second_ast = compile_text(first_source)
     second_source = translate_ast_to_source(second_ast)
-    assert set(first_source.splitlines()) == set(second_source.splitlines())
-    assert "| __tmpfunc_stmt0 ~ __tmpfunc_stmt0" not in second_source
-    assert "| __tmpsize1 ~ __tmpsize1" not in second_source
-    assert "| __tmpsize2 ~ __tmpsize2" not in second_source
-    assert "| __tmpfunc_stmt3 ~ __tmpfunc_stmt3" not in second_source
+    assert first_source == second_source
+    assert "| ^tmpfunc_stmt0 ~ ^tmpfunc_stmt0" not in second_source
+    assert "| ^tmpsize1 ~ ^tmpsize1" not in second_source
+    assert "| ^tmpsize2 ~ ^tmpsize2" not in second_source
+    assert "| ^tmpfunc_stmt3 ~ ^tmpfunc_stmt3" not in second_source
 
 
 def test_wrapper_round_trip_is_stable() -> None:
@@ -654,8 +938,8 @@ def test_tuple_assignment_round_trip_adds_classifier_predicate() -> None:
     text = "x = (a, b)"
     first_source = translate_ast_to_source(compile_text(text))
     second_source = translate_ast_to_source(compile_text(first_source))
-    assert "\n  Tuple ~ __tmpa_b0\n" in first_source
-    assert "| Tuple ~ __tmpa_b0" not in first_source
+    assert "\n  Tuple ~ ^tmpa_b0\n" in first_source
+    assert "| Tuple ~ ^tmpa_b0" not in first_source
     assert second_source == first_source
 
 
@@ -774,9 +1058,284 @@ raise SystemExit(compile_module.main())
     assert "final AST validation failed:" in result.stderr
 
 
+def test_module_check_syntax_error_stops_before_semantic_and_compile() -> None:
+    original_semantic_entries = module_check.semantic_entries
+    original_run_compile_pipeline = module_check.run_compile_pipeline
+
+    def fail_semantic(*args, **kwargs):
+        raise AssertionError("semantic check should not run after syntax errors")
+
+    def fail_compile(*args, **kwargs):
+        raise AssertionError("compile should not run after syntax errors")
+
+    module_check.semantic_entries = fail_semantic
+    module_check.run_compile_pipeline = fail_compile
+    try:
+        payload = module_check.check_module("∀{| x | x = x", module_check.STDIN_FILE, Path("."), is_file=False)
+    finally:
+        module_check.semantic_entries = original_semantic_entries
+        module_check.run_compile_pipeline = original_run_compile_pipeline
+
+    assert payload["summary"]["error_count"] >= 1
+    assert {entry["stage"] for entry in payload["entries"]} == {"syntax"}
+
+
+def test_module_check_set_literals_are_not_set_modules() -> None:
+    for text in ["syms = {}", "syms = {1, 2, 3}"]:
+        payload = module_check.check_module(text, module_check.STDIN_FILE, Path("."), is_file=False)
+        assert payload["summary"]["error_count"] == 0, (text, payload)
+
+
+def test_module_check_set_module_syntax_still_reports_located_errors() -> None:
+    payload = module_check.check_module("{| }", module_check.STDIN_FILE, Path("."), is_file=False)
+
+    assert payload["summary"]["error_count"] == 1
+    assert len(payload["entries"]) == 1
+    entry = payload["entries"][0]
+    assert entry["code"] == "set_module_missing_syms"
+    assert entry["lineno"] == 0
+    assert entry["col_start_no"] == 0
+
+
+def test_module_check_warning_only_bare_index_operator_symbol_exits_clean() -> None:
+    payload = module_check.check_module("sym = []", module_check.STDIN_FILE, Path("."), is_file=False)
+
+    assert payload["summary"] == {"error_count": 0, "warning_count": 1}
+    entry = payload["entries"][0]
+    assert entry["stage"] == "semantic"
+    assert entry["code"] == "bare_index_operator_symbol"
+    assert entry["lineno"] == 0
+    assert entry["col_start_no"] == 6
+
+
+def test_module_check_positioned_branch_error_avoids_file_start_fallback() -> None:
+    payload = module_check.check_module("F: x => y\n    |- P(x)", module_check.STDIN_FILE, Path("."), is_file=False)
+
+    assert payload["summary"]["error_count"] == 1
+    entry = payload["entries"][0]
+    assert entry["stage"] == "syntax"
+    assert entry["code"] == "syntax_error"
+    assert entry["reason"] == "branch header requires an indented block"
+    assert entry["lineno"] == 1
+    assert entry["col_start_no"] == 4
+
+
+def test_module_check_semantic_error_stops_before_compile() -> None:
+    original_semantic_entries = module_check.semantic_entries
+    original_run_compile_pipeline = module_check.run_compile_pipeline
+
+    def semantic_error(*args, **kwargs):
+        return [
+            {
+                "file": module_check.STDIN_FILE,
+                "lineno": 0,
+                "col_start_no": 0,
+                "col_end_no": 1,
+                "type": "error",
+                "code": "semantic_test_error",
+                "reason": "semantic failed",
+                "stage": "semantic",
+            }
+        ]
+
+    def fail_compile(*args, **kwargs):
+        raise AssertionError("compile should not run after semantic errors")
+
+    module_check.semantic_entries = semantic_error
+    module_check.run_compile_pipeline = fail_compile
+    try:
+        payload = module_check.check_module("∀{| x | x = x}", module_check.STDIN_FILE, Path("."), is_file=False)
+    finally:
+        module_check.semantic_entries = original_semantic_entries
+        module_check.run_compile_pipeline = original_run_compile_pipeline
+
+    assert payload["summary"]["error_count"] == 1
+    assert any(entry["code"] == "semantic_test_error" and entry["stage"] == "semantic" for entry in payload["entries"])
+
+
+def test_module_check_semantic_warning_continues_to_compile() -> None:
+    original_semantic_entries = module_check.semantic_entries
+    original_run_compile_pipeline = module_check.run_compile_pipeline
+    called = {"compile": False}
+
+    def semantic_warning(*args, **kwargs):
+        return [
+            {
+                "file": module_check.STDIN_FILE,
+                "lineno": 0,
+                "col_start_no": 0,
+                "col_end_no": 1,
+                "type": "warning",
+                "code": "semantic_test_warning",
+                "reason": "semantic warning",
+                "stage": "semantic",
+            }
+        ]
+
+    def compile_ok(*args, **kwargs):
+        called["compile"] = True
+
+    module_check.semantic_entries = semantic_warning
+    module_check.run_compile_pipeline = compile_ok
+    try:
+        payload = module_check.check_module("∀{| x | x = x}", module_check.STDIN_FILE, Path("."), is_file=False)
+    finally:
+        module_check.semantic_entries = original_semantic_entries
+        module_check.run_compile_pipeline = original_run_compile_pipeline
+
+    assert called["compile"]
+    assert payload["summary"] == {"error_count": 0, "warning_count": 1}
+
+
+def test_module_check_compile_error_uses_entry_file_start() -> None:
+    original_run_compile_pipeline = module_check.run_compile_pipeline
+
+    def compile_fails(*args, **kwargs):
+        raise CompileError("lowering failed")
+
+    module_check.run_compile_pipeline = compile_fails
+    try:
+        payload = module_check.check_module("∀{| x | x = x}", "/tmp/input.lp", Path("."), is_file=False)
+    finally:
+        module_check.run_compile_pipeline = original_run_compile_pipeline
+
+    entry = payload["entries"][0]
+    assert payload["summary"]["error_count"] == 1
+    assert entry["stage"] == "compile"
+    assert entry["file"] == "/tmp/input.lp"
+    assert entry["lineno"] == 0
+    assert entry["col_start_no"] == 0
+    assert entry["code"] == "compile_error"
+
+
+def test_module_check_final_ast_diagnostics_keep_location_and_code() -> None:
+    original_run_compile_pipeline = module_check.run_compile_pipeline
+    diagnostic = {
+        "file": "/tmp/final.lp",
+        "lineno": 2,
+        "col_start_no": 3,
+        "col_end_no": 4,
+        "type": "error",
+        "code": "invalid_bound_sym_name",
+        "reason": "bad name",
+    }
+
+    def final_ast_fails(*args, **kwargs):
+        raise compile_module_script.FinalAstValidationCompileError("bad final ast", [], [diagnostic])
+
+    module_check.run_compile_pipeline = final_ast_fails
+    try:
+        payload = module_check.check_module("∀{| x | x = x}", "/tmp/input.lp", Path("."), is_file=False)
+    finally:
+        module_check.run_compile_pipeline = original_run_compile_pipeline
+
+    assert payload["summary"]["error_count"] == 1
+    assert payload["entries"] == [{**diagnostic, "stage": "final_ast"}]
+
+
+def test_module_check_text_import_resolves_standard_library_from_skill_dir() -> None:
+    result = subprocess.run(
+        [
+            "python3",
+            str(SCRIPTS_DIR / "module_check.py"),
+            "--text",
+            "$import standard_library.lp\n∀{| x | x = x}",
+            "--base-dir",
+            tempfile.gettempdir(),
+        ],
+        capture_output=True,
+        text=True,
+        cwd=SKILL_DIR,
+        check=False,
+    )
+    assert result.returncode in {0, 1}, result.stderr or result.stdout
+    payload = json.loads(result.stdout)
+    assert not any(entry["code"] == "missing_import" for entry in payload["entries"])
+    assert any(str(entry["file"]).endswith("standard_library.lp") for entry in payload["entries"])
+
+
+def test_module_check_stdin_import_uses_base_dir() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        (root / "imported.lp").write_text("Imported\n", encoding="utf-8")
+        result = subprocess.run(
+            [
+                "python3",
+                str(SCRIPTS_DIR / "module_check.py"),
+                "--base-dir",
+                str(root),
+            ],
+            input="$import imported.lp\n∀{| x | x = x}",
+            capture_output=True,
+            text=True,
+            cwd=SKILL_DIR,
+            check=False,
+        )
+    assert result.returncode == 0, result.stderr or result.stdout
+    payload = json.loads(result.stdout)
+    assert payload["summary"]["error_count"] == 0
+
+
+def test_expand_module_cli_text_mode() -> None:
+    result = subprocess.run(
+        ["python3", str(SCRIPTS_DIR / "expand_module.py"), "--text", "∀{| x | x = x}"],
+        capture_output=True,
+        text=True,
+        cwd=SKILL_DIR,
+        check=False,
+    )
+    assert result.returncode == 0
+    assert result.stderr == ""
+    assert result.stdout == "∀{\n  | ^x\n  | Symbol ~ ^x\n  ^x = ^x\n}\n"
+
+
+def test_expand_module_cli_file_mode() -> None:
+    with tempfile.TemporaryDirectory() as temp_dir:
+        path = Path(temp_dir) / "input.lp"
+        path.write_text("∀{| x | x = x}", encoding="utf-8")
+        result = subprocess.run(
+            ["python3", str(SCRIPTS_DIR / "expand_module.py"), str(path)],
+            capture_output=True,
+            text=True,
+            cwd=SKILL_DIR,
+            check=False,
+        )
+    assert result.returncode == 0
+    assert result.stderr == ""
+    assert result.stdout == "∀{\n  | ^x\n  | Symbol ~ ^x\n  ^x = ^x\n}\n"
+
+
+def test_expand_module_cli_stdin_mode() -> None:
+    result = subprocess.run(
+        ["python3", str(SCRIPTS_DIR / "expand_module.py")],
+        input="∀{| x | x = x}",
+        capture_output=True,
+        text=True,
+        cwd=SKILL_DIR,
+        check=False,
+    )
+    assert result.returncode == 0
+    assert result.stderr == ""
+    assert result.stdout == "∀{\n  | ^x\n  | Symbol ~ ^x\n  ^x = ^x\n}\n"
+
+
+def test_expand_module_cli_invalid_input() -> None:
+    result = subprocess.run(
+        ["python3", str(SCRIPTS_DIR / "expand_module.py"), "--text", "∀{| 1x | 1x = 1x}"],
+        capture_output=True,
+        text=True,
+        cwd=SKILL_DIR,
+        check=False,
+    )
+    assert result.returncode == 1
+    assert result.stdout == ""
+    assert result.stderr
+
+
 def test_script_modules_import_without_cycles() -> None:
     modules = [
         "compile_module",
+        "expand_module",
         "compile_pipeline.errors",
         "compile_pipeline.source_utils",
         "compile_pipeline.module_sections",
@@ -788,6 +1347,7 @@ def test_script_modules_import_without_cycles() -> None:
         "syntax_check",
         "syntax_check_common",
         "semantic_check",
+        "module_check",
         "translate_AST_to_source",
         "validate_golden_tests",
     ]
@@ -807,16 +1367,26 @@ def main() -> int:
         test_implicit_literal_classifier_predicates,
         test_member_and_operator,
         test_missing_infix_support_round_trip,
+        test_nested_equality_expressions,
+        test_lifted_resolver_equality_expression_compiles,
         test_operator_head_declaration_round_trip,
+        test_slice_operator_identifier_sym_compiles_everywhere,
+        test_slice_operator_declaration_and_call_compile,
+        test_range_and_slice_surface_forms_lower_to_slice_operator,
+        test_compound_slice_member_call_lowers_to_ordinary_call,
         test_class_coloncolon_top_level_function_declaration,
         test_class_block_expands_to_current_scope,
+        test_class_field_shorthand_compiles,
+        test_class_field_shorthand_uses_collision_safe_prime_output,
+        test_prime_suffix_names_compile_and_infer_from_base,
         test_class_method_body_is_preserved,
         test_function_declaration_and_body_are_separate_rules,
         test_repeated_function_bodies_are_conditional_facts,
-        test_function_arrow_shorthand_splits_into_declaration_and_body,
+        test_function_arrow_shorthand_is_invalid,
         test_inline_inheritance_class_body,
         test_class_operator_suffix_declaration,
         test_invalid_class_body_lines_fail,
+        test_explicit_class_field_declaration_may_have_body,
         test_wrapper_predicates_lower_through_anf,
         test_capital_wrapper_predicates_normalize_to_infix,
         test_stage2_ancestor_scope_for_function_decl,
@@ -826,6 +1396,7 @@ def main() -> int:
         test_standard_library_supplies_universal_inheritance_axioms,
         test_stage2_generated_sym_does_not_re_desugar,
         test_stage2_authored_generated_sym_gets_no_implicit_facts,
+        test_double_underscore_sym_is_ordinary,
         test_stage2_synthesized_infixes_are_spaced,
         test_stage2_omits_symbol_when_inheritance_premise_exists,
         test_stage2_legacy_unspaced_infix_still_compiles,
@@ -833,15 +1404,27 @@ def main() -> int:
         test_import_searches_skill_dir_for_standard_library,
         test_stdin_import_rejected,
         test_multiline_bar_semantics,
+        test_branch_header_lowers_to_parent_premise_module,
+        test_sibling_branches_are_parent_premises,
+        test_branch_requires_indented_block,
+        test_branch_allows_function_output_in_nested_target,
+        test_target_nested_declaration_expands_in_function_body,
+        test_premise_nested_declaration_expands_in_function_body,
+        test_no_body_premise_declaration_expands_signature,
+        test_bool_declarations_emit_predicate_fact,
         test_duplicate_binders_deduplicate,
         test_nested_ancestor_conflict_is_invalid,
         test_semantic_warning_for_multiple_inheritance_candidates,
-        test_semantic_allows_function_output_in_body_premise,
-        test_semantic_allows_nested_function_output_in_body_premise,
-        test_semantic_allows_predicate_output_in_body_premise,
+        test_semantic_warning_for_bare_index_operator_symbol,
+        test_semantic_bare_index_operator_symbol_exempts_definitions,
+        test_semantic_flags_function_output_in_body_premise,
+        test_semantic_flags_nested_function_output_in_body_premise,
+        test_semantic_flags_predicate_output_in_body_premise,
         test_semantic_allows_function_output_in_target_and_generated_binding,
+        test_semantic_nested_premise_declaration_output_rule,
         test_sibling_submodules_can_reuse_name,
-        test_authored_generated_sym_is_accepted,
+        test_authored_caret_generated_sym_is_accepted,
+        test_double_underscore_sym_is_not_generated,
         test_translate_omits_empty_binder_bar,
         test_translate_keeps_binder_line_when_present,
         test_nested_module_disassembly_is_indented,
@@ -849,6 +1432,11 @@ def main() -> int:
         test_bound_syms_are_not_filtered_as_intrinsics,
         test_free_classifier_syms_are_not_auto_bound,
         test_function_output_inheritance_cases,
+        test_function_declaration_without_output_guarantee_omits_rule,
+        test_tuple_function_declaration_call_and_destructure_are_premises,
+        test_generated_tuple_function_declaration_keeps_tuple_guarantee,
+        test_function_body_return_destructuring_omits_redundant_classifiers,
+        test_function_body_local_literal_classifier_is_preserved,
         test_sibling_nested_modules_are_indented_consistently,
         test_target_literal_assignment_normalized,
         test_nested_literal_argument_adds_classifier_target,
@@ -865,6 +1453,21 @@ def main() -> int:
         test_run_compile_pipeline_fails_on_final_ast_validation_conflict,
         test_compile_module_cli_fails_without_ast_json_on_validation_error,
         test_compile_module_cli_debug_stages_prints_summaries_before_validation_error,
+        test_module_check_syntax_error_stops_before_semantic_and_compile,
+        test_module_check_set_literals_are_not_set_modules,
+        test_module_check_set_module_syntax_still_reports_located_errors,
+        test_module_check_warning_only_bare_index_operator_symbol_exits_clean,
+        test_module_check_positioned_branch_error_avoids_file_start_fallback,
+        test_module_check_semantic_error_stops_before_compile,
+        test_module_check_semantic_warning_continues_to_compile,
+        test_module_check_compile_error_uses_entry_file_start,
+        test_module_check_final_ast_diagnostics_keep_location_and_code,
+        test_module_check_text_import_resolves_standard_library_from_skill_dir,
+        test_module_check_stdin_import_uses_base_dir,
+        test_expand_module_cli_text_mode,
+        test_expand_module_cli_file_mode,
+        test_expand_module_cli_stdin_mode,
+        test_expand_module_cli_invalid_input,
         test_script_modules_import_without_cycles,
     ]
     for test in tests:

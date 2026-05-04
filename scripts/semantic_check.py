@@ -12,7 +12,6 @@ from pathlib import Path
 from typing import Any
 
 from compile_pipeline.errors import CompileError
-from compile_pipeline.module_sections import FRESH_PREFIX
 from inheritance_sources import matched_inheritance_sources
 from syntax_check_common import (
     STDIN_FILE,
@@ -24,6 +23,10 @@ from syntax_check_common import (
     analyze_module_file,
     analyze_module_text,
 )
+
+
+BARE_INDEX_OPERATOR_WARNING_CODE = "bare_index_operator_symbol"
+BARE_INDEX_OPERATOR_WARNING_REASON = "bare [] is the index operator symbol; use [,] for the empty tuple literal"
 
 
 @dataclass(frozen=True)
@@ -97,10 +100,12 @@ class SemanticChecker:
         for binder in module.binders:
             self.check_binder(binder, ancestor_set)
             self.check_implicit_inheritance_candidates(binder, ancestor_set)
+            self.check_bare_index_operator_binder(binder)
             declaration = VisibleDeclaration(binder.text, binder.position, context.scope_id)
             current_declarations.append(declaration)
             self.add_visible(declaration)
-        self.check_function_output_premises(module)
+        self.check_function_output_in_premise(module)
+        self.check_bare_index_operator_statements(module)
         child_context = ScopeContext(self.allocate_scope(), (*context.ancestors, context.scope_id))
         for statement in [*module.premise_binding_statements, *module.predicate_statements, *module.target_statements]:
             for submodule in statement.sub_modules:
@@ -108,44 +113,8 @@ class SemanticChecker:
         for declaration in current_declarations:
             self.visible[declaration.name].remove(declaration)
 
-    def check_function_output_premises(self, module: CheckModule) -> None:
-        if module.declaration is None:
-            return
-        output_syms = {output for output in module.declaration.outputs if output}
-        if not output_syms:
-            return
-        for statement in module.predicate_statements:
-            self.check_output_occurrences_in_statement(statement, output_syms)
-
-    def check_output_occurrences_in_statement(self, statement: Any, output_syms: set[str]) -> None:
-        located = getattr(statement, "located", None)
-        if located is not None:
-            for name, position in output_sym_occurrences(located, output_syms):
-                self.diagnostics.append(
-                    Diagnostic(
-                        file=position.file,
-                        lineno=max(position.line - 1, 0),
-                        col_start_no=max(position.column - 1, 0),
-                        col_end_no=max(position.column - 1 + len(name), 1),
-                        type="error",
-                        code="function_output_in_premise",
-                        reason=f"function output sym '{name}' cannot appear in declaration premise",
-                    )
-                )
-        for submodule in getattr(statement, "sub_modules", []):
-            shadowed = {binder.text for binder in submodule.binders}
-            nested_outputs = output_syms - shadowed
-            if not nested_outputs:
-                continue
-            for nested_statement in [
-                *submodule.premise_binding_statements,
-                *submodule.predicate_statements,
-                *submodule.target_statements,
-            ]:
-                self.check_output_occurrences_in_statement(nested_statement, nested_outputs)
-
     def check_binder(self, binder: Binder, ancestors: set[int]) -> None:
-        if binder.text.startswith(FRESH_PREFIX):
+        if binder.text.startswith("^"):
             return
         conflicts = [
             conflict
@@ -168,7 +137,7 @@ class SemanticChecker:
         )
 
     def check_implicit_inheritance_candidates(self, binder: Binder, ancestors: set[int]) -> None:
-        if binder.text.startswith("__"):
+        if binder.text.startswith("^"):
             return
         visible_names = {
             declaration.name
@@ -194,6 +163,55 @@ class SemanticChecker:
 
     def add_visible(self, declaration: VisibleDeclaration) -> None:
         self.visible.setdefault(declaration.name, []).append(declaration)
+
+    def check_function_output_in_premise(self, module: CheckModule) -> None:
+        if module.declaration is None:
+            return
+        for output in module.declaration.outputs:
+            for statement in module.predicate_statements:
+                occurrence = find_symbol_occurrence(statement, output)
+                if occurrence is None:
+                    continue
+                position, width = occurrence
+                self.diagnostics.append(
+                    Diagnostic(
+                        file=position.file,
+                        lineno=max(position.line - 1, 0),
+                        col_start_no=max(position.column - 1, 0),
+                        col_end_no=max(position.column - 1 + width, 1),
+                        type="error",
+                        code="function_output_in_premise",
+                        reason=f"function/predicate declaration output '{output}' appears in premise statement '{statement.text}'",
+                    )
+                )
+
+    def check_bare_index_operator_binder(self, binder: Binder) -> None:
+        if binder.text != "[]":
+            return
+        self.emit_bare_index_operator_warning(binder.position, 2)
+
+    def check_bare_index_operator_statements(self, module: CheckModule) -> None:
+        skip_operator_definition_body = module.declaration is not None and module.declaration.name == "[]"
+        if skip_operator_definition_body:
+            return
+        for statement in [*module.premise_binding_statements, *module.predicate_statements, *module.target_statements]:
+            if is_bare_index_operator_definition_fact(statement.text):
+                continue
+            for position, width in find_bare_index_operator_symbol_occurrences(statement):
+                self.emit_bare_index_operator_warning(position, width)
+
+    def emit_bare_index_operator_warning(self, position: SourcePosition, width: int) -> None:
+        self.diagnostics.append(
+            Diagnostic(
+                file=position.file,
+                lineno=max(position.line - 1, 0),
+                col_start_no=max(position.column - 1, 0),
+                col_end_no=max(position.column - 1 + width, 1),
+                type="warning",
+                code=BARE_INDEX_OPERATOR_WARNING_CODE,
+                reason=BARE_INDEX_OPERATOR_WARNING_REASON,
+            )
+        )
 
     def line_text(self, position: SourcePosition) -> str:
         if position.file in self.source_lines_by_file:
@@ -230,17 +248,51 @@ def dedupe_join(values: list[str]) -> str:
     return ", ".join(output)
 
 
-def output_sym_occurrences(located: Any, output_syms: set[str]) -> list[tuple[str, SourcePosition]]:
-    output: list[tuple[str, SourcePosition]] = []
-    for name in sorted(output_syms, key=len, reverse=True):
-        pattern = re.compile(rf"(?<![\w']){re.escape(name)}(?![\w'])", re.UNICODE)
-        for match in pattern.finditer(located.text):
-            output.append((name, located.positions[match.start()]))
-    return sorted(output, key=lambda item: (item[1].file, item[1].line, item[1].column, item[0]))
+def find_symbol_occurrence(statement: Any, symbol: str) -> tuple[SourcePosition, int] | None:
+    pattern = re.compile(rf"(?<![\w^']){re.escape(symbol)}(?![\w'])")
+    match = pattern.search(statement.text)
+    if match is None:
+        return None
+    if statement.located is not None and match.start() < len(statement.located.positions):
+        return statement.located.positions[match.start()], len(symbol)
+    return SourcePosition(STDIN_FILE, 1, 1), len(symbol)
 
 
-def collect_semantic_diagnostics_from_text(text: str) -> list[dict[str, object]]:
-    result = analyze_module_text(text, file_path=None)
+def find_bare_index_operator_symbol_occurrences(statement: Any) -> list[tuple[SourcePosition, int]]:
+    occurrences: list[tuple[SourcePosition, int]] = []
+    index = 0
+    text = statement.text
+    while True:
+        index = text.find("[]", index)
+        if index < 0:
+            return occurrences
+        if is_prefix_call_head(text, index):
+            index += 2
+            continue
+        if statement.located is not None and index < len(statement.located.positions):
+            position = statement.located.positions[index]
+        else:
+            position = SourcePosition(STDIN_FILE, 1, 1)
+        occurrences.append((position, 2))
+        index += 2
+
+
+def is_prefix_call_head(text: str, index: int) -> bool:
+    return index + 2 < len(text) and text[index + 2] == "("
+
+
+def is_bare_index_operator_definition_fact(text: str) -> bool:
+    compact = re.sub(r"\s+", "", text)
+    return compact == "Function~[]"
+
+
+def collect_semantic_diagnostics_from_text(
+    text: str,
+    *,
+    file_path: Path | None = None,
+    base_dir: Path | None = None,
+) -> list[dict[str, object]]:
+    result = analyze_module_text(text, file_path=file_path, base_dir=base_dir)
     diagnostics = SemanticChecker(
         result.import_declarations,
         source_text=result.source_text,

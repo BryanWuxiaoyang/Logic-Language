@@ -1,5 +1,6 @@
 # summary
-below are the `source-text` and `compile(disassemble(source_text))` golden pairs
+below are the `source-text` and `expand_module(source-text)` golden pairs.
+In addition `expand_module` should be closure-identical, i.e. `expand_module* = expand_module`
 
 ## implicit inheritance
 "
@@ -10,176 +11,309 @@ List
 =
 "
 ∀{
-  | List
-  Symbol ~ List
+  | ^List
+  Symbol ~ ^List
   Function ~ -
   ∀{
-    | list, list1, list2, __tmpsub0
-    | __tmpsub0 = list - list1
-    | List ~ list
-    | List ~ list1
-    List ~ list2
-    list2 = __tmpsub0
+    | ^list, ^list1, ^list2
+    | ^list2 = ^list - ^list1
+    | ^List ~ ^list
+    | ^List ~ ^list1
+    ^List ~ ^list2
   }
   ∀{
-    | list, list1, list2, __tmpfunc_stmt1, __tmpsize2, __tmpsize3, __tmpfunc_stmt4
-    | list2 = list - list1
-    | __tmpfunc_stmt1 = size(list2)
-    | __tmpsize2 = size(list)
-    | __tmpsize3 = size(list1)
-    | __tmpfunc_stmt4 = __tmpsize2 + __tmpsize3
-    | List ~ list
-    | List ~ list1
-    __tmpfunc_stmt1 = __tmpfunc_stmt4
+    | ^list, ^list1, ^list2, ^tmpfunc_stmt0, ^tmpsize1, ^tmpsize2, ^tmpfunc_stmt3
+    | ^list2 = ^list - ^list1
+    | ^tmpfunc_stmt0 = size(^list2)
+    | ^tmpsize1 = size(^list)
+    | ^tmpsize2 = size(^list1)
+    | ^tmpfunc_stmt3 = ^tmpsize1 + ^tmpsize2
+    | ^List ~ ^list
+    | ^List ~ ^list1
+    ^tmpfunc_stmt0 = ^tmpfunc_stmt3
   }
 }
 "
 
 ## generated-sym exception
 "
--: (__list, __list1) => __list2
-        __list2.size = (__list.size + __list1.size)
+-: (^list, ^list1) => ^list2
+        ^list2.size = (^list.size + ^list1.size)
 "
 =
 "
 ∀{
   Function ~ -
   ∀{
-    | __list, __list1, __list2, __tmpsub0
-    | __tmpsub0 = __list - __list1
-    __list2 = __tmpsub0
-  }
-  ∀{
-    | __list, __list1, __list2, __tmpfunc_stmt1, __tmpsize2, __tmpsize3, __tmpfunc_stmt4
-    | __list2 = __list - __list1
-    | __tmpfunc_stmt1 = size(__list2)
-    | __tmpsize2 = size(__list)
-    | __tmpsize3 = size(__list1)
-    | __tmpfunc_stmt4 = __tmpsize2 + __tmpsize3
-    __tmpfunc_stmt1 = __tmpfunc_stmt4
+    | ^list, ^list1, ^list2, ^tmpfunc_stmt0, ^tmpsize1, ^tmpsize2, ^tmpfunc_stmt3
+    | ^list2 = ^list - ^list1
+    | ^tmpfunc_stmt0 = size(^list2)
+    | ^tmpsize1 = size(^list)
+    | ^tmpsize2 = size(^list1)
+    | ^tmpfunc_stmt3 = ^tmpsize1 + ^tmpsize2
+    ^tmpfunc_stmt0 = ^tmpfunc_stmt3
   }
 }
 "
 
-## tuple-target
+## function-declaration
 "
-F: __sym => (__sym1, __sym2)
-    | P1(__sym)
-    P2(__sym1, __sym2)
+Sym
+F: sym => (sym1, sym2)
 "
 =
 "
 ∀{
+  | ^Sym
+  Symbol ~ ^Sym
   Function ~ F
   ∀{
-    | __sym, __sym1, __sym2, __tmpF0, __tmpvalue1, __tmpindex2, __tmpvalue3, __tmpindex4
-    | __tmpF0 = F(__sym)
-    | __tmpvalue1 = 0
-    | __tmpindex2 = __tmpF0[__tmpvalue1]
-    | __tmpvalue3 = 1
-    | __tmpindex4 = __tmpF0[__tmpvalue3]
-    Tuple ~ __tmpF0
-    Value ~ __tmpvalue1
-    Value ~ __tmpvalue3
-    __sym1 = __tmpindex2
-    __sym2 = __tmpindex4
+    | ^sym, ^sym1, ^sym2, ^tmpF0, ^tmpvalue1, ^tmpvalue2
+    | ^tmpF0 = F(^sym)
+    | ^tmpvalue1 = 0
+    | ^sym1 = ^tmpF0[^tmpvalue1]
+    | ^tmpvalue2 = 1
+    | ^sym2 = ^tmpF0[^tmpvalue2]
+    | ^Sym ~ ^sym
+    Tuple ~ ^tmpF0
+    Value ~ ^tmpvalue1
+    Value ~ ^tmpvalue2
+    ^Sym ~ ^sym1
+    ^Sym ~ ^sym2
+  }
+}
+"
+
+## function with tuple-target
+"
+Sym
+F: sym => (sym1, sym2)
+    | P1(sym)
+    P2(sym1, sym2)
+"
+=
+"
+∀{
+  | ^Sym
+  Symbol ~ ^Sym
+  Function ~ F
+  ∀{
+    | ^sym, ^sym1, ^sym2, ^tmpF0, ^tmpvalue1, ^tmpvalue2
+    | ^tmpF0 = F(^sym)
+    | ^tmpvalue1 = 0
+    | ^sym1 = ^tmpF0[^tmpvalue1]
+    | ^tmpvalue2 = 1
+    | ^sym2 = ^tmpF0[^tmpvalue2]
+    | ^Sym ~ ^sym
+    Tuple ~ ^tmpF0
+    Value ~ ^tmpvalue1
+    Value ~ ^tmpvalue2
+    ^Sym ~ ^sym1
+    ^Sym ~ ^sym2
   }
   ∀{
-    | __sym, __sym1, __sym2, __tmpF5, __tmpvalue6, __tmpvalue7
-    | __tmpF5 = F(__sym)
-    | __tmpvalue6 = 0
-    | __sym1 = __tmpF5[__tmpvalue6]
-    | __tmpvalue7 = 1
-    | __sym2 = __tmpF5[__tmpvalue7]
-    | P1(__sym)
-    | Tuple ~ __tmpF5
-    Value ~ __tmpvalue6
-    Value ~ __tmpvalue7
-    P2(__sym1, __sym2)
+    | ^sym, ^sym1, ^sym2, ^tmpF3, ^tmpvalue4, ^tmpvalue5
+    | ^tmpF3 = F(^sym)
+    | ^tmpvalue4 = 0
+    | ^sym1 = ^tmpF3[^tmpvalue4]
+    | ^tmpvalue5 = 1
+    | ^sym2 = ^tmpF3[^tmpvalue5]
+    | ^Sym ~ ^sym
+    | P1(^sym)
+    P2(^sym1, ^sym2)
   }
 }
 "
 
 ## image-set
 "
-sym = {| __sym | __sym >= 0 => __sym + 1}
+sym = {| ^sym | ^sym >= 0 => ^sym + 1}
 "
 =
 "
 ∀{
-  | __tmpmodule03
-  | __tmpmodule03 = {
-    | __logic_language_out0
+  | ^tmpmodule03
+  | ^tmpmodule03 = {
+    | ^logic_language_out0
     ∃{
-      | __sym, __tmp00, __tmp11, __tmpadd2
-      | __tmp00 = 0
-      | __tmp11 = 1
-      | __tmpadd2 = __sym + __tmp11
-      | __sym ≥ __tmp00
-      Value ~ __tmp00
-      Value ~ __tmp11
-      __logic_language_out0 = __tmpadd2
+      | ^sym, ^tmp00, ^tmp11, ^tmpadd2
+      | ^tmp00 = 0
+      | ^tmp11 = 1
+      | ^tmpadd2 = ^sym + ^tmp11
+      | ^sym ≥ ^tmp00
+      Value ~ ^tmp00
+      Value ~ ^tmp11
+      ^logic_language_out0 = ^tmpadd2
     }
   }
-  sym = __tmpmodule03
+  sym = ^tmpmodule03
 }
 "
 
-## class
+## class-declaration
 "
-Val
-Class::func: (val1, val2) => (val3, val4)
 Class
-    ::field
-    ::func: (val1, val2) => (val3, val4)
+Sym
+Class::func: (class, ^sym1) => sym2
 "
 =
 "
 ∀{
-  | Val, Class, field, func
-  | Function ~ func
-  | ∀{
-    | val1, val2, val3, val4, __tmpfunc0, __tmpvalue1, __tmpindex2, __tmpvalue3, __tmpindex4
-    | __tmpfunc0 = func(val1, val2)
-    | __tmpvalue1 = 0
-    | __tmpindex2 = __tmpfunc0[__tmpvalue1]
-    | __tmpvalue3 = 1
-    | __tmpindex4 = __tmpfunc0[__tmpvalue3]
-    | Val ~ val1
-    | Val ~ val2
-    Tuple ~ __tmpfunc0
-    Value ~ __tmpvalue1
-    Value ~ __tmpvalue3
-    Val ~ val3
-    Val ~ val4
-    val3 = __tmpindex2
-    val4 = __tmpindex4
-  }
-  Symbol ~ Val
-  Symbol ~ Class
-  Symbol ~ field
+  | ^Class, ^Sym
+  Symbol ~ ^Class
+  Symbol ~ ^Sym
   Function ~ func
   ∀{
-    | val1, val2, val3, val4, __tmpfunc5, __tmpvalue6, __tmpindex7, __tmpvalue8, __tmpindex9
-    | __tmpfunc5 = func(val1, val2)
-    | __tmpvalue6 = 0
-    | __tmpindex7 = __tmpfunc5[__tmpvalue6]
-    | __tmpvalue8 = 1
-    | __tmpindex9 = __tmpfunc5[__tmpvalue8]
-    | Val ~ val1
-    | Val ~ val2
-    Tuple ~ __tmpfunc5
-    Value ~ __tmpvalue6
-    Value ~ __tmpvalue8
-    Val ~ val3
-    Val ~ val4
-    val3 = __tmpindex7
-    val4 = __tmpindex9
+    | ^class, ^sym1, ^sym2
+    | ^sym2 = func(^class, ^sym1)
+    | ^Class ~ ^class
+    ^Sym ~ ^sym2
   }
 }
 "
 
-## function-assign
+## class-field
 "
-F: (__sym1, __sym2) => F1(__sym1, __sym2)
+Val
+Class
+Class::val
+"
+=
+"
+∀{
+  | ^Val, ^Class
+  Symbol ~ ^Val
+  Symbol ~ ^Class
+  Function ~ val
+  ∀{
+    | ^class, ^val'
+    | ^val' = val(^class)
+    | ^Class ~ ^class
+    ^Val ~ ^val'
+  }
+}
+"
+
+## class-body
+"
+Val
+Class
+    ::func: (class, val1) => val2
+"
+=
+"
+∀{
+  | ^Val, ^Class
+  Symbol ~ ^Val
+  Symbol ~ ^Class
+  Function ~ func
+  ∀{
+    | ^class, ^val1, ^val2
+    | ^val2 = func(^class, ^val1)
+    | ^Class ~ ^class
+    | ^Val ~ ^val1
+    ^Val ~ ^val2
+  }
+}
+"
+
+## class-call
+"
+Class
+Class::func: (class, ^sym1) => ^sym2
+∀{| class | ^sym | class.func(^sym) = 0}
+"
+=
+"
+∀{
+  | ^Class
+  Symbol ~ ^Class
+  Function ~ func
+  ∀{
+    | ^class, ^sym, ^tmpfunc_stmt0, ^tmpvalue_literal_stmt1
+    | ^tmpfunc_stmt0 = func(^class, ^sym)
+    | ^tmpvalue_literal_stmt1 = 0
+    | ^Class ~ ^class
+    Value ~ ^tmpvalue_literal_stmt1
+    ^tmpfunc_stmt0 = ^tmpvalue_literal_stmt1
+  }
+}
+"
+
+## nested-function-declaration
+"
+F: func => ^sym1
+  | func: ^sym2 => ^sym3
+    P(^sym3)
+  P(func)
+"
+=
+"
+∀{
+  Function ~ F
+  ∀{
+    | ^func, ^sym1
+    | ^sym1 = F(^func)
+    | Function ~ ^func
+    | ∀{
+      | ^sym2, ^sym3
+      | ^sym3 = ^func(^sym2)
+      P(^sym3)
+    }
+    P(^func)
+  }
+}
+
+"
+
+## branch
+"
+F: ^sym1 => ^sym2
+  | ^sym3
+  |- P1(^sym1)
+    P2(^sym3)
+  |- P3(^sym1)
+    P4(^sym3)
+  P5(^sym2)
+"
+=
+"
+∀{
+  Function ~ F
+  ∀{
+    | ^sym1, ^sym2, ^sym3
+    | ^sym2 = F(^sym1)
+    | ∀{
+      | P1(^sym1)
+      P2(^sym3)
+    }
+    | ∀{
+      | P3(^sym1)
+      P4(^sym3)
+    }
+    P5(^sym2)
+  }
+}
+"
+
+## literals
+"
+sym1 = (1, 2, 3)
+sym2 = {1, 2, 3}
+sym3 = "123"
+sym4 = '1'
+sym5 = '\all'
+sym6 = [1, 2, 3]
+sym7 = {}
+sym8 = [,] # empty list
+sym9 = ()
+sym10 = ""
+sym11 = [1: 2]
+sym12 = [1, 2][1: 2]
+sym13 = (1, 2)[1: 2]
+sym14 = sym1[1: 2]
+"
+=
+"
+
 "

@@ -43,6 +43,15 @@ def func(name: str, *args: dict) -> dict:
     }
 
 
+def binding(dst: str = "y", src: dict | None = None) -> dict:
+    return {
+        "kind": "binding_stmt",
+        "loc": loc(),
+        "dst_sym": sym(dst),
+        "src_stmt": src or func("F", sym("x")),
+    }
+
+
 def module(bound_syms: list[dict], *, premise_bindings: list[dict] | None = None, premise_pss: list[dict] | None = None, target_pss: list[dict] | None = None) -> dict:
     return {
         "kind": "quantified_stmt",
@@ -70,14 +79,26 @@ def run_cli(args: list[str], *, stdin: str | None = None) -> subprocess.Complete
 
 
 def test_valid_names() -> None:
-    ast = module([sym("x"), sym("_x"), sym("列表"), sym("∀"), sym("≤"), sym("-")])
+    ast = module([sym("x"), sym("_x"), sym("列表"), sym("x'"), sym("x''"), sym("_x'''"), sym("列表'"), sym("field'"), sym("^x"), sym("^x'"), sym("^tmp0"), sym("^列表"), sym("__x"), sym("∀"), sym("≤"), sym("-"), sym("[:]")])
     assert FinalAstChecker().check(ast) == []
 
 
 def test_invalid_names() -> None:
-    ast = module([sym("1x"), sym("foo-bar"), sym(""), sym(None)])
+    ast = module([sym("1x"), sym("foo-bar"), sym(""), sym(None), sym("'"), sym("''"), sym("1x'"), sym("foo-bar'"), sym("x'y"), sym("x'_y"), sym("^"), sym("^^x"), sym("^1x"), sym("a^b"), sym("x^"), sym("^foo-bar")])
     diagnostics = FinalAstChecker().check(ast)
     assert [entry["code"] for entry in diagnostics] == [
+        "invalid_bound_sym_name",
+        "invalid_bound_sym_name",
+        "invalid_bound_sym_name",
+        "invalid_bound_sym_name",
+        "invalid_bound_sym_name",
+        "invalid_bound_sym_name",
+        "invalid_bound_sym_name",
+        "invalid_bound_sym_name",
+        "invalid_bound_sym_name",
+        "invalid_bound_sym_name",
+        "invalid_bound_sym_name",
+        "invalid_bound_sym_name",
         "invalid_bound_sym_name",
         "invalid_bound_sym_name",
         "invalid_bound_sym_name",
@@ -87,6 +108,12 @@ def test_invalid_names() -> None:
 
 def test_same_statement_conflict() -> None:
     diagnostics = FinalAstChecker().check(module([sym("x"), sym("x")]))
+    assert any(entry["code"] == "bound_sym_name_conflict" and "current statement" in entry["reason"] for entry in diagnostics)
+
+
+def test_prime_suffix_conflict_semantics() -> None:
+    assert FinalAstChecker().check(module([sym("x"), sym("x'")])) == []
+    diagnostics = FinalAstChecker().check(module([sym("x'"), sym("x'")]))
     assert any(entry["code"] == "bound_sym_name_conflict" and "current statement" in entry["reason"] for entry in diagnostics)
 
 
@@ -108,30 +135,39 @@ def test_nested_src_stmt_is_checked() -> None:
     inner = module([sym("x")])
     outer = module(
         [sym("x")],
-        premise_bindings=[
-            {
-                "kind": "binding_stmt",
-                "loc": loc(),
-                "dst_sym": sym("y"),
-                "src_stmt": inner,
-            }
-        ],
+        premise_bindings=[binding(src=inner)],
     )
     diagnostics = FinalAstChecker().check(outer)
     assert any(entry["code"] == "bound_sym_name_conflict" for entry in diagnostics)
 
 
+def test_binding_stmt_in_premise_bindings_is_valid() -> None:
+    assert FinalAstChecker().check(module([], premise_bindings=[binding()])) == []
+
+
+def test_binding_stmt_in_premise_pss_is_invalid() -> None:
+    diagnostics = FinalAstChecker().check(module([], premise_pss=[binding()]))
+    assert any(
+        entry["code"] == "invalid_binding_stmt_location"
+        and entry["reason"] == "binding_stmt is only valid in premise_binding_stmts"
+        for entry in diagnostics
+    )
+
+
+def test_binding_stmt_in_target_pss_is_invalid() -> None:
+    diagnostics = FinalAstChecker().check(module([], target_pss=[binding()]))
+    assert any(entry["code"] == "invalid_binding_stmt_location" for entry in diagnostics)
+
+
+def test_binding_stmt_as_root_is_invalid() -> None:
+    diagnostics = FinalAstChecker().check(binding())
+    assert any(entry["code"] == "invalid_binding_stmt_location" for entry in diagnostics)
+
+
 def test_function_output_premise_rule_is_not_final_ast_check() -> None:
     ast = module(
         [sym("x"), sym("y")],
-        premise_bindings=[
-            {
-                "kind": "binding_stmt",
-                "loc": loc(),
-                "dst_sym": sym("y"),
-                "src_stmt": func("F", sym("x")),
-            }
-        ],
+        premise_bindings=[binding("y", func("F", sym("x")))],
         premise_pss=[func("P", sym("y"))],
     )
     assert "function_output_in_premise" not in codes(ast)
@@ -166,9 +202,14 @@ def main() -> int:
         test_valid_names,
         test_invalid_names,
         test_same_statement_conflict,
+        test_prime_suffix_conflict_semantics,
         test_ancestor_conflict,
         test_sibling_non_conflict,
         test_nested_src_stmt_is_checked,
+        test_binding_stmt_in_premise_bindings_is_valid,
+        test_binding_stmt_in_premise_pss_is_invalid,
+        test_binding_stmt_in_target_pss_is_invalid,
+        test_binding_stmt_as_root_is_invalid,
         test_function_output_premise_rule_is_not_final_ast_check,
         test_cli_stdin_and_file,
         test_cli_malformed_json_and_shape_fail,

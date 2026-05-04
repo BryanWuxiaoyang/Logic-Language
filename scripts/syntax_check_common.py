@@ -10,6 +10,9 @@ from typing import Iterable
 
 from compile_pipeline.errors import CompileError
 from compile_pipeline.module_sections import (
+    BRANCH_MODULE_MARKER,
+    DECL_OUTPUT_MARKER,
+    FRESH_PREFIX,
     brace_delta,
     call_text,
     class_block_prefix_lines,
@@ -19,8 +22,11 @@ from compile_pipeline.module_sections import (
     erase_coloncolon_statement_head,
     find_matching,
     has_top_level,
+    is_class_field_marker,
     is_plain_sym,
+    declaration_kind_fact,
     parse_declaration,
+    parse_premise_declaration,
     reject_unsupported_coloncolon,
     split_indent,
     split_top_level,
@@ -47,6 +53,10 @@ QUANTIFIERS = {"∀", "∃"}
 
 class CheckError(CompileError):
     """Raised when shared checker syntax analysis cannot continue."""
+
+    def __init__(self, message: str, *, position: SourcePosition | None = None) -> None:
+        super().__init__(message)
+        self.position = position
 
 
 @dataclass(frozen=True)
@@ -87,6 +97,7 @@ class CheckModule:
     quantifier: str | None = None
     premise_binding_statements: list[CheckStatement] = field(default_factory=list)
     declaration: CheckDeclaration | None = None
+    suppress_inferred_syms: bool = False
 
 
 @dataclass(frozen=True)
@@ -141,16 +152,35 @@ class LocatedText:
         return self.slice(0, end)
 
 
-def analyze_module_text(source_text: str, *, file_path: Path | None = None) -> CheckResult:
-    source_file = str(file_path.resolve()) if file_path is not None else STDIN_FILE
+def first_position(located: LocatedText) -> SourcePosition | None:
+    stripped = located.strip()
+    if stripped.positions:
+        return stripped.positions[0]
+    if located.positions:
+        return located.positions[0]
+    return None
+
+
+def raise_located_error(message: str, located: LocatedText | SourcePosition) -> None:
+    position = located if isinstance(located, SourcePosition) else first_position(located)
+    raise CheckError(message, position=position)
+
+
+def analyze_module_text(
+    source_text: str,
+    *,
+    file_path: Path | None = None,
+    base_dir: Path | None = None,
+    source_label: str | None = None,
+) -> CheckResult:
+    source_file = source_label or (str(file_path.resolve()) if file_path is not None else STDIN_FILE)
     root = make_located_text(source_text, source_file, import_origin=False)
     root = strip_leading_bom(root)
     tokens = load_tokens()
     normalized = normalize_latex_located(root, tokens)
-    if file_path is None and has_import(normalized.text):
-        raise CheckError("$import is not supported when semantic_check reads module text from stdin")
 
-    expanded = expand_for_checking(normalized, base_dir=file_path.parent if file_path else Path.cwd(), seen=set())
+    import_base_dir = base_dir or (file_path.parent if file_path else Path.cwd())
+    expanded = expand_for_checking(normalized, base_dir=import_base_dir, seen=set())
     import_declarations = collect_import_declarations(expanded)
     cleaned = strip_outer_blank_lines_located(remove_comments_located(expanded))
     if not cleaned.text.strip():
@@ -198,6 +228,11 @@ def synthetic_text(text: str, origin: SourcePosition) -> LocatedText:
     return LocatedText(text, tuple(origin for _ in text))
 
 
+def prefix_premise_located(header: LocatedText, artifact: LocatedText) -> LocatedText:
+    origin = header.positions[0]
+    return concat_located([synthetic_text("| ", origin), artifact])
+
+
 def concat_located(parts: Iterable[LocatedText]) -> LocatedText:
     texts: list[str] = []
     positions: list[SourcePosition] = []
@@ -216,6 +251,11 @@ def generated_declaration_binding_text(declaration: CheckDeclaration) -> str:
     if declaration.outputs == ("bool",):
         return call
     return f"{tuple_or_single(list(declaration.outputs))} = {call}"
+
+
+def is_declaration_marker_text(text: str) -> bool:
+    stripped = text.strip()
+    return stripped.startswith(DECL_OUTPUT_MARKER + "(") and stripped.endswith(")")
 
 
 def normalize_latex_located(located: LocatedText, tokens: dict[str, str]) -> LocatedText:
@@ -474,7 +514,13 @@ class LocatedModuleParser:
         body = located.slice(body_start + 1, close)
         if self.is_image_set_body(body.text):
             return self.parse_image_set(body)
-        return self.build_module("quantifier" if quantifier else "set", quantifier, body, declaration=declaration)
+        return self.build_module(
+            "quantifier" if quantifier else "set",
+            quantifier,
+            body,
+            declaration=declaration,
+            error_position=located.positions[body_start],
+        )
 
     def parse_line_module(self, located: LocatedText, quantifier: str) -> CheckModule:
         lines = logical_lines_located(located)
@@ -492,15 +538,42 @@ class LocatedModuleParser:
             if content.text in QUANTIFIERS and index + 1 < len(lines):
                 block, next_index = collect_indented_block_located(lines, index + 1, indent)
                 if block:
-                    output.append(concat_located([content, synthetic_text("{\n", content.positions[0]), unindent_block_located(block), synthetic_text("\n}", content.positions[0])]))
+                    output.append(
+                        concat_located(
+                            [
+                                content,
+                                synthetic_text("{\n", content.positions[0]),
+                                self.lower_nested_block(unindent_block_located(block)),
+                                synthetic_text("\n}", content.positions[0]),
+                            ]
+                        )
+                    )
                     index = next_index
                     continue
             if index + 1 < len(lines):
                 block, next_index = collect_indented_block_located(lines, index + 1, indent)
                 if block:
+                    premise_declaration = parse_premise_declaration(content.text)
+                    if premise_declaration is not None:
+                        output.extend(
+                            self.lower_premise_declaration(
+                                content,
+                                premise_declaration,
+                                block=self.lower_nested_block(unindent_block_located(block)),
+                            )
+                        )
+                        index = next_index
+                        continue
                     output.extend(self.lower_header_with_block(content, unindent_block_located(block)))
                     index = next_index
                     continue
+            if content.text.startswith("|-"):
+                raise_located_error("branch header requires an indented block", content)
+            premise_declaration = parse_premise_declaration(content.text)
+            if premise_declaration is not None:
+                output.extend(self.lower_premise_declaration(content, premise_declaration, block=None))
+                index += 1
+                continue
             declaration = parse_declaration(content.text)
             if declaration is not None:
                 output.extend(self.lower_declaration(content, declaration, block=None))
@@ -515,7 +588,23 @@ class LocatedModuleParser:
             return [concat_located([synthetic_text("∀{\n", header.positions[0]), block, synthetic_text("\n}", header.positions[0])])]
         if header.text.startswith("|-"):
             branch_ps = header.slice(2).strip()
-            return [concat_located([synthetic_text("∀{\n| ", header.positions[0]), branch_ps, synthetic_text("\n", header.positions[0]), block, synthetic_text("\n}", header.positions[0])])]
+            return [
+                concat_located(
+                    [
+                        synthetic_text("| ∀{\n| ", header.positions[0]),
+                        synthetic_text(BRANCH_MODULE_MARKER + "\n| ", header.positions[0]),
+                        branch_ps,
+                        synthetic_text("\n", header.positions[0]),
+                        self.lower_nested_block(block),
+                        synthetic_text("\n}", header.positions[0]),
+                    ]
+                )
+            ]
+        if is_class_field_marker(header.text):
+            raise_located_error(
+                "class-field shorthand cannot have a function body; use Class::field: input => output for an explicit function declaration",
+                header,
+            )
         class_sym = class_header_sym(header.text)
         if class_sym is not None:
             return self.lower_class_block(header, class_sym, block)
@@ -534,36 +623,50 @@ class LocatedModuleParser:
     ) -> list[LocatedText]:
         name, inputs, outputs, arrow = declaration
         origin = header.positions[0]
-        if arrow == "->":
-            expression = tuple_or_single(outputs)
-            outputs = [self.fresh_sym(name + expression)]
-            body_target = synthetic_text(f"{tuple_or_single(outputs)} = {expression}", origin)
-            block = body_target if block is None else concat_located([body_target, synthetic_text("\n", origin), block])
+        if arrow != "=>":
+            raise_located_error("function-assign '->' is not supported; use '=>' with an indented function body", header)
         module_text = self.declaration_module_located(header, name, inputs, outputs)
-        self.declarations_by_module[located_key(module_text)] = CheckDeclaration(
+        declaration_info = CheckDeclaration(
             kind="predicate" if outputs == ["bool"] else "function",
             name=name,
             inputs=tuple(inputs),
             outputs=tuple(outputs),
         )
+        self.declarations_by_module[located_key(module_text)] = declaration_info
         output = [
-            synthetic_text(f"Function ~ {name}", origin),
+            synthetic_text(declaration_kind_fact(name, outputs), origin),
             module_text,
         ]
         if block is not None:
-            output.append(self.function_body_module_located(header, name, inputs, outputs, block))
+            body_text = self.function_body_module_located(header, name, inputs, outputs, block)
+            self.declarations_by_module[located_key(body_text)] = declaration_info
+            output.append(body_text)
         return output
+
+    def lower_premise_declaration(
+        self,
+        header: LocatedText,
+        declaration: tuple[str, list[str], list[str], str],
+        *,
+        block: LocatedText | None,
+    ) -> list[LocatedText]:
+        return [prefix_premise_located(header, artifact) for artifact in self.lower_declaration(header.slice(1).strip(), declaration, block=block)]
 
     def declaration_module_located(self, header: LocatedText, name: str, inputs: list[str], outputs: list[str]) -> LocatedText:
         origin = header.positions[0]
         call = call_text(name, inputs)
-        target = f"{tuple_or_single(outputs)} = {call}" if outputs != ["bool"] else call
+        binding = f"{tuple_or_single(outputs)} = {call}" if outputs != ["bool"] else call
+        marker = f"{DECL_OUTPUT_MARKER}({', '.join(outputs)})"
         binder_line = located_binder_line_from_header(header, inputs + outputs)
         body_parts = [
             synthetic_text("∀{\n", origin),
             binder_line,
             synthetic_text("\n| ", origin),
-            synthetic_text(target, origin),
+            synthetic_text(marker, origin),
+            synthetic_text("\n| ", origin),
+            synthetic_text(binding, origin),
+            synthetic_text("\n", origin),
+            synthetic_text(marker, origin),
         ]
         body_parts.append(synthetic_text("\n}", origin))
         return concat_located(body_parts)
@@ -600,9 +703,9 @@ class LocatedModuleParser:
             line = body_lines[index]
             indent, content = split_indent_located(line)
             if indent != 0 or not content.text.startswith("::"):
-                raise CheckError("class-declaration body line must start with '::'")
+                raise_located_error("class-declaration body line must start with '::'", content)
             if content.text.startswith(":::") or content.text.strip() == "::":
-                raise CheckError("class-declaration body line must start with '::' followed by a declaration")
+                raise_located_error("class-declaration body line must start with '::' followed by a declaration", content)
             expanded_lines.append(concat_located([synthetic_text(class_sym, content.positions[0]), content]))
             nested, next_index = collect_indented_block_located(body_lines, index + 1, indent)
             expanded_lines.extend(nested)
@@ -619,28 +722,38 @@ class LocatedModuleParser:
         body: LocatedText,
         *,
         declaration: CheckDeclaration | None = None,
+        error_position: SourcePosition | None = None,
     ) -> CheckModule:
         sections = split_sections_located(body)
         if not sections:
-            raise CheckError("module requires target statements")
+            if module_type == "set":
+                raise CheckError("set module requires non-empty syms", position=error_position or first_position(body))
+            raise CheckError("module requires target statements", position=error_position or first_position(body))
         target_section = sections[-1]
         before_target = sections[:-1]
         binders: list[Binder] = []
         predicate_sections: list[LocatedText] = []
+        suppress_inferred_syms = False
         for section in before_target:
+            if section.text == BRANCH_MODULE_MARKER:
+                suppress_inferred_syms = True
+                continue
             candidates = parse_binder_list_located(section)
             if candidates:
                 binders.extend(candidates)
             else:
                 predicate_sections.append(section)
         predicate_texts = split_terms_located(join_lines_located(predicate_sections))
-        target_texts = split_terms_located(target_section)
-        if not binders:
+        suppress_inferred_syms = suppress_inferred_syms or any(text.text == BRANCH_MODULE_MARKER for text in predicate_texts)
+        predicate_texts = [text for text in predicate_texts if text.text != BRANCH_MODULE_MARKER]
+        predicate_texts = [text for text in predicate_texts if not is_declaration_marker_text(text.text)]
+        target_texts = [text for text in split_terms_located(target_section) if not is_declaration_marker_text(text.text)]
+        if not binders and not suppress_inferred_syms:
             binders = infer_binders(predicate_texts)
         if module_type == "set" and not binders:
-            raise CheckError("set module requires non-empty syms")
-        if not target_texts:
-            raise CheckError("module requires non-empty target_statements")
+            raise CheckError("set module requires non-empty syms", position=error_position or first_position(body))
+        if not target_texts and declaration is None:
+            raise CheckError("module requires non-empty target_statements", position=error_position or first_position(target_section))
         predicate_statements = [self.compile_statement(term) for term in predicate_texts]
         premise_binding_statements: list[CheckStatement] = []
         if declaration is not None and predicate_statements:
@@ -655,6 +768,7 @@ class LocatedModuleParser:
             target_statements=[self.compile_statement(term) for term in target_texts],
             premise_binding_statements=premise_binding_statements,
             declaration=declaration,
+            suppress_inferred_syms=suppress_inferred_syms,
         )
 
     def parse_image_set(self, body: LocatedText) -> CheckModule:
@@ -694,7 +808,7 @@ class LocatedModuleParser:
 
     def fresh_sym(self, seed: str) -> str:
         while True:
-            sym = f"__logic_language_out{self.fresh_index}"
+            sym = f"{FRESH_PREFIX}{self.fresh_index}"
             self.fresh_index += 1
             if sym not in seed:
                 return sym
@@ -715,7 +829,7 @@ def logical_lines_located(located: LocatedText) -> list[LocatedText]:
             pending = []
             balance = 0
     if pending:
-        raise CheckError("unclosed {")
+        raise_located_error("unclosed {", join_lines_located(pending))
     return lines
 
 
@@ -771,7 +885,7 @@ def erase_coloncolon_statement_head_located(located: LocatedText) -> LocatedText
         if colon_index >= 0:
             suffix_name = suffix[:colon_index]
             return concat_located([stripped.slice(suffix_start, suffix_start + len(suffix_name)), stripped.slice(suffix_start + len(suffix_name))])
-        return stripped.slice(suffix_start)
+        return synthetic_text(rewritten, stripped.positions[0])
     return synthetic_text(rewritten, stripped.positions[0])
 
 
@@ -891,7 +1005,7 @@ def split_top_level_located(located: LocatedText, separator: str) -> list[Locate
 def split_top_level_once_located(located: LocatedText, separator: str) -> tuple[LocatedText, LocatedText]:
     parts = split_top_level_located(located, separator)
     if len(parts) < 2:
-        raise CheckError(f"expected top-level {separator}")
+        raise_located_error(f"expected top-level {separator}", located)
     return parts[0], concat_located(parts[1:])
 
 
@@ -941,7 +1055,15 @@ def find_next_module_start(text: str, start: int) -> int | None:
         if char in QUANTIFIERS and index + 1 < len(text) and text[index + 1] == "{":
             return index
         if char == "{":
-            return index
+            try:
+                end = find_matching(text, index, "{", "}")
+            except CompileError:
+                return index
+            body = text[index + 1 : end].strip()
+            if body.startswith("|") or has_top_level(body, "|") or has_top_level(body, "=>"):
+                return index
+            index = end + 1
+            continue
         index += 1
     return None
 

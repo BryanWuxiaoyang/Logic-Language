@@ -4,12 +4,16 @@ description: Parse, compile, and diagnose logic-language module text (postfix as
 ---
 
 # Overview
-logic-language module-text semantics, compilation, and diagnostics
+logic-language is a soft-typed HOL-like knowledge representation language. It represents all named entities as `sym` and expresses roles such as functions, predicates, sets, values, and user concepts through ordinary inheritance facts using `~`.
+
+Source modules combine bound symbols, premises, and targets to describe logical propositions and set abstractions, while readable forms such as function declarations, class declarations, fields, literals, and image sets compile into a canonical module AST.
+
+The AST is intended as a precise intermediate logic form that can support human-readable knowledge encoding and later validation through reified SMT/FOL or typed-HOL backends.
 
 ## Semantics
 
 ### Describe the `logic-system`
-- the `logic-system` is Soft-typed higher-order logic (HOL).
+- the `logic-system` is soft-typed, single-symbol-domain High-order-logic.
 
 - the `logic-system` uses the usual HOL written forms for:
     - symbols
@@ -76,7 +80,7 @@ logic-language module-text semantics, compilation, and diagnostics
 ### Describe `module-signature`
 - introduce `module-signature` as the module-file-level validation environment for modules parsed from a `module-file`.
 - The `module-signature` includes
-  - `intrinsic-syms`: `Tuple`, `Set`, `Function`, `Value`, `true`, `false`, `Bool`, `Symbol`, `Char`, `String`, `List`
+  - `intrinsic-syms`: `Tuple`, `Set`, `Function`, `Predicate`, `Value`, `true`, `false`, `Bool`, `Symbol`, `Char`, `String`, `List`
   - `function-syms`
   - `built-in-forms` includes form categories accepted by `module-text`.
     - literal forms: set-comprehension, tuple-comprehension, set-literals, tuple-literals, numeric-literals
@@ -121,7 +125,7 @@ logic-language module-text semantics, compilation, and diagnostics
         `∀{| x, y, z | x ~ y, y ~ z | x ~ z}`
     - e.g. `∀{| x, y, z | x~y, y~z | x~z}` is a canonical surface axiom expressing transitivity
     - the standard library provides the canonical reflexivity axiom
-        `∀{| __sym | __sym ~ __sym}`
+        `∀{| ^sym | ^sym ~ ^sym}`
     - `~` does not by itself introduce separate primitive syntactic categories for object-sym, function-sym, predicate-sym, or class-sym
     - those roles are determined by declaration form, usage position, and translation to the target `logic-system`
 
@@ -146,6 +150,7 @@ logic-language module-text semantics, compilation, and diagnostics
     - numeric literals of supported syntax implicitly have an adjacent wrapper fact `Value ~ literal`.
 
 - introduce `Set` as an intrinsic sym in `module-text`.
+    `Set = Predicate`
     M("| sym | sym = {sym' | P(sym')} | TS") = M(
     "
     | sym
@@ -155,20 +160,31 @@ logic-language module-text semantics, compilation, and diagnostics
     "
     )
 
+- introduce `\in` and `\notin` as membership operators.
+    - `set` is a predicate-object, so membership is predicate application.
+    - `M("x \in set") = M("set(x)")`
+    - `M("x \notin set") = M("!set(x)")`
+    - after latex-translation, the same rules apply to `x ∈ set` and `x ∉ set`.
+
 - introduce `Function` as an intrinsic sym in `module-text`.
     - `function-declaration` adds its function name as an ordinary inheritance fact `Function ~ sym`
+    - if the declaration output is exactly `bool`, it is a `predicate-declaration` and adds `Predicate ~ sym` instead.
     M("sym: sym1 => sym2") = M(
     "
     Function ~ sym
     sym: sym1 => sym2
     "
     )
+    - premise declaration sugar is allowed anywhere a premise statement is allowed:
+      `M("| f: in => out") = M("| Function ~ f | ∀{| in, out | out = f(in)}")`
+    - with an indented declaration body, the generated body module is also a premise statement of the parent module.
 
 - introduce `Symbol` as an intrinsic sym in `module-text`
     - the standard library provides the canonical universal symbol axiom
-        `∀{| __sym | Symbol ~ __sym}`
+        `∀{| ^sym | Symbol ~ ^sym}`
     - compiler-generated `Symbol ~ sym` facts may be omitted when the same module-stmt premise section already contains another inheritance fact `source ~ sym`
-    - Induction: all `syms` in `module` will have at least `Symbol` as an inheritance-source sym when the standard library axiom is in scope, except generated `__...` syms
+    - Induction: all `syms` in `module` will have at least `Symbol` as an inheritance-source sym when the standard library axiom is in scope, except generated `^...` syms
+    - `^` is reserved for generated-sym source. It is valid only as the first character of a generated sym-name. `__...` has no generated-symbol semantics.
 
 - a `module-text` includes text-replacement rules for translation. Below are `M("...") = M("...")` rules that translate `module-text` to more reduced `normal-module-text`
 
@@ -325,7 +341,7 @@ logic-language module-text semantics, compilation, and diagnostics
     - A name-implicit inheritance is applied only when the base part of the name resolves to a visible capital-head inheritance-source sym.
     - A visible inheritance-source sym is an imported or ancestor declared sym whose first character is uppercase.
     - If the base part does not resolve to a visible inheritance-source sym, the name-implicit inheritance rule does not apply.
-    - Regardless, every declared-sym inherits `Symbol` when the standard library universal symbol axiom is in scope, except generated `__...` syms.
+    - Regardless, every declared-sym inherits `Symbol` when the standard library universal symbol axiom is in scope, except generated `^...` syms.
     - Candidate lookup strips trailing primes and trailing digits, then tries the full remaining name and repeatedly removes the first `_` segment. Only the first character of each candidate is capitalized.
         `max_head_val1` tries `Max_head_val`, then `Head_val`, then `Val`.
     - When multiple visible candidates match, the longest candidate wins.
@@ -358,19 +374,18 @@ logic-language module-text semantics, compilation, and diagnostics
         M(
         "
         | sym
-        ∀{
+        | ∀{
             | PS1
             | PS1'
             TS1
-            TS3
         }
-        ∀{
+        | ∀{
             | PS2
             | PS2'
             TS2
-            TS3
         }
         "
+        TS3
         )
 
 - introduce `unary-operator` as `sym`, such as `M("-S") = M("-(S)")`
@@ -417,10 +432,10 @@ logic-language module-text semantics, compilation, and diagnostics
     Sym
     Function ~ F
     \all
-        | sym1, sym2, sym3, sym4, __tmp_ret
+        | sym1, sym2, sym3, sym4, ^tmp_ret
         | Sym ~ sym1, Sym ~ sym2
-        | __tmp_ret = F(sym1, sym2)
-        | sym3 = __tmp_ret[0], sym4 = __tmp_ret[1]
+        | ^tmp_ret = F(sym1, sym2)
+        | sym3 = ^tmp_ret[0], sym4 = ^tmp_ret[1]
         Sym ~ sym3
         Sym ~ sym4
     "
@@ -455,9 +470,9 @@ logic-language module-text semantics, compilation, and diagnostics
     "
     ) = M("
     ∀
-        | sym1, sym2, sym3, sym4, __tmp_ret
-        | __tmp_ret = sym(sym1, sym2)
-        | sym3 = __tmp_ret[0], sym4 = __tmp_ret[1]
+        | sym1, sym2, sym3, sym4, ^tmp_ret
+        | ^tmp_ret = sym(sym1, sym2)
+        | sym3 = ^tmp_ret[0], sym4 = ^tmp_ret[1]
         | PS
         TS
     ")
@@ -467,21 +482,13 @@ logic-language module-text semantics, compilation, and diagnostics
     - function input implicit-inheritance facts are premises; function output implicit-inheritance facts are targets because they are guarantees of the function.
     - Induction: `function`'s arity is not fixed, so multiple `function-declarations` for the same `sym` add quantified constraints to the same function-sym.
 
-- introduce `function-assign`
-    M("sym: (sym1, sym2) -> F(sym1, sym2)") = M(
-    "
-    sym: (sym1, sym2) => sym3
-        sym3 = F(sym1, sym2)
-    "
-    )
-
 - The `function-declaration`'s parameters and outputs use the same name-implicit inheritance rules and ancestor-conflict invalidity rule as nested `module-text`.
     - If a name syntactically suggests an inheritance-source sym, but that source is not visible in the current scope, then the name-implicit inheritance rule does not apply.
     - e.g. with visible `Value`, `M("sym: (value, value1) => out_value")` adds premise facts `Value ~ value` and `Value ~ value1`, and target fact `Value ~ out_value`.
 
 - introduce `predicate-declaration`
     `predicate` is a special form of `function` which returns a output sym inheriting `Bool`. i.e. `P: sym => bool`
-    `predicate` follows the same rule as `function-declaration`, but `sym(...)` is a `predicate-statement`, not `function-statement`
+    `predicate` follows the same rule as `function-declaration`, but emits `Predicate ~ P`, and `P(...)` is a `predicate-statement`, not `function-statement`
     
 - introduce `set-module-text` as identical to `SMT`
 - introduce `image-set-text`
@@ -528,6 +535,10 @@ logic-language module-text semantics, compilation, and diagnostics
 - introduce `class-declaration`
     - `class-declaration` is a surface syntax form only. Semantically it is sugar that expands to ordinary declarations and `~` facts.
     - it does not introduce a new primitive semantic kind named `class`.
+
+    M("Class::field") = M("field: class => field'")
+    M("Class::func: inputs => outputs") = M("func: inputs => outputs")
+
     M(
     "
     Sym
@@ -537,24 +548,22 @@ logic-language module-text semantics, compilation, and diagnostics
     "
     ) = M("
     Sym
-    Sym::sym1
+    Sym::sym1: sym => sym1'
     Sym::sym2: sym => sym2'
     Sym::sym3: (sym, sym3') => sym3''
     ")
 
-    `M("x::y") = M("y")`
-
     M(
     "
     Sym
-    Sym::sym1
+    Sym::sym1: sym => sym1'
     Sym::sym2: sym => sym2'
     Sym::sym3: (sym, sym3') => sym3''
     "
     ) = M("
     Sym
-    sym1
-    sym2: sym => sym2
+    sym1: sym => sym1'
+    sym2: sym => sym2'
     sym3: (sym, sym3') => sym3''
     ")
 
@@ -618,15 +627,40 @@ logic-language module-text semantics, compilation, and diagnostics
         TS
         ")
 
-- introduce `[:]` as a `binary-operator`
-    M("[val1: val2]") = M(
+- introduce `[val1: val2]` as a `binary-operator` and `sym[val1: val2]` as a `ternary-operator`
+    M("list = [val1: val2]") = M(
+    "
+    list = [:](val1, val2)
+    "
+    ) = M(
     "
     list
     List ~ list
+    list.size = val2 - val1
     \all
         | val
-        | val1 <= val < val2
+        | val1 <= val
+        | val < val2
         list[val - val1] = val
+    "
+    )
+
+    M("
+    list = sym[val1 : val2]
+    ") = M(
+    "
+    list = [:](sym, val1, val2)
+    "
+    ) = M(
+    "
+    list
+    List ~ list
+    list.size = val2 - val1
+    \all
+        | val
+        | val1 <= val
+        | val < val2
+        list[val - val1] = sym[val]
     "
     )
 
@@ -779,3 +813,16 @@ logic-language module-text semantics, compilation, and diagnostics
     - path: `scripts/semantic_check.py`
     - input: `module-text` via stdin/`--text`, or a `module-file` path.
     - output: JSON semantic diagnostics.
+
+## Compiler Validation
+- `golden_tests.md` is the executable semantic-review corpus for compiler expansion.
+    - path: `golden_tests.md`
+    - each pair has the form:
+        ```
+        source-text
+        =
+        expected-expanded-source
+        ```
+    - `expected-expanded-source` should be the canonical output of `expand_module(source-text)`.
+    - `expand_module` output must be closure-identical:
+        `expand_module(source-text) = expand_module(expand_module(source-text))`

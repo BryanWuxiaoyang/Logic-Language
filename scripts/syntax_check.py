@@ -24,6 +24,7 @@ from compile_pipeline.source_utils import (
     remove_comments,
     resolve_import_path,
 )
+from syntax_check_common import CheckError, analyze_module_text
 
 
 STDIN_FILE = "<stdin>"
@@ -62,6 +63,8 @@ def check_text(
     seen = set() if seen is None else set(seen)
     diagnostics: list[Diagnostic] = []
     body_lines = split_imports_with_diagnostics(text, file_label, base_dir, diagnostics, seen, tokens, parser)
+    if diagnostics:
+        return diagnostics
     body_text = "\n".join(body_lines)
 
     latex_diagnostics = latex_errors(text, file_label, tokens)
@@ -71,14 +74,17 @@ def check_text(
     if latex_diagnostics or local_brace_diagnostics:
         return diagnostics
 
+    body_line_offset = 0
     try:
+        file_path = None if file_label == STDIN_FILE else Path(file_label)
+        analyze_module_text(text, file_path=file_path, base_dir=base_dir, source_label=file_label)
         normalized_body = normalize_latex(body_text, tokens)
         cleaned_body = remove_comments(normalized_body)
         body_line_offset = leading_blank_line_count(cleaned_body)
         body = strip_outer_blank_lines(cleaned_body)
         ModuleCompiler(parser).compile(body)
     except CompileError as error:
-        diagnostics.append(compile_error_to_diagnostic(str(error), file_label, body_line_offset))
+        diagnostics.append(compile_error_to_diagnostic(error, file_label, body_line_offset))
 
     return diagnostics
 
@@ -253,7 +259,20 @@ def strip_comment_for_scan(line: str) -> str:
     return line
 
 
-def compile_error_to_diagnostic(message: str, file_label: str, line_offset: int) -> Diagnostic:
+def compile_error_to_diagnostic(error: CompileError | str, file_label: str, line_offset: int) -> Diagnostic:
+    if isinstance(error, CheckError) and error.position is not None:
+        position = error.position
+        reason = str(error)
+        return make_diagnostic(
+            position.file,
+            position.line - 1,
+            position.column - 1,
+            position.column,
+            "error",
+            code_for_reason(reason),
+            reason,
+        )
+    message = str(error)
     match = re.match(r"^(?P<line>\d+):(?P<column>\d+):\s*(?P<reason>.+)$", message)
     if match is not None:
         line = max(int(match.group("line")) - 1 + line_offset, 0)

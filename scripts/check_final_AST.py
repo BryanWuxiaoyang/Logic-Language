@@ -45,7 +45,7 @@ class FinalAstChecker:
         self.diagnostics: list[Diagnostic] = []
 
     def check(self, ast: AstNode) -> list[dict[str, object]]:
-        self.visit_stmt(require_node(ast, "root"), tuple())
+        self.visit_stmt(require_node(ast, "root"), tuple(), binding_allowed=False)
         diagnostics = sorted(
             self.diagnostics,
             key=lambda diagnostic: (
@@ -57,13 +57,15 @@ class FinalAstChecker:
         )
         return [diagnostic.to_json() for diagnostic in diagnostics]
 
-    def visit_stmt(self, node: AstNode, ancestor_names: tuple[str, ...]) -> None:
+    def visit_stmt(self, node: AstNode, ancestor_names: tuple[str, ...], *, binding_allowed: bool) -> None:
         kind = require_kind(node)
         if kind in {"quantified_stmt", "set_stmt"}:
             self.visit_module(node, ancestor_names)
             return
         if kind == "binding_stmt":
-            self.visit_stmt(require_node(node.get("src_stmt"), "binding_stmt.src_stmt"), ancestor_names)
+            if not binding_allowed:
+                self.emit_invalid_binding_location(node)
+            self.visit_stmt(require_node(node.get("src_stmt"), "binding_stmt.src_stmt"), ancestor_names, binding_allowed=False)
             return
         if kind == "func_stmt" or kind == "sym":
             return
@@ -71,7 +73,7 @@ class FinalAstChecker:
             return
         if kind in {"tuple_literal_stmt", "set_literal_stmt"}:
             for item in require_list(node, "item_stmts"):
-                self.visit_stmt(require_node(item, f"{kind}.item_stmts item"), ancestor_names)
+                self.visit_stmt(require_node(item, f"{kind}.item_stmts item"), ancestor_names, binding_allowed=False)
             return
         raise AstCheckError(f"unsupported AST node kind: {kind}")
 
@@ -93,7 +95,11 @@ class FinalAstChecker:
         child_ancestors = (*ancestor_names, *raw_names)
         for field in ("premise_binding_stmts", "premise_PSs", "target_PSs"):
             for stmt in require_list(node, field):
-                self.visit_stmt(require_node(stmt, f"{require_kind(node)}.{field} item"), child_ancestors)
+                self.visit_stmt(
+                    require_node(stmt, f"{require_kind(node)}.{field} item"),
+                    child_ancestors,
+                    binding_allowed=field == "premise_binding_stmts",
+                )
 
     def check_bound_sym(self, sym_node: AstNode, owner_stmt: AstNode) -> str | None:
         if sym_node.get("kind") != "sym":
@@ -127,11 +133,37 @@ class FinalAstChecker:
             )
         )
 
+    def emit_invalid_binding_location(self, binding_node: AstNode) -> None:
+        self.diagnostics.append(
+            make_diagnostic(
+                binding_node,
+                binding_node,
+                code="invalid_binding_stmt_location",
+                reason="binding_stmt is only valid in premise_binding_stmts",
+            )
+        )
+
 
 def is_valid_bound_sym_name(name: str) -> bool:
+    if "^" in name:
+        if not name.startswith("^") or name == "^":
+            return False
+        base = name[1:]
+        if not base or "^" in base:
+            return False
+        return is_valid_ordinary_bound_sym_name(base)
+    return is_valid_ordinary_bound_sym_name(name)
+
+
+def is_valid_ordinary_bound_sym_name(name: str) -> bool:
+    if name in {"[:]", "[]"}:
+        return True
     if name.isidentifier():
         return True
-    return len(name) == 1 and not name[0].isspace() and not name[0].isdigit()
+    base = name.rstrip("'")
+    if base and len(base) < len(name) and base.isidentifier():
+        return True
+    return len(name) == 1 and not name[0].isspace() and not name[0].isdigit() and name not in {"'", '"', "^"}
 
 
 def make_diagnostic(sym_node: AstNode, owner_stmt: AstNode, *, code: str, reason: str) -> Diagnostic:

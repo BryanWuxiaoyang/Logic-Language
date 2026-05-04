@@ -16,9 +16,13 @@ if str(SCRIPTS_DIR) not in sys.path:
 
 from compile_pipeline.errors import CompileError
 from compile_pipeline.module_sections import (
+    DECL_BODY_OUTPUT_MARKER,
+    DECL_OUTPUT_MARKER,
+    GENERATED_SYM_PREFIX,
     Module,
     Statement,
     find_matching,
+    is_generated_sym_name,
     is_plain_sym,
     lower_member_calls,
     split_top_level,
@@ -40,6 +44,7 @@ OPERATOR_CALLS: tuple[tuple[str, str], ...] = (
     ("<=", "<="),
     ("&&", "&&"),
     ("||", "||"),
+    ("=", "="),
     ("+", "+"),
     ("-", "-"),
     ("*", "*"),
@@ -81,9 +86,19 @@ class AstLowerer:
         premise_bindings: list[AstNode] = []
         premise_pss: list[AstNode] = []
         target_pss: list[AstNode] = []
+        suppress_next_body_output_classifiers = False
 
         for statement in module.predicate_statements:
-            bindings, nodes = self.lower_statement(statement, target_section=False)
+            text = lower_member_calls(statement.text.strip())
+            if is_compiler_output_marker(text):
+                suppress_next_body_output_classifiers = is_compiler_body_output_marker(text)
+                continue
+            bindings, nodes = self.lower_statement(
+                statement,
+                target_section=False,
+                suppress_generated_classifiers=suppress_next_body_output_classifiers,
+            )
+            suppress_next_body_output_classifiers = False
             premise_bindings.extend(bindings)
             for node in nodes:
                 if node.get("kind") == "binding_stmt":
@@ -138,10 +153,18 @@ class AstLowerer:
             ast["quantifier_sym"] = sym_node(module.quantifier)
         return ast
 
-    def lower_statement(self, statement: Statement, *, target_section: bool) -> tuple[list[AstNode], list[AstNode]]:
+    def lower_statement(
+        self,
+        statement: Statement,
+        *,
+        target_section: bool,
+        suppress_generated_classifiers: bool = False,
+    ) -> tuple[list[AstNode], list[AstNode]]:
         text = lower_member_calls(statement.text.strip())
         if not text:
             raise CompileError("empty statement")
+        if is_compiler_output_marker(text):
+            return [], []
         placeholder = re.fullmatch(r"\$module(?P<index>\d+)", text)
         if placeholder is not None:
             return [], [self.lower_module(statement.sub_modules[int(placeholder.group("index"))])]
@@ -153,14 +176,29 @@ class AstLowerer:
                 text[assignment_index + 1 :].strip(),
                 statement,
                 target_section=target_section,
+                suppress_generated_classifiers=suppress_generated_classifiers,
             )
         bindings, node = self.lower_call_statement(text, statement)
         return bindings, [node]
 
-    def lower_assignment(self, lhs: str, rhs: str, statement: Statement, *, target_section: bool) -> tuple[list[AstNode], list[AstNode]]:
+    def lower_assignment(
+        self,
+        lhs: str,
+        rhs: str,
+        statement: Statement,
+        *,
+        target_section: bool,
+        suppress_generated_classifiers: bool = False,
+    ) -> tuple[list[AstNode], list[AstNode]]:
         lhs_items = parse_tuple_or_list_items(lhs)
         if lhs_items is not None:
-            return self.lower_compound_lhs(lhs_items, rhs, statement, target_section=target_section)
+            return self.lower_compound_lhs(
+                lhs_items,
+                rhs,
+                statement,
+                target_section=target_section,
+                suppress_generated_classifiers=suppress_generated_classifiers,
+            )
         if is_plain_sym(lhs):
             rhs_expr = self.parse_expr(rhs, statement)
             if rhs_expr["kind"] == "sym":
@@ -178,20 +216,34 @@ class AstLowerer:
         rhs_sym = self.ensure_sym(self.parse_expr(rhs, statement), bindings)
         return bindings, [func_stmt("=", [lhs_sym, rhs_sym], self.loc)]
 
-    def lower_compound_lhs(self, lhs_items: list[str], rhs: str, statement: Statement, *, target_section: bool) -> tuple[list[AstNode], list[AstNode]]:
+    def lower_compound_lhs(
+        self,
+        lhs_items: list[str],
+        rhs: str,
+        statement: Statement,
+        *,
+        target_section: bool,
+        suppress_generated_classifiers: bool = False,
+    ) -> tuple[list[AstNode], list[AstNode]]:
         if not all(is_plain_sym(item) for item in lhs_items):
             raise CompileError("tuple/list assignment left-hand side must contain only symbols")
         bindings: list[AstNode] = []
         rhs_sym = self.ensure_sym(self.parse_expr(rhs, statement), bindings, preferred=preferred_temp_name(rhs))
-        tuple_classifier = func_stmt("~", [sym_node("Tuple", self.loc), rhs_sym], self.loc, generated=True)
-        if target_section and self.generated_target_stack:
-            self.generated_target_stack[-1].append(tuple_classifier)
-        elif self.generated_premise_stack:
-            self.generated_premise_stack[-1].append(tuple_classifier)
+        if not suppress_generated_classifiers:
+            tuple_classifier = func_stmt("~", [sym_node("Tuple", self.loc), rhs_sym], self.loc, generated=True)
+            if self.generated_target_stack:
+                self.generated_target_stack[-1].append(tuple_classifier)
+            elif self.generated_premise_stack:
+                self.generated_premise_stack[-1].append(tuple_classifier)
         target_nodes: list[AstNode] = []
         for index, lhs in enumerate(lhs_items):
             index_literal = literal_stmt(LiteralValue("value", str(index), str(index)), self.loc)
-            index_sym = self.ensure_sym(index_literal, bindings, preferred="value")
+            index_sym = self.ensure_sym(
+                index_literal,
+                bindings,
+                preferred="value",
+                suppress_literal_classifier=suppress_generated_classifiers,
+            )
             index_call = func_stmt("[]", [rhs_sym, index_sym], self.loc, generated=True)
             if target_section:
                 component_sym = self.ensure_sym(index_call, bindings, preferred="[]")
@@ -218,6 +270,10 @@ class AstLowerer:
             return literal_stmt(literal, self.loc)
         if text == "[]":
             return sym_node(text, self.loc)
+        range_call = parse_range_literal(text)
+        if range_call is not None:
+            start, end = range_call
+            return self.call_expr("[:]", [start, end], statement)
         items = parse_tuple_or_list_items(text)
         if items is not None:
             return literal_collection("tuple_literal_stmt", [self.parse_expr(item, statement) for item in items], self.loc)
@@ -227,18 +283,22 @@ class AstLowerer:
         grouped = strip_outer_grouping_parens(text)
         if grouped is not None:
             return self.parse_expr(grouped, statement)
+        operator = split_operator(text)
+        if operator is not None:
+            lhs, op, rhs = operator
+            return self.call_expr(op, [lhs, rhs], statement)
         index_call = parse_index_call(text)
         if index_call is not None:
             receiver, index = index_call
+            index_range = parse_range_terms(index)
+            if index_range is not None:
+                start, end = index_range
+                return self.call_expr("[:]", [receiver, start, end], statement)
             return self.call_expr("[]", [receiver, index], statement)
         call = parse_call(text)
         if call is not None:
             name, args = call
             return self.call_expr(name, args, statement)
-        operator = split_operator(text)
-        if operator is not None:
-            lhs, op, rhs = operator
-            return self.call_expr(op, [lhs, rhs], statement)
         if is_sym_name(text):
             return sym_node(text, self.loc)
         raise CompileError(f"unsupported expression: {text}")
@@ -251,7 +311,14 @@ class AstLowerer:
             node["_bindings"] = bindings
         return node
 
-    def ensure_sym(self, expr: AstNode, bindings: list[AstNode], *, preferred: str | None = None) -> AstNode:
+    def ensure_sym(
+        self,
+        expr: AstNode,
+        bindings: list[AstNode],
+        *,
+        preferred: str | None = None,
+        suppress_literal_classifier: bool = False,
+    ) -> AstNode:
         if expr["kind"] == "sym":
             return expr
         nested_bindings = expr.pop("_bindings", [])
@@ -262,12 +329,12 @@ class AstLowerer:
             self.generated_bound_stack[-1].append(temp_sym)
         bindings.append(binding_stmt(temp, expr, self.loc, generated=True))
         classifier = literal_classifier_name(expr.get("kind"))
-        if classifier is not None and self.generated_target_stack:
+        if classifier is not None and self.generated_target_stack and not suppress_literal_classifier:
             self.generated_target_stack[-1].append(func_stmt("~", [sym_node(classifier, self.loc), temp_sym], self.loc, generated=True))
         return temp_sym
 
     def fresh_temp(self, preferred: str) -> str:
-        base = "__tmp" + sanitize_temp_name(preferred)
+        base = GENERATED_SYM_PREFIX + "tmp" + sanitize_temp_name(preferred)
         candidate = f"{base}{self.temp_index}"
         self.temp_index += 1
         return candidate
@@ -284,7 +351,7 @@ def sym_node(name: str, loc: dict[str, Any] | None = None, *, generated: bool = 
     node: AstNode = {"kind": "sym", "name": name}
     if loc is not None:
         node["loc"] = loc
-    if generated:
+    if generated or is_generated_sym_name(name):
         node["generated"] = True
     return node
 
@@ -298,6 +365,14 @@ def func_stmt(name: str, args: list[AstNode], loc: dict[str, Any], *, generated:
 
 def literal_classifier_name(kind: str | None) -> str | None:
     return LITERAL_CLASSIFIERS.get(kind or "")
+
+
+def is_compiler_output_marker(text: str) -> bool:
+    return any(text.startswith(marker + "(") and text.endswith(")") for marker in (DECL_OUTPUT_MARKER, DECL_BODY_OUTPUT_MARKER))
+
+
+def is_compiler_body_output_marker(text: str) -> bool:
+    return text.startswith(DECL_BODY_OUTPUT_MARKER + "(") and text.endswith(")")
 
 
 def stmt_identity_key(node: AstNode) -> tuple[Any, ...]:
@@ -364,11 +439,27 @@ def parse_tuple_or_list_items(text: str) -> list[str] | None:
         return None
     inner = text[1:-1].strip()
     if not inner:
-        return []
+        return [] if text[0] == "(" else None
     items = [item.strip() for item in split_top_level(inner, ",") if item.strip()]
     if len(items) <= 1 and "," not in inner:
         return None
     return items
+
+
+def parse_range_literal(text: str) -> tuple[str, str] | None:
+    text = text.strip()
+    if not (text.startswith("[") and text.endswith("]")):
+        return None
+    if find_matching(text, 0, "[", "]") != len(text) - 1:
+        return None
+    return parse_range_terms(text[1:-1].strip())
+
+
+def parse_range_terms(text: str) -> tuple[str, str] | None:
+    parts = [part.strip() for part in split_top_level(text, ":")]
+    if len(parts) != 2 or not parts[0] or not parts[1]:
+        return None
+    return parts[0], parts[1]
 
 
 def parse_set_literal_items(text: str) -> list[str] | None:
@@ -378,10 +469,10 @@ def parse_set_literal_items(text: str) -> list[str] | None:
     if find_matching(text, 0, "{", "}") != len(text) - 1:
         return None
     inner = text[1:-1].strip()
-    if not inner:
-        return None
     if "|" in inner or "=>" in inner:
         return None
+    if not inner:
+        return []
     return [item.strip() for item in split_top_level(inner, ",") if item.strip()]
 
 
@@ -429,11 +520,18 @@ def parse_index_call(text: str) -> tuple[str, str] | None:
 
 def split_operator(text: str) -> tuple[str, str, str] | None:
     for raw, canonical in OPERATOR_CALLS:
-        parts = split_top_level_token(text, raw) if raw.isalpha() else split_top_level(text, raw)
-        if len(parts) == 2:
+        if raw == "=":
+            index = top_level_assignment_index(text)
+            if index is None:
+                continue
+            lhs, rhs = text[:index].strip(), text[index + 1 :].strip()
+        else:
+            parts = split_top_level_token(text, raw) if raw.isalpha() else split_top_level(text, raw)
+            if len(parts) != 2:
+                continue
             lhs, rhs = parts[0].strip(), parts[1].strip()
-            if lhs and rhs:
-                return lhs, canonical, rhs
+        if lhs and rhs:
+            return lhs, canonical, rhs
     return None
 
 
@@ -468,7 +566,9 @@ def split_top_level_token(text: str, separator: str) -> list[str]:
 def is_sym_name(text: str) -> bool:
     if text == "[]":
         return True
-    return re.fullmatch(r"[^\s()\[\]{},]+", text) is not None
+    if is_plain_sym(text):
+        return True
+    return "^" not in text and re.fullmatch(r"[^\s()\[\]{},]+", text) is not None
 
 
 def preferred_temp_name(text: str) -> str:
@@ -486,6 +586,8 @@ def preferred_temp_name(text: str) -> str:
 def sanitize_temp_name(value: str) -> str:
     if value == "[]":
         return "index"
+    if value == "[:]":
+        return "slice"
     aliases = {
         "+": "add",
         "-": "sub",
@@ -506,7 +608,7 @@ def sanitize_temp_name(value: str) -> str:
 
 
 def is_sym_name_char(char: str) -> bool:
-    return char.isalnum() or char in {"_", "'"}
+    return char.isalnum() or char in {"_", "'", GENERATED_SYM_PREFIX}
 
 
 def summarize_ast(node: AstNode, lines: list[str], indent: int) -> None:

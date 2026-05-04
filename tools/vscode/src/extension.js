@@ -42,13 +42,6 @@ function activate(context) {
     return DEFAULT_PYTHON_PATH;
   }
 
-  function getDocumentLabel(document) {
-    if (document.uri.scheme === "file") {
-      return document.fileName;
-    }
-    return document.fileName || document.uri.toString();
-  }
-
   function getBaseDir(document) {
     if (document.uri.scheme === "file") {
       return path.dirname(document.fileName);
@@ -63,13 +56,9 @@ function activate(context) {
       const root = folder.uri.fsPath;
       const skillRoot = path.join(root, "skills", "logic-language");
       const scriptsRoot = path.join(skillRoot, "scripts");
-      const syntaxChecker = path.join(scriptsRoot, "syntax_check.py");
-      const semanticChecker = path.join(scriptsRoot, "semantic_check.py");
-      if (
-        fs.existsSync(syntaxChecker) &&
-        fs.existsSync(semanticChecker)
-      ) {
-        return { root, skillRoot, scriptsRoot, syntaxChecker, semanticChecker };
+      const moduleChecker = path.join(scriptsRoot, "module_check.py");
+      if (fs.existsSync(moduleChecker)) {
+        return { root, skillRoot, scriptsRoot, moduleChecker };
       }
     }
     throw new Error(
@@ -129,26 +118,15 @@ function activate(context) {
     });
   }
 
-  function runSyntaxCheck(document) {
-    const { syntaxChecker } = backendPaths();
+  function runModuleCheck(document) {
+    const { moduleChecker } = backendPaths();
     const args = [
-      syntaxChecker,
+      moduleChecker,
       "--file",
       document.fileName
     ];
 
     return runPythonJson(document, args);
-  }
-
-  function runSemanticCheck(document, syntaxPayload) {
-    const { semanticChecker } = backendPaths();
-    const args = [
-      semanticChecker,
-      "--syntax-json",
-      "-",
-      document.fileName
-    ];
-    return runPythonJson(document, args, JSON.stringify(syntaxPayload));
   }
 
   function toDiagnostic(entry) {
@@ -226,9 +204,7 @@ function activate(context) {
     }
 
     try {
-      const syntaxPayload = await runSyntaxCheck(document);
-      const hasSyntaxErrors = Number(syntaxPayload.summary && syntaxPayload.summary.error_count) > 0;
-      const payload = hasSyntaxErrors ? syntaxPayload : await runSemanticCheck(document, syntaxPayload);
+      const payload = await runModuleCheck(document);
       applyDiagnostics(document.uri, payload);
     } catch (error) {
       diagnostics.delete(document.uri);

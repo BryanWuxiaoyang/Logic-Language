@@ -282,7 +282,7 @@ def is_literal_quote_start(text: str, index: int) -> bool:
     if quote != "'":
         return False
     previous = text[index - 1] if index > 0 else ""
-    if previous.isalnum() or previous == "_" or previous == "$":
+    if previous.isalnum() or previous in {"_", "$", "'"}:
         return False
     return True
 
