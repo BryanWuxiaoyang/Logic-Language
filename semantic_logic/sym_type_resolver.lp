@@ -2,43 +2,43 @@ $import module_AST.lp
 $import module_AST_pred_stmts.lp
 
 Sym_type
-Class_sym_type
-Sym_type ~ Class_sym_type
-Pure_sym_type
-Sym_type ~ Pure_sym_type
-Func_sym_type
-Sym_type ~ Func_sym_type
-Pred_sym_type
-Sym_type ~ Pred_sym_type
+class_sym_type
+Sym_type ~ class_sym_type
+pure_sym_type
+Sym_type ~ pure_sym_type
+func_sym_type
+Sym_type ~ func_sym_type
+pred_sym_type
+Sym_type ~ pred_sym_type
 
-Stmt::is_inheriting_function: (stmt, sym) => bool
+Stmt::is_inheriting_function: (_stmt, _sym) => _bool
 
-Stmt::is_call_sym_in_func_stmt: (stmt, sym) => bool
+Stmt::is_call_sym_in_func_stmt: (_stmt, _sym) => _bool
 
-Stmt::is_func_sym: (stmt, sym) => bool
-    bool = (stmt.is_inheriting_function(sym) || stmt.is_call_sym_in_func_stmt(sym))
+Stmt::is_func_sym: (_stmt, _sym) => _bool
+    _bool = (_stmt.is_inheriting_function(_sym) || _stmt.is_call_sym_in_func_stmt(_sym))
 
-Stmt::is_inheriting_predicate: (stmt, sym) => bool
+Stmt::is_inheriting_predicate: (_stmt, _sym) => _bool
 
-Stmt::is_call_sym_in_pred_stmt: (stmt, sym) => bool
+Stmt::is_call_sym_in_pred_stmt: (_stmt, _sym) => _bool
 
-Stmt::is_pred_sym: (stmt, sym) => bool
-    bool = (stmt.is_func_sym(sym) && stmt.is_inheriting_predicate(sym) && stmt.is_call_sym_in_pred_stmt(sym))
+Stmt::is_pred_sym: (_stmt, _sym) => _bool
+    _bool = (_stmt.is_func_sym(_sym) && _stmt.is_inheriting_predicate(_sym) && _stmt.is_call_sym_in_pred_stmt(_sym))
 
-Stmt::is_class_sym: (stmt, sym) => bool
-    bool = sym.is_capital_letter
+Stmt::is_class_sym: (_stmt, _sym) => _bool
+    _bool = _sym.is_capital_letter
 
-Stmt::is_pure_sym: (stmt, sym) => bool
-    bool = !((stmt.is_func_sym(sym) || stmt.is_class_sym(sym)))
+Stmt::is_pure_sym: (_stmt, _sym) => _bool
+    _bool = !((_stmt.is_func_sym(_sym) || _stmt.is_class_sym(_sym)))
 
-Stmt::get_sym_type: (stmt, sym) => sym_type
-    |- stmt.is_func_sym(sym)
-        |- stmt.is_pred_sym(sym)
-            sym_type = Pred_sym_type
-        |- !(stmt.is_pred_sym(sym))
-            sym_type = Func_sym_type
-    |- !(stmt.is_func_sym(sym))
-        |- stmt.is_class_sym(sym)
-            sym_type = Class_sym_type
-        |- !(stmt.is_class_sym(sym))
-            sym_type = Pure_sym_type
+Stmt::get_sym_type: (_stmt, _sym) => _sym_type
+    |- _stmt.is_class_sym(_sym)
+        _sym_type = class_sym_type
+    |- !(_stmt.is_class_sym(_sym))
+        |- _stmt.is_func_sym(_sym)
+            |- _stmt.is_pred_sym(_sym)
+                _sym_type = pred_sym_type
+            |- !(_stmt.is_pred_sym(_sym))
+                _sym_type = func_sym_type
+        |- !(_stmt.is_func_sym(_sym))
+            _sym_type = pure_sym_type

@@ -14,8 +14,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import compile_module as compile_module_script
 import module_check
+import normalize_module_declarations
 import resolve_sym_type
 from compile_module import CompileError, run_compile_pipeline
+from compile_pipeline.source_utils import expand_imports
 from compile_pipeline.stage1_normalize_source import run as run_stage1
 from compile_pipeline.stage2_desugar_module_text import run as run_stage2
 from semantic_check import collect_semantic_diagnostics_from_text
@@ -314,7 +316,8 @@ def test_prefix_unary_expressions() -> None:
 
 
 def test_lifted_resolver_equality_expression_compiles() -> None:
-    text = """Stmt::has_direct_sym_alias: (stmt, sym1, sym2) => bool
+    text = """Stmt
+Stmt::has_direct_sym_alias: (stmt, sym1, sym2) => bool
     bool = ∃{
         | eq_stmt
         | eq_stmt ∈ stmt.all_stmts
@@ -371,7 +374,7 @@ def test_compound_slice_member_call_lowers_to_ordinary_call() -> None:
 
 
 def test_class_coloncolon_top_level_function_declaration() -> None:
-    source = translate_ast_to_source(compile_text("Val\nClass::func: (val1, val2) => (val3, val4)"))
+    source = translate_ast_to_source(compile_text("Val\nClass\nClass::func: (val1, val2) => (val3, val4)"))
     assert "Class::func" not in source
     assert "Function ~ func" in source
     assert "func(^val1, ^val2)" in source
@@ -396,23 +399,23 @@ def test_class_block_expands_to_current_scope() -> None:
 
 
 def test_class_field_shorthand_compiles() -> None:
-    source = translate_ast_to_source(compile_text("Class::field"))
+    source = translate_ast_to_source(compile_text("Class\nClass::field"))
     assert "Class::field" not in source
     assert "Function ~ field" in source
     assert "field(^class)" in source
-    assert "Symbol ~ ^class" in source
+    assert "^Class ~ ^class" in source
     assert "Symbol ~ ^field'" in source
     assert "^field' = field(^class)" in source
 
 
 def test_class_field_shorthand_uses_collision_safe_prime_output() -> None:
-    source = translate_ast_to_source(compile_text("field'\nClass::field"))
-    assert "\n  | ^field'\n" in source
+    source = translate_ast_to_source(compile_text("Class\nfield'\nClass::field"))
+    assert "\n  | ^Class, ^field'\n" in source
     assert "| ^class, ^field''" in source
     assert "Symbol ~ ^field''" in source
     assert "^field'' = field(^class)" in source
 
-    source = translate_ast_to_source(compile_text("field'\nfield''\nClass::field"))
+    source = translate_ast_to_source(compile_text("Class\nfield'\nfield''\nClass::field"))
     assert "| ^class, ^field'''" in source
     assert "Symbol ~ ^field'''" in source
     assert "^field''' = field(^class)" in source
@@ -435,7 +438,7 @@ def test_class_method_body_is_preserved() -> None:
 
 
 def test_function_declaration_and_body_are_separate_rules() -> None:
-    text = "Val\nClass::func: (val1, val2) => (val3, val4)\n    | val1 = val2\n    P(val3)"
+    text = "Val\nClass\nClass::func: (val1, val2) => (val3, val4)\n    | val1 = val2\n    P(val3)"
     desugared = run_stage2(text, SKILL_DIR).text
     assert desugared.count("∀{") == 3
     assert desugared.count("Val ~ val3") == 1
@@ -486,10 +489,20 @@ def test_explicit_class_declaration_after_inheritance_fact() -> None:
 
 
 def test_class_operator_suffix_declaration() -> None:
-    source = translate_ast_to_source(compile_text("List::[]: (list, id) => sym"))
+    source = translate_ast_to_source(compile_text("List\nList::[]: (list, id) => sym"))
     assert "List::[]" not in source
     assert "Function ~ []" in source
     assert "^list[^id]" in source
+
+
+def test_class_coloncolon_requires_explicit_class_declaration() -> None:
+    for text in ["Class::func: class => out", "A ~ Class\nClass::func: class => out"]:
+        try:
+            compile_text(text)
+        except CompileError as error:
+            assert "class member declaration requires explicit class declaration: Class" in str(error)
+            continue
+        raise AssertionError(f"expected undeclared class-member owner to fail: {text!r}")
 
 
 def test_invalid_class_body_lines_fail() -> None:
@@ -509,7 +522,7 @@ def test_invalid_class_body_lines_fail() -> None:
 
 
 def test_explicit_class_field_declaration_may_have_body() -> None:
-    source = translate_ast_to_source(compile_text("Class::field: class => field'\n    P(field')"))
+    source = translate_ast_to_source(compile_text("Class\nClass::field: class => field'\n    P(field')"))
     assert "Class::field" not in source
     assert "Function ~ field" in source
     assert "\n    P(^field')\n" in source
@@ -659,6 +672,74 @@ def test_import_searches_skill_dir_for_standard_library() -> None:
         assert "∀{| x | x = x}" in normalized.text
 
 
+def test_stage1_dedupes_transitive_imports() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        (root / "shared.lp").write_text("Shared\n", encoding="utf-8")
+        (root / "a.lp").write_text("$import shared.lp\nA\n", encoding="utf-8")
+        (root / "b.lp").write_text("$import shared.lp\nB\n", encoding="utf-8")
+        source = "$import a.lp\n$import b.lp\nMain\n"
+        normalized = run_stage1(source, base_dir=root, source=str(root / "main.lp"), allow_imports=True)
+
+    assert normalized.import_count == 3
+    assert normalized.text.splitlines() == ["Shared", "A", "B", "Main"]
+
+
+def test_stage1_dedupes_direct_and_resolved_alias_imports() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        nested = root / "nested"
+        nested.mkdir()
+        shared = nested / "shared.lp"
+        shared.write_text("Shared\n", encoding="utf-8")
+        source = "$import nested/shared.lp\n$import nested/../nested/shared.lp\n$import nested/shared.lp\n"
+        normalized = run_stage1(source, base_dir=root, source=str(root / "main.lp"), allow_imports=True)
+
+    assert normalized.import_count == 1
+    assert normalized.text == "Shared"
+
+
+def test_source_utils_expand_imports_dedupes_visible_context_imports() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        (root / "shared.lp").write_text("Shared\n", encoding="utf-8")
+        (root / "a.lp").write_text("$import shared.lp\nA\n", encoding="utf-8")
+        (root / "b.lp").write_text("$import shared.lp\nB\n", encoding="utf-8")
+        expanded = expand_imports("$import a.lp\n$import b.lp", root)
+
+    assert expanded.splitlines() == ["Shared", "A", "B"]
+
+
+def test_import_cycle_still_errors_with_dedup() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        (root / "a.lp").write_text("$import b.lp\nA\n", encoding="utf-8")
+        (root / "b.lp").write_text("$import a.lp\nB\n", encoding="utf-8")
+        try:
+            run_stage1("$import a.lp\n", base_dir=root, source=str(root / "main.lp"), allow_imports=True)
+        except CompileError as error:
+            assert "cyclic import" in str(error)
+            return
+    raise AssertionError("cyclic import should fail")
+
+
+def test_module_check_dedupes_located_imports() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        bad = root / "bad.lp"
+        bad.write_text("Class\n    ::field = x\n", encoding="utf-8")
+        payload = module_check.check_module(
+            "$import bad.lp\n$import bad.lp\n",
+            str(root / "main.lp"),
+            root,
+            is_file=False,
+        )
+
+    assert payload["summary"]["error_count"] == 1
+    assert len(payload["entries"]) == 1
+    assert payload["entries"][0]["file"] == str(bad.resolve())
+
+
 def test_stdin_import_rejected() -> None:
     try:
         compile_text("$import missing.lp")
@@ -674,12 +755,12 @@ def test_multiline_bar_semantics() -> None:
     assert top_level_calls(ast, "=", "target_PSs")
 
 
-def test_branch_header_lowers_to_parent_premise_module() -> None:
+def test_branch_header_lowers_to_target_module() -> None:
     source = "| x\n|- P(x)\n    y = x\nz = z"
     desugared = run_stage2(source, ".").text
     assert "| - P(x)" not in desugared
     ast = compile_text(source)
-    branch_modules = [node for node in ast["premise_PSs"] if node.get("kind") == "quantified_stmt"]
+    branch_modules = [node for node in ast["target_PSs"] if node.get("kind") == "quantified_stmt"]
     assert len(branch_modules) == 1
     branch = branch_modules[0]
     assert not branch["bound_syms"]
@@ -689,13 +770,24 @@ def test_branch_header_lowers_to_parent_premise_module() -> None:
     assert not any(node.get("name") == "__compiler_branch_module" for node in all_nodes(ast))
 
 
-def test_sibling_branches_are_parent_premises() -> None:
+def test_sibling_branches_are_target_modules() -> None:
     ast = compile_text("| x\n|- P(x)\n    y = x\n|- Q(x)\n    y = x\nz = z")
-    branch_modules = [node for node in ast["premise_PSs"] if node.get("kind") == "quantified_stmt"]
+    branch_modules = [node for node in ast["target_PSs"] if node.get("kind") == "quantified_stmt"]
     assert len(branch_modules) == 2
     assert top_level_calls(branch_modules[0], "P", "premise_PSs")
     assert top_level_calls(branch_modules[1], "Q", "premise_PSs")
     assert top_level_calls(ast, "=", "target_PSs")
+
+
+def test_premise_universal_block_contains_target_branch_modules() -> None:
+    source = "| x\n| \\all\n    |- P(x)\n        y = x\nz = z"
+    expanded = translate_ast_to_source(compile_text(source))
+    assert "^∀" not in expanded
+    premise_modules = [node for node in compile_text(source)["premise_PSs"] if node.get("kind") == "quantified_stmt"]
+    assert len(premise_modules) == 1
+    branch_modules = [node for node in premise_modules[0]["target_PSs"] if node.get("kind") == "quantified_stmt"]
+    assert len(branch_modules) == 1
+    assert top_level_calls(branch_modules[0], "P", "premise_PSs")
 
 
 def test_branch_requires_indented_block() -> None:
@@ -776,13 +868,31 @@ def test_semantic_warning_for_bare_index_operator_symbol() -> None:
 
 def test_semantic_bare_index_operator_symbol_exempts_definitions() -> None:
     for text in [
-        "List::[]: (list, id) => sym",
+        "List\nList::[]: (list, id) => sym",
         "[]: (list, id) => sym",
         "Function ~ []",
         "x = [](list, id)",
     ]:
         diagnostics = collect_semantic_diagnostics_from_text(text)
         assert not any(entry["code"] == "bare_index_operator_symbol" for entry in diagnostics), text
+
+
+def test_semantic_flags_undeclared_class_member_owner() -> None:
+    diagnostics = collect_semantic_diagnostics_from_text("Class::func: _class => _out")
+    assert diagnostics == [
+        {
+            "file": "__stdin__",
+            "lineno": 0,
+            "col_start_no": 0,
+            "col_end_no": 5,
+            "type": "error",
+            "code": "undeclared_class_member_owner",
+            "reason": "class member declaration requires explicit class declaration: Class",
+        }
+    ]
+
+    diagnostics = collect_semantic_diagnostics_from_text("A ~ Class\nClass::func: _class => _out")
+    assert any(entry["code"] == "undeclared_class_member_owner" for entry in diagnostics)
 
 
 def test_semantic_flags_function_output_in_body_premise() -> None:
@@ -1327,6 +1437,19 @@ def test_module_check_imported_located_syntax_error_uses_import_file() -> None:
     assert entry["col_start_no"] == 4
 
 
+def test_module_check_undeclared_class_member_owner_is_semantic_error() -> None:
+    payload = module_check.check_module("Class::func: _class => _out", module_check.STDIN_FILE, Path("."), is_file=False)
+
+    assert payload["summary"]["error_count"] == 1
+    entry = payload["entries"][0]
+    assert entry["stage"] == "semantic"
+    assert entry["code"] == "undeclared_class_member_owner"
+    assert entry["reason"] == "class member declaration requires explicit class declaration: Class"
+    assert entry["lineno"] == 0
+    assert entry["col_start_no"] == 0
+    assert entry["col_end_no"] == 5
+
+
 def test_module_check_semantic_error_stops_before_compile() -> None:
     original_semantic_entries = module_check.semantic_entries
     original_run_compile_pipeline = module_check.run_compile_pipeline
@@ -1572,32 +1695,246 @@ def test_expand_module_cli_invalid_input() -> None:
     assert result.stderr
 
 
+def test_normalize_module_declarations_groups_source_units() -> None:
+    source = "\n".join(
+        [
+            "y",
+            "F: _a => _b",
+            "    _b = _a",
+            "Class::m: _class => _out",
+            "    _out = _class",
+            "A ~ B",
+            "F: _x => _y",
+            "    _y = _x",
+            "Class",
+            "    ::field",
+            "    ::m: _class => _out2",
+            "        _out2 = _class",
+            "z = z",
+        ]
+    )
+    assert normalize_module_declarations.normalize_module_declarations_text(source) == "\n".join(
+        [
+            "y",
+            "A ~ B",
+            "Class",
+            "    ::m: _class => _out",
+            "        _out = _class",
+            "    ::m: _class => _out2",
+            "        _out2 = _class",
+            "    ::field",
+            "F: _a => _b",
+            "    _b = _a",
+            "F: _x => _y",
+            "    _y = _x",
+            "z = z",
+            "",
+        ]
+    )
+
+
+def test_normalize_module_declarations_places_inheritance_before_member_bodies() -> None:
+    source = "\n".join(
+        [
+            "B",
+            "A",
+            "A ~ B",
+            "B::method: (_b, _in) => _out",
+            "    P(_out)",
+        ]
+    )
+    assert normalize_module_declarations.normalize_module_declarations_text(source) == "\n".join(
+        [
+            "A",
+            "A ~ B",
+            "B",
+            "    ::method: (_b, _in) => _out",
+            "        P(_out)",
+            "",
+        ]
+    )
+
+
+def test_normalize_module_declarations_respects_nested_block_barriers() -> None:
+    source = "\n".join(
+        [
+            "B",
+            "A ~ B",
+            "F: _a => _b",
+            "    _b = _a",
+            "∀",
+            "    D",
+            "    C",
+            "    C ~ D",
+            "    D::m: _d => _out",
+            "        P(_out)",
+            "    H: _x => _y",
+            "        _y = _x",
+            "    h = h",
+            "F: _x => _y",
+            "    _y = _x",
+        ]
+    )
+    assert normalize_module_declarations.normalize_module_declarations_text(source) == "\n".join(
+        [
+            "B",
+            "A ~ B",
+            "F: _a => _b",
+            "    _b = _a",
+            "∀",
+            "    C",
+            "    C ~ D",
+            "    D",
+            "        ::m: _d => _out",
+            "            P(_out)",
+            "    H: _x => _y",
+            "        _y = _x",
+            "    h = h",
+            "F: _x => _y",
+            "    _y = _x",
+            "",
+        ]
+    )
+
+
+def test_normalize_module_declarations_opaque_exists_and_declaration_bodies() -> None:
+    source = "\n".join(
+        [
+            "G: _a => _b",
+            "    ∀",
+            "        F: _x => _y",
+            "            _y = _x",
+            "        f = f",
+            "    _b = _a",
+            "∃{",
+            "| _x",
+            "F: _x => _y",
+            "    _y = _x",
+            "}",
+            "G: _x => _y",
+            "    _y = _x",
+        ]
+    )
+    normalized = normalize_module_declarations.normalize_module_declarations_text(source)
+    assert normalized.count("G:") == 2
+    assert "    ∀\n        F: _x => _y\n            _y = _x\n        f = f" in normalized
+    assert "∃{\n| _x\nF: _x => _y\n    _y = _x\n}" in normalized
+    assert normalized.index("G: _a => _b") < normalized.index("∃{") < normalized.index("G: _x => _y")
+
+
+def test_normalize_module_declarations_cli_modes_and_imports() -> None:
+    with tempfile.TemporaryDirectory() as temp_dir:
+        root = Path(temp_dir)
+        imported = root / "imported.lp"
+        source_file = root / "source.lp"
+        imported.write_text("Imported\n", encoding="utf-8")
+        source_file.write_text("$import imported.lp\nf = f", encoding="utf-8")
+
+        file_result = subprocess.run(
+            ["python3", str(SCRIPTS_DIR / "normalize_module_declarations.py"), str(source_file)],
+            capture_output=True,
+            text=True,
+            cwd=SKILL_DIR,
+            check=False,
+        )
+        text_result = subprocess.run(
+            [
+                "python3",
+                str(SCRIPTS_DIR / "normalize_module_declarations.py"),
+                "--base-dir",
+                str(root),
+                "--text",
+                "$import imported.lp\nf = f",
+            ],
+            capture_output=True,
+            text=True,
+            cwd=SKILL_DIR,
+            check=False,
+        )
+        stdin_result = subprocess.run(
+            ["python3", str(SCRIPTS_DIR / "normalize_module_declarations.py"), "--base-dir", str(root)],
+            input="$import imported.lp\nf = f",
+            capture_output=True,
+            text=True,
+            cwd=SKILL_DIR,
+            check=False,
+        )
+
+    for result in (file_result, text_result, stdin_result):
+        assert result.returncode == 0, result.stderr or result.stdout
+        assert result.stderr == ""
+        assert result.stdout == "Imported\nf = f\n"
+
+
+def test_normalize_module_declarations_dedupes_transitive_imports() -> None:
+    normalized = normalize_module_declarations.normalize_module_declarations_text(
+        (SKILL_DIR / "semantic_logic" / "sym_type_resolver.lp").read_text(encoding="utf-8"),
+        SKILL_DIR / "semantic_logic",
+        source=str((SKILL_DIR / "semantic_logic" / "sym_type_resolver.lp").resolve()),
+        allow_imports=True,
+    )
+    assert [line for line in normalized.splitlines() if line == "Stmt~Binding_stmt"] == ["Stmt~Binding_stmt"]
+    assert [line for line in normalized.splitlines() if line == "Stmt"] == ["Stmt"]
+    assert "    ::get_sym_type: (_stmt, _sym) => _sym_type" in normalized
+    lines = normalized.splitlines()
+    assert lines.index("Stmt~Binding_stmt") + 1 == lines.index("Binding_stmt")
+
+
+def test_normalize_module_declarations_requires_explicit_class_for_members() -> None:
+    for source in ["Class::m: _class => _out", "A ~ Class\nClass::m: _class => _out"]:
+        try:
+            normalize_module_declarations.normalize_module_declarations_text(source)
+        except CompileError as error:
+            assert "class member declaration requires explicit class declaration: Class" in str(error)
+            continue
+        raise AssertionError(f"expected undeclared normalizer class member to fail: {source!r}")
+
+
+def test_normalize_module_declarations_cli_invalid_input() -> None:
+    result = subprocess.run(
+        ["python3", str(SCRIPTS_DIR / "normalize_module_declarations.py"), "--text", "∀{\n  x = x"],
+        capture_output=True,
+        text=True,
+        cwd=SKILL_DIR,
+        check=False,
+    )
+    assert result.returncode == 1
+    assert result.stdout == ""
+    assert result.stderr
+
+
 def test_resolve_sym_type_class_func_pred_and_alias_evidence() -> None:
     payload = resolve_sym_type.resolve_text(
         "\n".join(
             [
                 "Func = Function",
-                "Func ~ F",
+                "Func ~ f",
                 "Pred = Predicate",
-                "Pred ~ P",
+                "Pred ~ p",
                 "Class",
-                "y = F(x)",
-                "P(x)",
+                "y = f(x)",
+                "p(x)",
             ]
         )
     )
     assert resolved_symbol(payload, "Class")["type"] == "class"
-    assert resolved_symbol(payload, "F")["type"] == "func"
-    assert resolved_symbol(payload, "P")["type"] == "pred"
+    assert resolved_symbol(payload, "f")["type"] == "func"
+    assert resolved_symbol(payload, "p")["type"] == "pred"
     assert resolved_symbol(payload, "x")["type"] == "pure"
     assert any(entry["colorable"] for entry in resolved_occurrences(payload, "Class"))
-    assert any(entry["colorable"] for entry in resolved_occurrences(payload, "F"))
-    assert any(entry["colorable"] for entry in resolved_occurrences(payload, "P"))
+    assert any(entry["colorable"] for entry in resolved_occurrences(payload, "f"))
+    assert any(entry["colorable"] for entry in resolved_occurrences(payload, "p"))
 
 
 def test_resolve_sym_type_predicate_wins_over_function() -> None:
-    payload = resolve_sym_type.resolve_text("Function ~ P\nPredicate ~ P\nP(x)")
-    assert resolved_symbol(payload, "P")["type"] == "pred"
+    payload = resolve_sym_type.resolve_text("Function ~ p\nPredicate ~ p\np(x)")
+    assert resolved_symbol(payload, "p")["type"] == "pred"
+
+
+def test_resolve_sym_type_class_wins_over_callable_evidence() -> None:
+    payload = resolve_sym_type.resolve_text("Predicate\nFunction ~ Predicate\nPred = Predicate")
+    assert resolved_symbol(payload, "Predicate")["type"] == "class"
+    assert resolved_symbol(payload, "Pred")["type"] == "class"
 
 
 def test_resolve_sym_type_operator_symbols_are_not_colorable() -> None:
@@ -1617,22 +1954,22 @@ def test_resolve_sym_type_definition_locations() -> None:
             [
                 "A~B",
                 "B",
-                "F: x => y",
-                "  y = F(x)",
-                "Function ~ G",
-                "z = G(y)",
-                "Predicate ~ P",
-                "P(z)",
+                "f: x => y",
+                "  y = f(x)",
+                "Function ~ g",
+                "z = g(y)",
+                "Predicate ~ p",
+                "p(z)",
             ]
         )
     )
     assert "definition" not in occurrence_on_line(payload, "A", 0)
     assert occurrence_on_line(payload, "B", 0)["definition"]["lineno"] == 1
-    assert occurrence_on_line(payload, "F", 3)["definition"]["lineno"] == 2
-    assert occurrence_on_line(payload, "G", 5)["definition"]["lineno"] == 4
-    assert occurrence_on_line(payload, "P", 7)["definition"]["lineno"] == 6
-    assert occurrence_on_line(payload, "x", 3)["definition"]["lineno"] == 2
-    assert occurrence_on_line(payload, "z", 7)["definition"]["lineno"] == 5
+    assert occurrence_on_line(payload, "f", 3)["definition"]["lineno"] == 2
+    assert occurrence_on_line(payload, "g", 5)["definition"]["lineno"] == 4
+    assert occurrence_on_line(payload, "p", 7)["definition"]["lineno"] == 6
+    assert "definition" not in occurrence_on_line(payload, "x", 3)
+    assert "definition" not in occurrence_on_line(payload, "z", 7)
 
 
 def test_resolve_sym_type_class_typed_pure_symbol_definition() -> None:
@@ -1648,6 +1985,156 @@ def test_resolve_sym_type_class_typed_pure_symbol_definition() -> None:
         "name": "Notsubset_stmt",
         "type": "class",
     }
+
+
+def test_resolve_sym_type_class_typed_pure_symbol_falls_back_to_fact() -> None:
+    payload = resolve_sym_type.resolve_text("Class ~ value\nP(value)")
+    occurrence = occurrence_on_line(payload, "value", 1)
+    assert occurrence["type"] == "pure"
+    assert occurrence["definition"] == {
+        "file": "__stdin__",
+        "lineno": 0,
+        "col_start_no": len("Class ~ "),
+        "col_end_no": len("Class ~ value"),
+        "name": "value",
+        "type": "class",
+    }
+
+
+def test_resolve_sym_type_class_typed_pure_symbol_beats_pure_intro() -> None:
+    payload = resolve_sym_type.resolve_text("| value\nClass\nClass ~ value\nP(value)")
+    occurrence = occurrence_on_line(payload, "value", 3)
+    assert occurrence["type"] == "pure"
+    assert occurrence["definition"]["name"] == "Class"
+    assert occurrence["definition"]["lineno"] == 1
+
+
+def test_resolve_sym_type_untyped_pure_symbol_has_no_definition() -> None:
+    payload = resolve_sym_type.resolve_text("| x\nP(x)")
+    assert "definition" not in occurrence_on_line(payload, "x", 0)
+    assert "definition" not in occurrence_on_line(payload, "x", 1)
+
+
+def test_resolve_sym_type_output_uses_generated_signature_class_evidence() -> None:
+    payload = resolve_sym_type.resolve_text(
+        "\n".join(
+            [
+                "Sym_type",
+                "Stmt",
+                "Stmt::get_sym_type: (stmt, sym) => sym_type",
+                "    sym_type = sym_type",
+            ]
+        )
+    )
+    occurrence = occurrence_on_line(payload, "sym_type", 2)
+    assert occurrence["type"] == "pure"
+    assert not occurrence["colorable"]
+    assert occurrence["definition"] == {
+        "file": "__stdin__",
+        "lineno": 0,
+        "col_start_no": 0,
+        "col_end_no": len("Sym_type"),
+        "name": "Sym_type",
+        "type": "class",
+    }
+
+
+def test_resolve_sym_type_inputs_use_generated_signature_class_evidence() -> None:
+    payload = resolve_sym_type.resolve_text("Val\nmax: (_val1, _val2) => _val")
+    for name in ["_val1", "_val2", "_val"]:
+        occurrence = occurrence_on_line(payload, name, 1)
+        assert occurrence["type"] == "pure"
+        assert not occurrence["colorable"]
+        assert occurrence["definition"]["name"] == "Val"
+        assert occurrence["definition"]["lineno"] == 0
+
+
+def test_resolve_sym_type_signature_class_evidence_uses_numeric_suffixes() -> None:
+    payload = resolve_sym_type.resolve_text("Val\nList\n[:]: (_val1, _val2) => _list")
+    assert occurrence_on_line(payload, "_val1", 2)["definition"]["name"] == "Val"
+    assert occurrence_on_line(payload, "_val2", 2)["definition"]["name"] == "Val"
+    assert occurrence_on_line(payload, "_list", 2)["definition"]["name"] == "List"
+
+
+def test_resolve_sym_type_generated_binder_class_evidence_defines_pure_symbol() -> None:
+    payload = resolve_sym_type.resolve_text(
+        "\n".join(
+            [
+                "Id",
+                "F: _x => _out",
+                "    ∀{",
+                "        | _id1, _id2",
+                "        | 0 ≤ _id1 < _id2",
+                "        P(_id1, _id2)",
+                "    }",
+            ]
+        )
+    )
+    for name in ["_id1", "_id2"]:
+        occurrence = occurrence_on_line(payload, name, 3)
+        assert occurrence["type"] == "pure"
+        assert not occurrence["colorable"]
+        assert occurrence["definition"]["name"] == "Id"
+        assert occurrence["definition"]["lineno"] == 0
+
+
+def test_resolve_sym_type_authored_premise_class_fact_does_not_define_pure_symbol() -> None:
+    payload = resolve_sym_type.resolve_text("Val\nF: x => y\n    | Val ~ x\n    y = y")
+    assert "definition" not in occurrence_on_line(payload, "x", 1)
+    assert "definition" not in occurrence_on_line(payload, "x", 2)
+
+
+def test_resolve_sym_type_authored_premise_class_fact_is_not_class_navigation_evidence() -> None:
+    payload = resolve_sym_type.resolve_text("Id\nF: x => y\n    | Id ~ x\n    y = y")
+    assert "definition" not in occurrence_on_line(payload, "x", 1)
+    assert "definition" not in occurrence_on_line(payload, "x", 2)
+
+
+def test_resolve_sym_type_imported_signature_class_definition() -> None:
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        root = Path(tmp_dir)
+        imported = root / "imported.lp"
+        imported.write_text("Val\n", encoding="utf-8")
+        main = root / "main.lp"
+        main.write_text("$import imported.lp\nmax: (_val1, _val2) => _val\n", encoding="utf-8")
+        payload = resolve_sym_type.resolve_file(main)
+
+    for name in ["_val1", "_val2", "_val"]:
+        definition = occurrence_on_line(payload, name, 1)["definition"]
+        assert definition["file"] == str(imported.resolve())
+        assert definition["name"] == "Val"
+
+
+def test_resolve_sym_type_target_equality_propagates_class_definition() -> None:
+    payload = resolve_sym_type.resolve_text(
+        "\n".join(
+            [
+                "Sym_type",
+                "Sym_type ~ class_sym_type",
+                "f: x => out",
+                "    out = class_sym_type",
+            ]
+        )
+    )
+    assert occurrence_on_line(payload, "out", 2)["definition"]["name"] == "Sym_type"
+    assert occurrence_on_line(payload, "out", 3)["definition"]["name"] == "Sym_type"
+
+
+def test_resolve_sym_type_premise_equality_does_not_propagate_class_definition() -> None:
+    payload = resolve_sym_type.resolve_text(
+        "\n".join(
+            [
+                "Sym_type",
+                "Sym_type ~ class_sym_type",
+                "f: x => out",
+                "    | out = class_sym_type",
+                "    out = out",
+            ]
+        )
+    )
+    assert "definition" not in occurrence_on_line(payload, "out", 2)
+    assert "definition" not in occurrence_on_line(payload, "out", 3)
+    assert "definition" not in occurrence_on_line(payload, "out", 4)
 
 
 def test_resolve_sym_type_inheritance_fact_does_not_define_capital_class_name() -> None:
@@ -1698,17 +2185,104 @@ def test_resolve_sym_type_class_typed_definition_uses_first_evidence() -> None:
         assert definition["lineno"] == 0
 
 
+def test_resolve_sym_type_function_and_predicate_use_declaration_heads() -> None:
+    payload = resolve_sym_type.resolve_text(
+        "\n".join(
+            [
+                "Function ~ f",
+                "f: x => y",
+                "    y = x",
+                "Predicate ~ p",
+                "p: x => bool",
+                "    bool = true",
+                "z = f(x)",
+                "p(z)",
+            ]
+        )
+    )
+    assert occurrence_on_line(payload, "f", 6)["definition"]["lineno"] == 1
+    assert occurrence_on_line(payload, "p", 7)["definition"]["lineno"] == 4
+
+
+def test_resolve_sym_type_member_call_uses_qualified_class_method_definition() -> None:
+    payload = resolve_sym_type.resolve_text(
+        "\n".join(
+            [
+                "Class",
+                "func: x => y",
+                "    y = x",
+                "Class ~ receiver",
+                "Class::func: receiver => out",
+                "    out = receiver",
+                "y = receiver.func",
+            ]
+        )
+    )
+    definition = occurrence_on_line(payload, "func", 6)["definition"]
+    assert definition["lineno"] == 4
+    assert definition["col_start_no"] == len("Class::")
+
+
+def test_resolve_sym_type_member_call_uses_indented_class_method_definition() -> None:
+    payload = resolve_sym_type.resolve_text(
+        "\n".join(
+            [
+                "Class",
+                "    ::func: receiver => out",
+                "        out = receiver",
+                "Class ~ receiver",
+                "y = receiver.func",
+            ]
+        )
+    )
+    definition = occurrence_on_line(payload, "func", 4)["definition"]
+    assert definition["lineno"] == 1
+    assert definition["col_start_no"] == len("    ::")
+
+
+def test_resolve_sym_type_member_call_uses_bare_class_field_definition() -> None:
+    payload = resolve_sym_type.resolve_text(
+        "\n".join(
+            [
+                "Class",
+                "    ::field",
+                "Class ~ receiver",
+                "y = receiver.field",
+            ]
+        )
+    )
+    definition = occurrence_on_line(payload, "field", 3)["definition"]
+    assert definition["lineno"] == 1
+    assert definition["col_start_no"] == len("    ::")
+
+
+def test_resolve_sym_type_member_call_falls_back_to_function_declaration() -> None:
+    payload = resolve_sym_type.resolve_text(
+        "\n".join(
+            [
+                "Class",
+                "func: x => y",
+                "    y = x",
+                "Class ~ receiver",
+                "y = receiver.func",
+            ]
+        )
+    )
+    definition = occurrence_on_line(payload, "func", 4)["definition"]
+    assert definition["lineno"] == 1
+
+
 def test_resolve_sym_type_imported_definition_locations() -> None:
     with tempfile.TemporaryDirectory() as tmp_dir:
         root = Path(tmp_dir)
         imported = root / "imported.lp"
-        imported.write_text("Imported_class\nFunction ~ F\n", encoding="utf-8")
+        imported.write_text("Imported_class\nFunction ~ f\n", encoding="utf-8")
         main = root / "main.lp"
-        main.write_text("$import imported.lp\nvalue = F(Imported_class)\n", encoding="utf-8")
+        main.write_text("$import imported.lp\nvalue = f(Imported_class)\n", encoding="utf-8")
         payload = resolve_sym_type.resolve_file(main)
 
     class_definition = occurrence_on_line(payload, "Imported_class", 1)["definition"]
-    function_definition = occurrence_on_line(payload, "F", 1)["definition"]
+    function_definition = occurrence_on_line(payload, "f", 1)["definition"]
     assert class_definition["file"] == str(imported.resolve())
     assert class_definition["lineno"] == 0
     assert function_definition["file"] == str(imported.resolve())
@@ -1720,12 +2294,12 @@ def test_resolve_sym_type_definition_prefers_current_file() -> None:
     with tempfile.TemporaryDirectory() as tmp_dir:
         root = Path(tmp_dir)
         imported = root / "imported.lp"
-        imported.write_text("Function ~ F\n", encoding="utf-8")
+        imported.write_text("Function ~ f\n", encoding="utf-8")
         main = root / "main.lp"
-        main.write_text("$import imported.lp\nF: x => y\nz = F(x)\n", encoding="utf-8")
+        main.write_text("$import imported.lp\nf: x => y\nz = f(x)\n", encoding="utf-8")
         payload = resolve_sym_type.resolve_file(main)
 
-    definition = occurrence_on_line(payload, "F", 2)["definition"]
+    definition = occurrence_on_line(payload, "f", 2)["definition"]
     assert definition["file"] == str(main.resolve())
     assert definition["lineno"] == 1
 
@@ -1737,21 +2311,21 @@ def test_resolve_sym_type_invalid_source_returns_empty_success_payload() -> None
 
 def test_resolve_sym_type_cli_modes() -> None:
     result = subprocess.run(
-        ["python3", str(SCRIPTS_DIR / "resolve_sym_type.py"), "--text", "Function ~ F\ny = F(x)", "--pretty"],
+        ["python3", str(SCRIPTS_DIR / "resolve_sym_type.py"), "--text", "Function ~ f\ny = f(x)", "--pretty"],
         capture_output=True,
         text=True,
         cwd=SKILL_DIR,
         check=False,
     )
     assert result.returncode == 0
-    assert resolved_symbol(json.loads(result.stdout), "F")["type"] == "func"
+    assert resolved_symbol(json.loads(result.stdout), "f")["type"] == "func"
 
     with tempfile.TemporaryDirectory() as tmp_dir:
         root = Path(tmp_dir)
         imported = root / "imported.lp"
-        imported.write_text("Predicate ~ P\n", encoding="utf-8")
+        imported.write_text("Predicate ~ p\n", encoding="utf-8")
         main = root / "main.lp"
-        main.write_text("$import imported.lp\nP(x)\n", encoding="utf-8")
+        main.write_text("$import imported.lp\np(x)\n", encoding="utf-8")
         file_result = subprocess.run(
             ["python3", str(SCRIPTS_DIR / "resolve_sym_type.py"), "--file", str(main)],
             capture_output=True,
@@ -1761,7 +2335,7 @@ def test_resolve_sym_type_cli_modes() -> None:
         )
         assert file_result.returncode == 0
         file_payload = json.loads(file_result.stdout)
-        assert resolved_symbol(file_payload, "P")["type"] == "pred"
+        assert resolved_symbol(file_payload, "p")["type"] == "pred"
         assert {entry["file"] for entry in file_payload["occurrences"]} == {str(main.resolve())}
 
         stdin_result = subprocess.run(
@@ -1773,14 +2347,14 @@ def test_resolve_sym_type_cli_modes() -> None:
                 "--base-dir",
                 str(root),
             ],
-            input="$import imported.lp\nP(x)\n",
+            input="$import imported.lp\np(x)\n",
             capture_output=True,
             text=True,
             cwd=SKILL_DIR,
             check=False,
         )
         assert stdin_result.returncode == 0
-        assert resolved_symbol(json.loads(stdin_result.stdout), "P")["type"] == "pred"
+        assert resolved_symbol(json.loads(stdin_result.stdout), "p")["type"] == "pred"
 
 
 def test_script_modules_import_without_cycles() -> None:
@@ -1842,6 +2416,7 @@ def main() -> int:
         test_inheritance_fact_does_not_declare_class_body,
         test_explicit_class_declaration_after_inheritance_fact,
         test_class_operator_suffix_declaration,
+        test_class_coloncolon_requires_explicit_class_declaration,
         test_invalid_class_body_lines_fail,
         test_explicit_class_field_declaration_may_have_body,
         test_wrapper_predicates_lower_through_anf,
@@ -1859,10 +2434,16 @@ def main() -> int:
         test_stage2_legacy_unspaced_infix_still_compiles,
         test_import_file_locations,
         test_import_searches_skill_dir_for_standard_library,
+        test_stage1_dedupes_transitive_imports,
+        test_stage1_dedupes_direct_and_resolved_alias_imports,
+        test_source_utils_expand_imports_dedupes_visible_context_imports,
+        test_import_cycle_still_errors_with_dedup,
+        test_module_check_dedupes_located_imports,
         test_stdin_import_rejected,
         test_multiline_bar_semantics,
-        test_branch_header_lowers_to_parent_premise_module,
-        test_sibling_branches_are_parent_premises,
+        test_branch_header_lowers_to_target_module,
+        test_sibling_branches_are_target_modules,
+        test_premise_universal_block_contains_target_branch_modules,
         test_branch_requires_indented_block,
         test_branch_allows_function_output_in_nested_target,
         test_target_nested_declaration_expands_in_function_body,
@@ -1874,6 +2455,7 @@ def main() -> int:
         test_semantic_suppresses_multiple_inheritance_candidates_warning,
         test_semantic_warning_for_bare_index_operator_symbol,
         test_semantic_bare_index_operator_symbol_exempts_definitions,
+        test_semantic_flags_undeclared_class_member_owner,
         test_semantic_flags_function_output_in_body_premise,
         test_semantic_flags_nested_function_output_in_body_premise,
         test_semantic_flags_predicate_output_in_body_premise,
@@ -1920,6 +2502,7 @@ def main() -> int:
         test_module_check_positioned_class_field_assignment_error,
         test_module_check_positioned_arrow_and_literal_errors,
         test_module_check_imported_located_syntax_error_uses_import_file,
+        test_module_check_undeclared_class_member_owner_is_semantic_error,
         test_module_check_semantic_error_stops_before_compile,
         test_module_check_semantic_warning_continues_to_compile,
         test_module_check_compile_error_uses_entry_file_start,
@@ -1932,15 +2515,41 @@ def main() -> int:
         test_expand_module_cli_file_mode,
         test_expand_module_cli_stdin_mode,
         test_expand_module_cli_invalid_input,
+        test_normalize_module_declarations_groups_source_units,
+        test_normalize_module_declarations_places_inheritance_before_member_bodies,
+        test_normalize_module_declarations_respects_nested_block_barriers,
+        test_normalize_module_declarations_opaque_exists_and_declaration_bodies,
+        test_normalize_module_declarations_cli_modes_and_imports,
+        test_normalize_module_declarations_dedupes_transitive_imports,
+        test_normalize_module_declarations_requires_explicit_class_for_members,
+        test_normalize_module_declarations_cli_invalid_input,
         test_resolve_sym_type_class_func_pred_and_alias_evidence,
         test_resolve_sym_type_predicate_wins_over_function,
+        test_resolve_sym_type_class_wins_over_callable_evidence,
         test_resolve_sym_type_operator_symbols_are_not_colorable,
         test_resolve_sym_type_definition_locations,
         test_resolve_sym_type_class_typed_pure_symbol_definition,
+        test_resolve_sym_type_class_typed_pure_symbol_falls_back_to_fact,
+        test_resolve_sym_type_class_typed_pure_symbol_beats_pure_intro,
+        test_resolve_sym_type_untyped_pure_symbol_has_no_definition,
+        test_resolve_sym_type_output_uses_generated_signature_class_evidence,
+        test_resolve_sym_type_inputs_use_generated_signature_class_evidence,
+        test_resolve_sym_type_signature_class_evidence_uses_numeric_suffixes,
+        test_resolve_sym_type_generated_binder_class_evidence_defines_pure_symbol,
+        test_resolve_sym_type_authored_premise_class_fact_does_not_define_pure_symbol,
+        test_resolve_sym_type_authored_premise_class_fact_is_not_class_navigation_evidence,
+        test_resolve_sym_type_imported_signature_class_definition,
+        test_resolve_sym_type_target_equality_propagates_class_definition,
+        test_resolve_sym_type_premise_equality_does_not_propagate_class_definition,
         test_resolve_sym_type_inheritance_fact_does_not_define_capital_class_name,
         test_resolve_sym_type_class_block_receiver_definition,
         test_resolve_sym_type_imported_class_typed_definition,
         test_resolve_sym_type_class_typed_definition_uses_first_evidence,
+        test_resolve_sym_type_function_and_predicate_use_declaration_heads,
+        test_resolve_sym_type_member_call_uses_qualified_class_method_definition,
+        test_resolve_sym_type_member_call_uses_indented_class_method_definition,
+        test_resolve_sym_type_member_call_uses_bare_class_field_definition,
+        test_resolve_sym_type_member_call_falls_back_to_function_declaration,
         test_resolve_sym_type_imported_definition_locations,
         test_resolve_sym_type_definition_prefers_current_file,
         test_resolve_sym_type_invalid_source_returns_empty_success_payload,

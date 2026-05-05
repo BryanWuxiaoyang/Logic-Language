@@ -57,10 +57,25 @@ class LoweredTerm:
     output_statements: list[Statement] = field(default_factory=list)
 
 
+UNDECLARED_CLASS_MEMBER_OWNER_CODE = "undeclared_class_member_owner"
+
+
+def undeclared_class_member_owner_reason(class_name: str) -> str:
+    return f"class member declaration requires explicit class declaration: {class_name}"
+
+
 class ModuleCompiler:
-    def __init__(self, parser: Any) -> None:
+    def __init__(
+        self,
+        parser: Any,
+        *,
+        visible_class_names: Iterable[str] = (),
+        validate_class_member_owners: bool = True,
+    ) -> None:
         self.parser = parser
         self.fresh_index = 0
+        self.visible_class_names = set(visible_class_names)
+        self.validate_class_member_owners = validate_class_member_owners
 
     def compile(self, text: str) -> Module:
         stripped = strip_outer_blank_lines(remove_comments(text))
@@ -100,21 +115,31 @@ class ModuleCompiler:
 
     def parse_line_module(self, text: str, quantifier: str) -> Module:
         lines = logical_lines(text)
-        lowered_lines = self.lower_line_blocks(lines)
+        lowered_lines = self.lower_line_blocks(lines, visible_class_names=self.visible_class_names)
         body = "\n".join(lowered_lines)
         return self.build_module("quantifier", quantifier, body)
 
-    def lower_line_blocks(self, lines: list[str]) -> list[str]:
+    def lower_line_blocks(self, lines: list[str], *, visible_class_names: Iterable[str] = ()) -> list[str]:
         output: list[str] = []
+        visible_classes = set(visible_class_names) | direct_class_header_names(lines)
         index = 0
         while index < len(lines):
             line = lines[index]
             indent, content = split_indent(line)
+            if self.validate_class_member_owners:
+                validate_class_member_owner(content, visible_classes)
             content = erase_coloncolon_statement_head(content)
             if content in {"∀", "∃"} and index + 1 < len(lines):
                 block, next_index = collect_indented_block(lines, index + 1, indent)
                 if block:
                     module_text = content + "{\n" + self.lower_nested_block(unindent_block(block)) + "\n}"
+                    output.append(module_text)
+                    index = next_index
+                    continue
+            if content in {"| ∀", "|∀"} and index + 1 < len(lines):
+                block, next_index = collect_indented_block(lines, index + 1, indent)
+                if block:
+                    module_text = "| ∀{\n" + self.lower_nested_block(unindent_block(block)) + "\n}"
                     output.append(module_text)
                     index = next_index
                     continue
@@ -150,7 +175,7 @@ class ModuleCompiler:
             return ["∀{\n" + block + "\n}"]
         if header.startswith("|-"):
             branch_ps = header[2:].strip()
-            return ["| ∀{\n| " + BRANCH_MODULE_MARKER + "\n| " + branch_ps + "\n" + self.lower_nested_block(block) + "\n}"]
+            return ["∀{\n| " + BRANCH_MODULE_MARKER + "\n| " + branch_ps + "\n" + self.lower_nested_block(block) + "\n}"]
         if is_class_field_marker(header):
             raise CompileError("class-field shorthand cannot have a function body; use Class::field: input => output for an explicit function declaration")
         class_sym = class_header_sym(header)
@@ -702,8 +727,58 @@ def class_header_sym(header: str) -> str | None:
     return None
 
 
+def is_capital_sym(text: str) -> bool:
+    stripped = text.strip()
+    return bool(stripped and stripped[0].isalpha() and stripped[0].isupper())
+
+
+def explicit_class_header_sym(header: str) -> str | None:
+    class_sym = class_header_sym(header)
+    if class_sym is not None and is_capital_sym(class_sym):
+        return class_sym
+    return None
+
+
+def direct_class_header_names(lines: list[str]) -> set[str]:
+    class_names: set[str] = set()
+    for line in lines:
+        indent, content = split_indent(line)
+        if indent != 0:
+            continue
+        class_name = explicit_class_header_sym(content)
+        if class_name is not None:
+            class_names.add(class_name)
+    return class_names
+
+
 def class_block_prefix_lines(header: str, class_sym: str) -> list[str]:
     return [header.strip()]
+
+
+def class_member_owner_name(text: str) -> str | None:
+    stripped = text.strip()
+    if "::" not in stripped:
+        return None
+    assignment_index = top_level_assignment_index(stripped)
+    if assignment_index is not None and "::" in stripped[:assignment_index]:
+        return None
+
+    colon_index = declaration_colon_index(stripped)
+    if colon_index is not None:
+        name = stripped[:colon_index].strip()
+        if is_coloncolon_name(name):
+            return name.split("::", 1)[0].strip()
+        return None
+
+    if is_bare_coloncolon_field_shorthand(stripped):
+        return stripped.split("::", 1)[0].strip()
+    return None
+
+
+def validate_class_member_owner(text: str, visible_class_names: set[str]) -> None:
+    class_name = class_member_owner_name(text)
+    if class_name is not None and class_name not in visible_class_names:
+        raise CompileError(undeclared_class_member_owner_reason(class_name))
 
 
 def erase_coloncolon_statement_head(text: str) -> str:

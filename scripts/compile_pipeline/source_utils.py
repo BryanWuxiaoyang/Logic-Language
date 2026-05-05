@@ -157,8 +157,14 @@ def line_column(text: str, offset: int) -> tuple[int, int]:
     return line, offset - line_start + 1
 
 
-def expand_imports(text: str, base_dir: Path, seen: set[Path] | None = None) -> str:
+def expand_imports(
+    text: str,
+    base_dir: Path,
+    seen: set[Path] | None = None,
+    expanded: set[Path] | None = None,
+) -> str:
     seen = set() if seen is None else seen
+    expanded = set() if expanded is None else expanded
     output_lines: list[str] = []
     for line in text.splitlines():
         match = IMPORT_RE.match(line)
@@ -168,9 +174,12 @@ def expand_imports(text: str, base_dir: Path, seen: set[Path] | None = None) -> 
         import_path = resolve_import_path(match.group("path"), base_dir)
         if import_path in seen:
             raise CompileError(f"cyclic import: {import_path}")
+        if import_path in expanded:
+            continue
         if not import_path.exists():
             raise CompileError(f"import not found: {import_path}")
-        imported = expand_imports(import_path.read_text(encoding="utf-8"), import_path.parent, seen | {import_path})
+        expanded.add(import_path)
+        imported = expand_imports(import_path.read_text(encoding="utf-8"), import_path.parent, seen | {import_path}, expanded)
         indent = match.group("indent")
         output_lines.extend(indent + imported_line if imported_line else imported_line for imported_line in imported.splitlines())
     return "\n".join(output_lines)

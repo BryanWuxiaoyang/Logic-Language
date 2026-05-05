@@ -15,11 +15,13 @@ from compile_pipeline.module_sections import (
     FRESH_PREFIX,
     brace_delta,
     call_text,
+    class_member_owner_name,
     class_block_prefix_lines,
     class_header_sym,
     collect_indented_block,
     dedupe,
     erase_coloncolon_statement_head,
+    explicit_class_header_sym,
     find_matching,
     has_top_level,
     is_class_field_marker,
@@ -107,6 +109,13 @@ class Declaration:
     position: SourcePosition
 
 
+@dataclass(frozen=True)
+class ClassMemberOwner:
+    name: str
+    position: SourcePosition
+    declared: bool
+
+
 @dataclass
 class CheckResult:
     file: str
@@ -114,6 +123,7 @@ class CheckResult:
     expanded_text: str
     ast: CheckModule
     import_declarations: list[Declaration]
+    class_member_owners: list[ClassMemberOwner] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -229,13 +239,15 @@ def analyze_module_text(
     cleaned = strip_outer_blank_lines_located(remove_comments_located(expanded))
     if not cleaned.text.strip():
         raise CheckError("empty module text")
-    ast = LocatedModuleParser().parse_module(cleaned, default_quantifier="∀")
+    parser = LocatedModuleParser()
+    ast = parser.parse_module(cleaned, default_quantifier="∀")
     return CheckResult(
         file=source_file,
         source_text=source_text,
         expanded_text=expanded.text,
         ast=ast,
         import_declarations=import_declarations,
+        class_member_owners=parser.class_member_owners,
     )
 
 
@@ -371,7 +383,14 @@ def has_import(text: str) -> bool:
     return any(IMPORT_RE.match(line) for line in text.splitlines())
 
 
-def expand_for_checking(located: LocatedText, *, base_dir: Path, seen: set[Path]) -> LocatedText:
+def expand_for_checking(
+    located: LocatedText,
+    *,
+    base_dir: Path,
+    seen: set[Path],
+    expanded: set[Path] | None = None,
+) -> LocatedText:
+    expanded = set() if expanded is None else expanded
     lines = split_lines_located(located)
     output: list[LocatedText] = []
     tokens = load_tokens()
@@ -384,11 +403,14 @@ def expand_for_checking(located: LocatedText, *, base_dir: Path, seen: set[Path]
         import_path = resolve_import_path(match.group("path"), base_dir)
         if import_path in seen:
             raise CheckError(f"cyclic import: {import_path}")
+        if import_path in expanded:
+            continue
         if not import_path.exists():
             raise CheckError(f"import not found: {import_path}")
+        expanded.add(import_path)
         imported = strip_leading_bom(make_located_text(import_path.read_text(encoding="utf-8"), str(import_path), import_origin=True))
         imported = normalize_latex_located(imported, tokens)
-        imported = expand_for_checking(imported, base_dir=import_path.parent, seen=seen | {import_path})
+        imported = expand_for_checking(imported, base_dir=import_path.parent, seen=seen | {import_path}, expanded=expanded)
         indent = match.group("indent")
         if indent:
             imported = indent_located(imported, line.positions[0], indent)
@@ -534,6 +556,7 @@ class LocatedModuleParser:
     def __init__(self) -> None:
         self.fresh_index = 0
         self.declarations_by_module: dict[tuple[str, SourcePosition | None], CheckDeclaration] = {}
+        self.class_member_owners: list[ClassMemberOwner] = []
 
     def parse_module(self, located: LocatedText, default_quantifier: str = "∀") -> CheckModule:
         located = strip_outer_blank_lines_located(located).strip()
@@ -574,10 +597,12 @@ class LocatedModuleParser:
 
     def lower_line_blocks(self, lines: list[LocatedText]) -> list[LocatedText]:
         output: list[LocatedText] = []
+        visible_classes = direct_class_header_names_located(lines)
         index = 0
         while index < len(lines):
             line = lines[index]
             indent, content = split_indent_located(line)
+            self.record_class_member_owner(content, visible_classes)
             content = erase_coloncolon_statement_head_located(content)
             if content.text in QUANTIFIERS and index + 1 < len(lines):
                 block, next_index = collect_indented_block_located(lines, index + 1, indent)
@@ -587,6 +612,20 @@ class LocatedModuleParser:
                             [
                                 content,
                                 synthetic_text("{\n", content.positions[0]),
+                                self.lower_nested_block(unindent_block_located(block)),
+                                synthetic_text("\n}", content.positions[0]),
+                            ]
+                        )
+                    )
+                    index = next_index
+                    continue
+            if content.text in {"| ∀", "|∀"} and index + 1 < len(lines):
+                block, next_index = collect_indented_block_located(lines, index + 1, indent)
+                if block:
+                    output.append(
+                        concat_located(
+                            [
+                                synthetic_text("| ∀{\n", content.positions[0]),
                                 self.lower_nested_block(unindent_block_located(block)),
                                 synthetic_text("\n}", content.positions[0]),
                             ]
@@ -627,6 +666,14 @@ class LocatedModuleParser:
             index += 1
         return output
 
+    def record_class_member_owner(self, content: LocatedText, visible_classes: set[str]) -> None:
+        class_name = class_member_owner_name(content.text)
+        if class_name is None or not content.positions:
+            return
+        index = content.text.find(class_name)
+        position = content.positions[index] if 0 <= index < len(content.positions) else content.positions[0]
+        self.class_member_owners.append(ClassMemberOwner(class_name, position, class_name in visible_classes))
+
     def lower_header_with_block(self, header: LocatedText, block: LocatedText) -> list[LocatedText]:
         if header.text.startswith("@"):
             return [concat_located([synthetic_text("∀{\n", header.positions[0]), block, synthetic_text("\n}", header.positions[0])])]
@@ -635,7 +682,7 @@ class LocatedModuleParser:
             return [
                 concat_located(
                     [
-                        synthetic_text("| ∀{\n| ", header.positions[0]),
+                        synthetic_text("∀{\n| ", header.positions[0]),
                         synthetic_text(BRANCH_MODULE_MARKER + "\n| ", header.positions[0]),
                         branch_ps,
                         synthetic_text("\n", header.positions[0]),
@@ -946,6 +993,18 @@ def reject_unsupported_coloncolon_located(located: LocatedText) -> None:
 
 def class_block_prefix_lines_located(header: LocatedText, class_sym: str) -> list[LocatedText]:
     return [header]
+
+
+def direct_class_header_names_located(lines: list[LocatedText]) -> set[str]:
+    class_names: set[str] = set()
+    for line in lines:
+        indent, content = split_indent_located(line)
+        if indent != 0:
+            continue
+        class_name = explicit_class_header_sym(content.text)
+        if class_name is not None:
+            class_names.add(class_name)
+    return class_names
 
 
 def split_sections_located(body: LocatedText) -> list[LocatedText]:

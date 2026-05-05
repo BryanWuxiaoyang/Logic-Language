@@ -13,6 +13,8 @@
     
 Symbol
 \all{| ^sym | Symbol ~ ^sym}
+
+Sym
 Sym = symbol
 
 Bool
@@ -22,11 +24,14 @@ false
 Bool ~ false
 
 Function
+Func
 Func = Function
+F
 F = Func
 
 Predicate
 Function ~ Predicate
+Pred
 Pred = Predicate
 
 Set
@@ -35,9 +40,10 @@ Value
 
 Tuple
 Set ~ Tuple
-List = Tuple
+
 Char
 String
+Str
 Str = String
 Tuple ~ String
 \all
@@ -46,108 +52,115 @@ Tuple ~ String
     | _char \in _string
     Char ~ _char
 
-
-
+Val
 Val = Value
-V = Val
 
-max: (val1, val2) => val
-max: vals => val
-min: (val1, val2) => val
-min: vals => val
-Size = val
-Cnt = val
-Id = val
+max: (_val1, _val2) => _val
+max: _vals => _val
+min: (_val1, _val2) => _val
+min: _vals => _val
 
-List
-    ::size: list => size_val
-    ::[]: (list, id) => sym
-    ::+: (list, list1) => list2
-        list2.size = (list.size + list1.size)
-        ∀{| i | 0 ≤ i < list.size | list2[i] = list[i]}
-        ∀{| i | 0 ≤ i < list1.size | list2[list.size + i] = list1[i]}
+Size
+Size = Val
 
-[:]: (val1, val2) => list
-    | _val
-    | val1 <= _val
-    | _val < val2
-    list.size = val2 - val1
-    list[_val - val1] = _val
+Cnt
+Cnt = Val
 
-[:]: (list, val1, val2) => list1
-    | _val
-    | val1 <= _val
-    | _val < val2
-    list1.size = val2 - val1
-    list1[_val - val1] = list[_val]
+Num
+Num = Val
+
+Id
+Id = Val
 
 List
-    ::∈: (sym, list) => bool
-        bool = ∃{| i | list[i] = sym}
+    ::size: _list => _size_val
+    ::[]: (_list, _id) => _sym
+    ::+: (_list, _list1) => _list2
+        _list2.size = (_list.size + _list1.size)
+        ∀{| _id | 0 ≤ _id < _list.size | _list2[_id] = _list[_id]}
+        ∀{| _id | 0 ≤ _id < _list1.size | _list2[_list.size + _id] = _list1[_id]}
+List = Tuple
+
+[:]: (_val1, _val2) => _list
+    | _val
+    | _val1 <= _val
+    | _val < _val2
+    _list.size = _val2 - _val1
+    _list[_val - _val1] = _val
+
+[:]: (_list, _val1, _val2) => _list1
+    | _val
+    | _val1 <= _val
+    | _val < _val2
+    _list1.size = _val2 - _val1
+    _list1[_val - _val1] = _list[_val]
+
+List
+    ::∈: (_sym, _list) => _bool
+        _bool = ∃{| _id | _list[_id] = _sym}
 Set ~ List
-Set::lists: set => lists
-    lists = {
-        | list1
+Set::lists: _set => _lists
+    _lists = {
+        | _list1
         ∀{
-            | sym ∈ list1
-            sym ∈ set
+            | _sym ∈ _list1
+            _sym ∈ _set
         }
         ∀{
-            | sym ∈ set
-            sym ∈ list1
+            | _sym ∈ _set
+            _sym ∈ _list1
         }
         ∀{
-            | i, j
-            | 0 ≤ i
-            | i < j
-            | j < list1.size
-            list1[i] ≠ list1[j]
+            | _id1, _id2
+            | 0 ≤ _id1 < _id2
+            | _id2 < _list1.size
+            _list1[_id1] ≠ _list1[_id2]
         }
     }
-List::sum: (list, merge_f) => sum_sym
-    merge_f: (sym1, sym2) => merge_sym
+List::sum: (_list, _merge_f) => _sum_sym
+    | _merge_f: (_sym1, _sym2) => _merge_sym
     ∀
-        |- list.size = 0
-            sum_sym = null
-        |- list.size = 1
-            sum_sym = list[0]
-        |- list.size > 1
-            sum_sym = merge_f(list[0], list[1: list.size].sum(merge_f))
-List::sum: list => sum_sym
-    sum_sym = list.sum(+)
-Set::sum: (set, merge_f) => set_sum_sym
-    merge_f: (sym1, sym2) => merge_sym
-    syms = {| list1 ∈ set.lists => sum(list1, merge_f)}
-    set_sum_sym = *syms
-Set::sum: set => set_sum_sym
-    set_sum_sym = set.sum(+)
-List::max: (list, max_f) => max_sym
-    max_sym = list.sum(max_f)
-List::max: list => max_sym
-    max_sym = list.max(max)
-Set::max: (set, max_f) => max_sym
-    max_sym = set.sum(max_f)
-Set::max: set => max_sym
-    max_sym = set.max(max)
-List::min: (list, min_f) => min_sym
-    min_sym = list.sum(min_f)
-List::min: list => min_sym
-    min_sym = list.min(min)
-Set::min: (set, min_f) => min_sym
-    min_sym = set.sum(min_f)
-Set::min: set => min_sym
-    min_sym = set.min(min)
-Set::argmax: (set, mapping_f, max_f) => argmax_sym
-    mapping_f: _sym => _sym1
-    max_map_sym = max({| sym ∈ set => mapping_f(sym)}, max_f)
-    max_syms = {| sym | sym \in set, mapping_f(sym) = max_map_sym}
-    argmax_sym = *max_syms
-Set::argmax: (set, mapping_f) => argmax_sym
-    argmax_sym = set.argmax(mapping_f, max)
-Set::argmin: (set, mapping_f, min_f) => argmin_sym
-    mapping_f: _sym => _sym1
-    min_map_sym = min({| sym ∈ set => mapping_f(sym)}, min_f)
-    min_syms = {| sym | sym ∈ set, mapping_f(sym) = min_map_sym}
-    argmin_sym = *min_syms
-Set::argmin: (set, mapping_f) => argmin_sym
-    argmin_sym = set.argmin(mapping_f, min)
+        |- _list.size = 0
+            _sum_sym = null
+        |- _list.size = 1
+            _sum_sym = _list[0]
+        |- _list.size > 1
+            _sum_sym = _merge_f(_list[0], _list[1: _list.size].sum(_merge_f))
+List::sum: _list => _sum_sym
+    _sum_sym = _list.sum(+)
+Set::sum: (_set, _merge_f) => _set_sum_sym
+    | _merge_f: (_sym1, _sym2) => _merge_sym
+    | _syms = {| _list1 ∈ _set.lists => sum(_list1, _merge_f)}
+    _set_sum_sym = *_syms
+Set::sum: _set => _set_sum_sym
+    _set_sum_sym = _set.sum(+)
+List::max: (_list, _max_f) => _max_sym
+    _max_sym = _list.sum(_max_f)
+List::max: _list => _max_sym
+    _max_sym = _list.max(max)
+Set::max: (_set, _max_f) => _max_sym
+    _max_sym = _set.sum(_max_f)
+Set::max: _set => _max_sym
+    _max_sym = _set.max(max)
+List::min: (_list, _min_f) => _min_sym
+    _min_sym = _list.sum(_min_f)
+List::min: _list => _min_sym
+    _min_sym = _list.min(min)
+Set::min: (_set, _min_f) => _min_sym
+    _min_sym = _set.sum(_min_f)
+Set::min: _set => _min_sym
+    _min_sym = _set.min(min)
+Set::argmax: (_set, _mapping_f, _max_f) => _argmax_sym
+    | _mapping_f: _sym => _sym1
+    | _max_map_sym = max({| _sym ∈ _set => _mapping_f(_sym)}, _max_f)
+    | _max_syms = {| _sym | _sym \in _set, _mapping_f(_sym) = _max_map_sym}
+    _argmax_sym = *_max_syms
+Set::argmax: (_set, _mapping_f) => _argmax_sym
+    _argmax_sym = _set.argmax(_mapping_f, max)
+Set::argmin: (_set, _mapping_f, _min_f) => _argmin_sym
+    | _mapping_f: _sym => _sym1
+    | _min_map_sym = min({| _sym ∈ _set => _mapping_f(_sym)}, _min_f)
+    | _min_syms = {| _sym | _sym ∈ _set, _mapping_f(_sym) = _min_map_sym}
+    _argmin_sym = *_min_syms
+Set::argmin: (_set, _mapping_f) => _argmin_sym
+    _argmin_sym = _set.argmin(_mapping_f, min)

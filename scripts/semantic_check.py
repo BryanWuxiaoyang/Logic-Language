@@ -12,10 +12,12 @@ from pathlib import Path
 from typing import Any
 
 from compile_pipeline.errors import CompileError
+from compile_pipeline.module_sections import UNDECLARED_CLASS_MEMBER_OWNER_CODE, undeclared_class_member_owner_reason
 from syntax_check_common import (
     STDIN_FILE,
     Binder,
     CheckError,
+    ClassMemberOwner,
     CheckModule,
     Declaration,
     SourcePosition,
@@ -74,17 +76,20 @@ class SemanticChecker:
         *,
         source_text: str | None = None,
         source_file: str | None = None,
+        class_member_owners: list[ClassMemberOwner] | None = None,
     ) -> None:
         self.diagnostics: list[Diagnostic] = []
         self.visible: dict[str, list[VisibleDeclaration]] = {}
         self.next_scope_id = 0
         self.source_lines_by_file: dict[str, list[str]] = {}
+        self.class_member_owners = class_member_owners or []
         if source_text is not None and source_file is not None:
             self.source_lines_by_file[source_file] = source_text.splitlines()
         for declaration in import_declarations:
             self.add_visible(VisibleDeclaration(declaration.name, declaration.position, None))
 
     def check(self, module: CheckModule) -> list[Diagnostic]:
+        self.check_class_member_owners()
         self.visit_module(module, ScopeContext(self.allocate_scope(), tuple()))
         return sorted(self.diagnostics, key=lambda diagnostic: (diagnostic.file, diagnostic.lineno, diagnostic.col_start_no, diagnostic.reason))
 
@@ -137,6 +142,22 @@ class SemanticChecker:
 
     def add_visible(self, declaration: VisibleDeclaration) -> None:
         self.visible.setdefault(declaration.name, []).append(declaration)
+
+    def check_class_member_owners(self) -> None:
+        for owner in self.class_member_owners:
+            if owner.declared:
+                continue
+            self.diagnostics.append(
+                Diagnostic(
+                    file=owner.position.file,
+                    lineno=max(owner.position.line - 1, 0),
+                    col_start_no=max(owner.position.column - 1, 0),
+                    col_end_no=max(owner.position.column - 1 + len(owner.name), 1),
+                    type="error",
+                    code=UNDECLARED_CLASS_MEMBER_OWNER_CODE,
+                    reason=undeclared_class_member_owner_reason(owner.name),
+                )
+            )
 
     def check_function_output_in_premise(self, module: CheckModule) -> None:
         if module.declaration is None:
@@ -275,6 +296,7 @@ def collect_semantic_diagnostics_from_text(
         result.import_declarations,
         source_text=result.source_text,
         source_file=result.file,
+        class_member_owners=result.class_member_owners,
     ).check(result.ast)
     return [diagnostic.to_json() for diagnostic in diagnostics]
 
@@ -285,6 +307,7 @@ def collect_semantic_diagnostics_from_file(file_path: Path) -> list[dict[str, ob
         result.import_declarations,
         source_text=result.source_text,
         source_file=result.file,
+        class_member_owners=result.class_member_owners,
     ).check(result.ast)
     return [diagnostic.to_json() for diagnostic in diagnostics]
 

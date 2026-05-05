@@ -270,11 +270,15 @@ F: func => ^sym1
 "
 F: ^sym1 => ^sym2
   | ^sym3
-  |- P1(^sym1)
-    P2(^sym3)
-  |- P3(^sym1)
-    P4(^sym3)
-  P5(^sym2)
+  | \all
+    |- P1(^sym1)
+      P2(^sym3)
+    |- P3(^sym1)
+      P4(^sym3)
+  |- P5(^sym1)
+    P6(^sym3)
+  |- P7(^sym1)
+    P8(^sym3)
 "
 =
 "
@@ -284,14 +288,23 @@ F: ^sym1 => ^sym2
     | ^sym1, ^sym2, ^sym3
     | ^sym2 = F(^sym1)
     | ∀{
-      | P1(^sym1)
-      P2(^sym3)
+      ∀{
+        | P1(^sym1)
+        P2(^sym3)
+      }
+      ∀{
+        | P3(^sym1)
+        P4(^sym3)
+      }
     }
-    | ∀{
-      | P3(^sym1)
-      P4(^sym3)
+    ∀{
+      | P5(^sym1)
+      P6(^sym3)
     }
-    P5(^sym2)
+    ∀{
+      | P7(^sym1)
+      P8(^sym3)
+    }
   }
 }
 "

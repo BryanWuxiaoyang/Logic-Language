@@ -61,7 +61,7 @@ def run(text: str, base_dir: Path | str = ".", *, source: str = STDIN_SOURCE, al
         raise CompileError("$import is not supported when reading module text from stdin")
     tokens = load_tokens()
     effective_source = imported_only_source(text, Path(base_dir).resolve()) or source
-    expanded, import_count = expand_imports_text(text, Path(base_dir).resolve(), set())
+    expanded, import_count = expand_imports_text(text, Path(base_dir).resolve(), stack=set(), expanded=set())
     normalized = normalize_latex(expanded, tokens)
     normalized = remove_comments(normalized)
     loc = whole_text_loc(normalized, effective_source)
@@ -83,7 +83,7 @@ def imported_only_source(text: str, base_dir: Path) -> str | None:
     return None
 
 
-def expand_imports_text(text: str, base_dir: Path, seen: set[Path]) -> tuple[str, int]:
+def expand_imports_text(text: str, base_dir: Path, *, stack: set[Path], expanded: set[Path]) -> tuple[str, int]:
     output_lines: list[str] = []
     import_count = 0
     for line in text.splitlines():
@@ -93,12 +93,15 @@ def expand_imports_text(text: str, base_dir: Path, seen: set[Path]) -> tuple[str
             continue
         raw_path = match.group("path").strip().strip("\"'")
         import_path = resolve_import_path(raw_path, base_dir)
-        if import_path in seen:
+        if import_path in stack:
             raise CompileError(f"cyclic import: {import_path}")
+        if import_path in expanded:
+            continue
         if not import_path.exists():
             raise CompileError(f"import not found: {import_path}")
+        expanded.add(import_path)
         imported_text = import_path.read_text(encoding="utf-8")
-        imported, nested_count = expand_imports_text(imported_text, import_path.parent, seen | {import_path})
+        imported, nested_count = expand_imports_text(imported_text, import_path.parent, stack=stack | {import_path}, expanded=expanded)
         indent = match.group("indent")
         output_lines.extend(indent + imported_line if imported_line else imported_line for imported_line in imported.splitlines())
         import_count += 1 + nested_count

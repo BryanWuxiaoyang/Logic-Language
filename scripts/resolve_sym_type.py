@@ -21,6 +21,7 @@ from compile_pipeline.module_sections import (
     parse_premise_declaration,
 )
 from compile_pipeline.source_utils import find_quoted_literal_end, is_literal_quote_start, load_tokens
+from inheritance_sources import inheritance_candidate_chain
 from syntax_check_common import (
     CheckError,
     LocatedText,
@@ -128,6 +129,7 @@ class Occurrence:
     col_start_no: int
     col_end_no: int
     name: str
+    member_receiver: str | None = None
 
 
 @dataclass(frozen=True)
@@ -140,6 +142,8 @@ class Definition:
     type: str
     order: int
     rank: int = 0
+    kind: str = "generic"
+    owner_class: str | None = None
 
 
 class DisjointSet:
@@ -184,7 +188,7 @@ def resolve_text(
         return empty_payload()
 
     evidence = collect_type_evidence(ast)
-    definitions = collect_definitions(expanded, evidence)
+    definitions = collect_definitions(expanded, evidence, ast)
     occurrences = scan_source_occurrences(text, file_label)
     return build_payload(occurrences, evidence, definitions)
 
@@ -351,12 +355,17 @@ def located_import_expansion(text: str, file_label: str, base_dir: Path) -> Loca
     return expand_for_checking(normalized, base_dir=base_dir, seen=set())
 
 
-def collect_definitions(expanded: LocatedText, evidence: dict[str, set[str]]) -> dict[str, list[Definition]]:
+def collect_definitions(
+    expanded: LocatedText,
+    evidence: dict[str, set[str]],
+    ast: dict[str, Any],
+) -> dict[str, list[Definition]]:
     cleaned = remove_comments_located(expanded)
     aliases = DisjointSet()
     class_candidates: list[Definition] = []
-    class_type_candidates: list[tuple[str, str, int]] = []
-    callable_candidates: list[tuple[str, str, Occurrence, int, int]] = []
+    class_type_candidates: list[tuple[str, str, Definition]] = []
+    signature_class_candidates: list[tuple[str, int]] = []
+    callable_candidates: list[tuple[str, str, Occurrence, int, int, str, str | None]] = []
     pure_candidates: list[Definition] = []
     class_stack: list[tuple[int, str]] = []
     order = 0
@@ -373,9 +382,21 @@ def collect_definitions(expanded: LocatedText, evidence: dict[str, set[str]]) ->
         class_candidates.extend(explicit_classes)
         if explicit_classes:
             class_stack.append((indent, explicit_classes[0].name))
-        declaration_candidates, signature_candidates = collect_declaration_definitions(stripped, order)
+        declaration_candidates, signature_candidates = collect_declaration_definitions(
+            stripped,
+            order,
+            owner_class=declaration_owner_class(stripped.text, class_stack),
+        )
         callable_candidates.extend(declaration_candidates)
         pure_candidates.extend(signature_candidates)
+        signature_class_candidates.extend(collect_declaration_signature_class_candidates(stripped, order))
+        callable_candidates.extend(
+            collect_class_field_definition(
+                stripped,
+                order,
+                declaration_owner_class(stripped.text, class_stack),
+            )
+        )
         callable_candidates.extend(collect_classifier_fact_candidates(stripped, aliases, order))
         class_type_candidates.extend(collect_class_type_fact_candidates(stripped, order))
         class_type_candidates.extend(collect_qualified_class_receiver_candidates(stripped, order))
@@ -388,26 +409,37 @@ def collect_definitions(expanded: LocatedText, evidence: dict[str, set[str]]) ->
     for definition in class_candidates + pure_candidates:
         definitions.setdefault(definition.name, []).append(definition)
     class_definitions = first_definitions_by_name(class_candidates)
-    for class_name, sym_name, candidate_order in class_type_candidates:
+    authored_premise_class_facts = collect_authored_premise_class_facts(cleaned)
+    for class_name, sym_name, fallback in class_type_candidates:
+        target = class_definitions.get(class_name)
+        if target is None:
+            definitions.setdefault(sym_name, []).append(fallback)
+            continue
+        definitions.setdefault(sym_name, []).append(
+            definition_for_class_typed_symbol(target, class_name, fallback.order)
+        )
+    for sym_name, candidate_order in signature_class_candidates:
+        target = signature_class_definition(sym_name, class_definitions, groups)
+        if target is None:
+            continue
+        definitions.setdefault(sym_name, []).append(
+            definition_for_class_typed_symbol(target, target.name, candidate_order)
+        )
+    for class_name, sym_name, candidate_order in collect_ast_class_type_candidates(
+        ast,
+        order + 1,
+        authored_premise_class_facts,
+    ):
         target = class_definitions.get(class_name)
         if target is None:
             continue
         definitions.setdefault(sym_name, []).append(
-            Definition(
-                file=target.file,
-                lineno=target.lineno,
-                col_start_no=target.col_start_no,
-                col_end_no=target.col_end_no,
-                name=target.name,
-                type=target.type,
-                order=candidate_order,
-                rank=-1,
-            )
+            definition_for_class_typed_symbol(target, class_name, candidate_order)
         )
 
     predicate_classes = alias_closure(CLASSIFIER_PREDICATE, groups)
     function_classes = alias_closure(CLASSIFIER_FUNCTION, groups)
-    for classifier, name, occurrence, candidate_order, rank in callable_candidates:
+    for classifier, name, occurrence, candidate_order, rank, kind, owner_class in callable_candidates:
         classifier_aliases = aliases_for(classifier, groups)
         sym_type = classify_symbol(name, evidence)
         if classifier_aliases & predicate_classes:
@@ -426,6 +458,8 @@ def collect_definitions(expanded: LocatedText, evidence: dict[str, set[str]]) ->
                 type=sym_type,
                 order=candidate_order,
                 rank=rank,
+                kind=kind,
+                owner_class=owner_class,
             )
         )
 
@@ -443,10 +477,94 @@ def collect_definitions(expanded: LocatedText, evidence: dict[str, set[str]]) ->
                 type=sym_type,
                 order=candidate_order,
                 rank=2,
+                kind="call_evidence",
             )
         )
 
     return dedupe_definitions(definitions)
+
+
+def collect_ast_class_type_candidates(
+    ast: dict[str, Any],
+    start_order: int,
+    authored_premise_class_facts: set[tuple[str, str]],
+) -> list[tuple[str, str, int]]:
+    direct_facts: list[tuple[str, str, int]] = []
+    target_equalities: list[tuple[str, str]] = []
+    order = start_order
+
+    def add_class_fact(statement: Any, *, allow_authored_premise: bool) -> None:
+        nonlocal order
+        order += 1
+        call_name = sym_name(statement.get("call_sym")) if isinstance(statement, dict) else None
+        args = [sym_name(arg) for arg in statement.get("arg_sym_list", [])] if isinstance(statement, dict) else []
+        if call_name != "~" or len(args) != 2 or not args[0] or not args[1]:
+            return
+        class_name, source_name = args
+        if not is_capital_head(class_name) or is_capital_head(source_name):
+            return
+        if not allow_authored_premise and (class_name, source_name) in authored_premise_class_facts:
+            return
+        direct_facts.append((class_name, source_name, order))
+
+    def walk_module(node: Any) -> None:
+        nonlocal order
+        if not isinstance(node, dict) or node.get("kind") not in {"quantified_stmt", "set_stmt"}:
+            return
+        for statement in node.get("target_PSs", []):
+            add_class_fact(statement, allow_authored_premise=True)
+            call_name = sym_name(statement.get("call_sym")) if isinstance(statement, dict) else None
+            args = [sym_name(arg) for arg in statement.get("arg_sym_list", [])] if isinstance(statement, dict) else []
+            if call_name == "=" and len(args) == 2 and args[0] and args[1]:
+                left, right = args
+                if not is_capital_head(left) and not is_capital_head(right):
+                    target_equalities.append((left, right))
+            if isinstance(statement, dict) and statement.get("kind") in {"quantified_stmt", "set_stmt"}:
+                walk_module(statement)
+        for statement in node.get("premise_PSs", []):
+            add_class_fact(statement, allow_authored_premise=False)
+            if isinstance(statement, dict) and statement.get("kind") in {"quantified_stmt", "set_stmt"}:
+                walk_module(statement)
+        for binding in node.get("premise_binding_stmts", []):
+            src = binding.get("src_stmt") if isinstance(binding, dict) else None
+            if isinstance(src, dict) and src.get("kind") in {"quantified_stmt", "set_stmt"}:
+                walk_module(src)
+
+    walk_module(ast)
+
+    aliases = DisjointSet()
+    for class_name, source_name, _ in direct_facts:
+        aliases.find(class_name)
+        aliases.find(source_name)
+    for left, right in target_equalities:
+        aliases.union(left, right)
+
+    groups = aliases.groups()
+    candidates: list[tuple[str, str, int]] = []
+    for class_name, source_name, candidate_order in direct_facts:
+        for alias in sorted(aliases_for(source_name, groups)):
+            if is_capital_head(alias) or is_generated_sym_name(alias):
+                continue
+            candidates.append((class_name, alias, candidate_order))
+    return candidates
+
+
+def collect_authored_premise_class_facts(cleaned: LocatedText) -> set[tuple[str, str]]:
+    facts: set[tuple[str, str]] = set()
+    for line in logical_lines_located(cleaned):
+        _, stripped = split_indent_located(line)
+        if not stripped.text.startswith("|") or stripped.text.startswith("|-"):
+            continue
+        statement = premise_body(stripped)
+        inherit_parts = [part.strip() for part in split_top_level_located(statement, "~")]
+        if len(inherit_parts) != 2:
+            continue
+        class_name, sym_name = inherit_parts[0].text, inherit_parts[1].text
+        if not is_plain_sym(class_name) or not is_plain_sym(sym_name):
+            continue
+        if is_capital_head(class_name) and not is_capital_head(sym_name):
+            facts.add((class_name, sym_name))
+    return facts
 
 
 def collect_explicit_class_definitions(line: LocatedText, order: int) -> list[Definition]:
@@ -455,10 +573,24 @@ def collect_explicit_class_definitions(line: LocatedText, order: int) -> list[De
     occurrence = occurrence_from_located(line, line.text)
     if occurrence is None:
         return []
-    return [definition_from_occurrence(occurrence, "class", order)]
+    return [definition_from_occurrence(occurrence, "class", order, kind="class_decl", owner_class=occurrence.name)]
 
 
-def collect_declaration_definitions(line: LocatedText, order: int) -> tuple[list[tuple[str, str, Occurrence, int, int]], list[Definition]]:
+def declaration_owner_class(line_text: str, class_stack: list[tuple[int, str]]) -> str | None:
+    match = re.match(r"^(?P<class>[^\s:]+)::.+?:", line_text)
+    if match is not None and is_plain_sym(match.group("class")):
+        return match.group("class")
+    if line_text.startswith("::") and class_stack:
+        return class_stack[-1][1]
+    return None
+
+
+def collect_declaration_definitions(
+    line: LocatedText,
+    order: int,
+    *,
+    owner_class: str | None = None,
+) -> tuple[list[tuple[str, str, Occurrence, int, int, str, str | None]], list[Definition]]:
     declaration = parse_premise_declaration(line.text)
     header = line.slice(1).strip() if declaration is not None and line.text.startswith("|") else line
     if declaration is None:
@@ -469,10 +601,10 @@ def collect_declaration_definitions(line: LocatedText, order: int) -> tuple[list
 
     name, inputs, outputs, _ = declaration
     name_occurrence = occurrence_from_located(header, name)
-    callable_candidates: list[tuple[str, str, Occurrence, int, int]] = []
+    callable_candidates: list[tuple[str, str, Occurrence, int, int, str, str | None]] = []
     if name_occurrence is not None:
         classifier = CLASSIFIER_PREDICATE if outputs == ["bool"] else CLASSIFIER_FUNCTION
-        callable_candidates.append((classifier, name, name_occurrence, order, 0))
+        callable_candidates.append((classifier, name, name_occurrence, order, 0, "callable_decl", owner_class))
 
     pure_definitions: list[Definition] = []
     for term in inputs + outputs:
@@ -480,15 +612,51 @@ def collect_declaration_definitions(line: LocatedText, order: int) -> tuple[list
             continue
         term_occurrence = occurrence_from_located(header, term)
         if term_occurrence is not None:
-            pure_definitions.append(definition_from_occurrence(term_occurrence, "pure", order))
+            pure_definitions.append(definition_from_occurrence(term_occurrence, "pure", order, kind="pure_intro"))
     return callable_candidates, pure_definitions
+
+
+def collect_declaration_signature_class_candidates(line: LocatedText, order: int) -> list[tuple[str, int]]:
+    declaration = parse_premise_declaration(line.text)
+    if declaration is None:
+        declaration = parse_declaration(line.text)
+    if declaration is None:
+        return []
+
+    _, inputs, outputs, _ = declaration
+    signature_terms = [*inputs, *([] if outputs == ["bool"] else outputs)]
+    candidates: list[tuple[str, int]] = []
+    for term in signature_terms:
+        if not is_plain_sym(term) or is_capital_head(term) or is_generated_sym_name(term):
+            continue
+        candidates.append((term, order))
+    return candidates
+
+
+def collect_class_field_definition(
+    line: LocatedText,
+    order: int,
+    owner_class: str | None,
+) -> list[tuple[str, str, Occurrence, int, int, str, str | None]]:
+    if owner_class is None:
+        return []
+    match = re.fullmatch(r"(?:(?P<class>[^\s:]+)::|::)(?P<name>[^\s:]+)", line.text)
+    if match is None:
+        return []
+    name = match.group("name")
+    if not is_plain_sym(name):
+        return []
+    occurrence = occurrence_from_located(line, name)
+    if occurrence is None:
+        return []
+    return [(CLASSIFIER_FUNCTION, name, occurrence, order, 0, "callable_decl", owner_class)]
 
 
 def collect_classifier_fact_candidates(
     line: LocatedText,
     aliases: DisjointSet,
     order: int,
-) -> list[tuple[str, str, Occurrence, int, int]]:
+) -> list[tuple[str, str, Occurrence, int, int, str, str | None]]:
     statement = premise_body(line)
     equals_parts = [part.strip() for part in split_top_level_located(statement, "=")]
     if len(equals_parts) == 2 and all(is_plain_sym(part.text) for part in equals_parts):
@@ -503,10 +671,12 @@ def collect_classifier_fact_candidates(
     occurrence = occurrence_from_located(name, name.text)
     if occurrence is None:
         return []
-    return [(classifier.text, name.text, occurrence, order, 1)]
+    return [(classifier.text, name.text, occurrence, order, 1, "classifier_fact", None)]
 
 
-def collect_class_type_fact_candidates(line: LocatedText, order: int) -> list[tuple[str, str, int]]:
+def collect_class_type_fact_candidates(line: LocatedText, order: int) -> list[tuple[str, str, Definition]]:
+    if line.text.startswith("|"):
+        return []
     statement = premise_body(line)
     inherit_parts = [part.strip() for part in split_top_level_located(statement, "~")]
     if len(inherit_parts) != 2:
@@ -514,20 +684,43 @@ def collect_class_type_fact_candidates(line: LocatedText, order: int) -> list[tu
     class_name, sym_name = inherit_parts[0].text, inherit_parts[1].text
     if not is_plain_sym(class_name) or not is_plain_sym(sym_name) or not is_capital_head(class_name) or is_capital_head(sym_name):
         return []
-    return [(class_name, sym_name, order)]
+    occurrence = occurrence_from_located(inherit_parts[1], sym_name)
+    if occurrence is None:
+        return []
+    return [
+        (
+            class_name,
+            sym_name,
+            Definition(
+                file=occurrence.file,
+                lineno=occurrence.lineno,
+                col_start_no=occurrence.col_start_no,
+                col_end_no=occurrence.col_end_no,
+                name=sym_name,
+                type="class",
+                order=order,
+                rank=-1,
+                kind="class_type_fact",
+                owner_class=class_name,
+            ),
+        )
+    ]
 
 
-def collect_class_receiver_candidates(line: LocatedText, class_name: str, order: int) -> list[tuple[str, str, int]]:
+def collect_class_receiver_candidates(line: LocatedText, class_name: str, order: int) -> list[tuple[str, str, Definition]]:
     declaration = parse_declaration(line.text)
     if declaration is None:
         return []
     _, inputs, _, _ = declaration
     if not inputs or not is_plain_sym(inputs[0]) or is_capital_head(inputs[0]):
         return []
-    return [(class_name, inputs[0], order)]
+    occurrence = occurrence_from_located(line, inputs[0])
+    if occurrence is None:
+        return []
+    return [(class_name, inputs[0], class_receiver_fallback_definition(occurrence, class_name, order))]
 
 
-def collect_qualified_class_receiver_candidates(line: LocatedText, order: int) -> list[tuple[str, str, int]]:
+def collect_qualified_class_receiver_candidates(line: LocatedText, order: int) -> list[tuple[str, str, Definition]]:
     declaration = parse_declaration(line.text)
     match = re.match(r"^(?P<class>[^\s:]+)::.+?:", line.text)
     if declaration is None or match is None:
@@ -536,7 +729,10 @@ def collect_qualified_class_receiver_candidates(line: LocatedText, order: int) -
     _, inputs, _, _ = declaration
     if not is_plain_sym(class_name) or not inputs or not is_plain_sym(inputs[0]) or is_capital_head(inputs[0]):
         return []
-    return [(class_name, inputs[0], order)]
+    occurrence = occurrence_from_located(line, inputs[0])
+    if occurrence is None:
+        return []
+    return [(class_name, inputs[0], class_receiver_fallback_definition(occurrence, class_name, order))]
 
 
 def collect_pure_intro_definitions(line: LocatedText, order: int) -> list[Definition]:
@@ -554,6 +750,7 @@ def collect_pure_intro_definitions(line: LocatedText, order: int) -> list[Defini
                         name=binder.text,
                         type="pure",
                         order=order,
+                        kind="pure_intro",
                     )
                 )
 
@@ -572,6 +769,7 @@ def collect_pure_intro_definitions(line: LocatedText, order: int) -> list[Defini
                         name=binder.text,
                         type="pure",
                         order=order,
+                        kind="pure_intro",
                     )
                 )
     return definitions
@@ -611,7 +809,45 @@ def occurrence_from_located(line: LocatedText, name: str) -> Occurrence | None:
     )
 
 
-def definition_from_occurrence(occurrence: Occurrence, sym_type: str, order: int, rank: int = 0) -> Definition:
+def class_receiver_fallback_definition(occurrence: Occurrence, class_name: str, order: int) -> Definition:
+    return Definition(
+        file=occurrence.file,
+        lineno=occurrence.lineno,
+        col_start_no=occurrence.col_start_no,
+        col_end_no=occurrence.col_end_no,
+        name=occurrence.name,
+        type="class",
+        order=order,
+        rank=-1,
+        kind="class_receiver",
+        owner_class=class_name,
+    )
+
+
+def definition_for_class_typed_symbol(target: Definition, class_name: str, order: int) -> Definition:
+    return Definition(
+        file=target.file,
+        lineno=target.lineno,
+        col_start_no=target.col_start_no,
+        col_end_no=target.col_end_no,
+        name=target.name,
+        type=target.type,
+        order=order,
+        rank=-1,
+        kind="class_type_target",
+        owner_class=class_name,
+    )
+
+
+def definition_from_occurrence(
+    occurrence: Occurrence,
+    sym_type: str,
+    order: int,
+    rank: int = 0,
+    *,
+    kind: str = "generic",
+    owner_class: str | None = None,
+) -> Definition:
     return Definition(
         file=occurrence.file,
         lineno=occurrence.lineno,
@@ -621,6 +857,8 @@ def definition_from_occurrence(occurrence: Occurrence, sym_type: str, order: int
         type=sym_type,
         order=order,
         rank=rank,
+        kind=kind,
+        owner_class=owner_class,
     )
 
 
@@ -644,6 +882,25 @@ def first_definitions_by_name(definitions: list[Definition]) -> dict[str, Defini
     for definition in sorted(definitions, key=lambda item: (item.order, item.file, item.lineno, item.col_start_no)):
         output.setdefault(definition.name, definition)
     return output
+
+
+def signature_class_definition(
+    sym_name: str,
+    class_definitions: dict[str, Definition],
+    groups: dict[str, set[str]],
+) -> Definition | None:
+    for candidate_name in inheritance_candidate_chain(sym_name):
+        target = class_definitions.get(candidate_name)
+        if target is not None:
+            return target
+        alias_targets = [
+            class_definitions[alias]
+            for alias in aliases_for(candidate_name, groups)
+            if alias in class_definitions
+        ]
+        if alias_targets:
+            return min(alias_targets, key=lambda item: (item.order, item.file, item.lineno, item.col_start_no))
+    return None
 
 
 def scan_located_line_occurrences(line: LocatedText) -> list[tuple[Occurrence, int]]:
@@ -742,7 +999,16 @@ def scan_source_occurrences(text: str, file_label: str) -> list[Occurrence]:
             if match is not None:
                 name = match.group(0)
                 if is_source_symbol_name(name):
-                    occurrences.append(make_occurrence(file_label, line_no, match.start(), match.end(), name))
+                    occurrences.append(
+                        make_occurrence(
+                            file_label,
+                            line_no,
+                            match.start(),
+                            match.end(),
+                            name,
+                            member_receiver=member_receiver_before(line, match.start()),
+                        )
+                    )
                 index = match.end()
                 continue
             if is_plain_sym(char) and char in OPERATOR_NAMES:
@@ -751,8 +1017,42 @@ def scan_source_occurrences(text: str, file_label: str) -> list[Occurrence]:
     return occurrences
 
 
-def make_occurrence(file_label: str, line_no: int, start: int, end: int, name: str) -> Occurrence:
-    return Occurrence(file=file_label, lineno=line_no - 1, col_start_no=start, col_end_no=end, name=name)
+def make_occurrence(
+    file_label: str,
+    line_no: int,
+    start: int,
+    end: int,
+    name: str,
+    *,
+    member_receiver: str | None = None,
+) -> Occurrence:
+    return Occurrence(
+        file=file_label,
+        lineno=line_no - 1,
+        col_start_no=start,
+        col_end_no=end,
+        name=name,
+        member_receiver=member_receiver,
+    )
+
+
+def member_receiver_before(line: str, start: int) -> str | None:
+    index = start - 1
+    while index >= 0 and line[index].isspace():
+        index -= 1
+    if index < 0 or line[index] != ".":
+        return None
+    end = index
+    index -= 1
+    while index >= 0 and line[index].isspace():
+        index -= 1
+    receiver_end = index + 1
+    while index >= 0 and re.match(r"[\w']", line[index], flags=re.UNICODE):
+        index -= 1
+    if index >= 0 and line[index] == "^":
+        index -= 1
+    receiver = line[index + 1 : receiver_end]
+    return receiver if is_source_symbol_name(receiver) else None
 
 
 def is_source_symbol_name(name: str) -> bool:
@@ -770,7 +1070,7 @@ def build_payload(
     for occurrence in occurrences:
         sym_type = classify_symbol(occurrence.name, evidence)
         colorable = sym_type in {"class", "func", "pred"} and is_colorable_identifier(occurrence.name)
-        definition = choose_definition(occurrence, sym_type, definitions.get(occurrence.name, []))
+        definition = choose_definition(occurrence, sym_type, definitions)
         counts[occurrence.name] += 1
         entry = {
             "file": occurrence.file,
@@ -802,35 +1102,66 @@ def build_payload(
     }
 
 
-def choose_definition(occurrence: Occurrence, sym_type: str, candidates: list[Definition]) -> Definition | None:
+def choose_definition(
+    occurrence: Occurrence,
+    sym_type: str,
+    definitions: dict[str, list[Definition]],
+) -> Definition | None:
+    candidates = definitions.get(occurrence.name, [])
     if sym_type == "pure":
-        class_targets = [candidate for candidate in candidates if candidate.type == "class"]
+        class_targets = [
+            candidate
+            for candidate in candidates
+            if candidate.type == "class" and candidate.kind in {"class_type_target", "class_type_fact", "class_receiver"}
+        ]
         if class_targets:
-            return min(class_targets, key=lambda item: (item.order, item.file, item.lineno, item.col_start_no))
+            return select_definition(class_targets, occurrence)
+        return None
+    if sym_type == "class":
+        return select_definition([candidate for candidate in candidates if candidate.kind == "class_decl"], occurrence)
     typed = [candidate for candidate in candidates if candidate.type == sym_type]
     if not typed:
         return None
+    if sym_type in {"func", "pred"} and occurrence.member_receiver:
+        owner_class = receiver_owner_class(occurrence.member_receiver, definitions)
+        if owner_class is not None:
+            method_targets = [
+                candidate
+                for candidate in typed
+                if candidate.kind == "callable_decl" and candidate.owner_class == owner_class
+            ]
+            selected = select_definition(method_targets, occurrence)
+            if selected is not None:
+                return selected
+    for kind in ("callable_decl", "classifier_fact", "call_evidence"):
+        selected = select_definition([candidate for candidate in typed if candidate.kind == kind], occurrence)
+        if selected is not None:
+            return selected
     useful = [candidate for candidate in typed if candidate.rank < 2] or typed
+    return select_definition(useful, occurrence)
+
+
+def receiver_owner_class(receiver_name: str, definitions: dict[str, list[Definition]]) -> str | None:
+    class_targets = [
+        candidate
+        for candidate in definitions.get(receiver_name, [])
+        if candidate.type == "class"
+        and candidate.owner_class is not None
+        and candidate.kind in {"class_type_target", "class_type_fact", "class_receiver"}
+    ]
+    selected = select_definition(class_targets, None)
+    return selected.owner_class if selected is not None else None
+
+
+def select_definition(candidates: list[Definition], occurrence: Occurrence | None) -> Definition | None:
+    if not candidates:
+        return None
+    if occurrence is None:
+        return min(candidates, key=lambda item: (item.order, item.file, item.lineno, item.col_start_no))
+    useful = candidates
     same_file = [candidate for candidate in useful if candidate.file == occurrence.file]
     if same_file:
-        non_self = [
-            candidate
-            for candidate in same_file
-            if not (
-                candidate.lineno == occurrence.lineno
-                and candidate.col_start_no == occurrence.col_start_no
-                and candidate.col_end_no == occurrence.col_end_no
-            )
-        ]
-        same_file = non_self or same_file
-        return min(
-            same_file,
-            key=lambda item: (
-                item.rank,
-                abs(item.lineno - occurrence.lineno) * 10000 + abs(item.col_start_no - occurrence.col_start_no),
-                item.order,
-            ),
-        )
+        return min(same_file, key=lambda item: (item.rank, item.order, item.lineno, item.col_start_no))
     return min(useful, key=lambda item: (item.rank, item.order, item.file, item.lineno, item.col_start_no))
 
 
@@ -846,12 +1177,12 @@ def serialize_definition(definition: Definition) -> dict[str, Any]:
 
 
 def classify_symbol(name: str, evidence: dict[str, set[str]]) -> str:
+    if name in evidence["class"] or is_capital_head(name):
+        return "class"
     if name in evidence["pred"]:
         return "pred"
     if name in evidence["func"]:
         return "func"
-    if name in evidence["class"] or is_capital_head(name):
-        return "class"
     return "pure"
 
 

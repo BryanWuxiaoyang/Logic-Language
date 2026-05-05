@@ -59,10 +59,12 @@ def check_text(
     tokens: dict[str, str],
     parser: Any,
     seen: set[Path] | None = None,
+    expanded: set[Path] | None = None,
 ) -> list[Diagnostic]:
     seen = set() if seen is None else set(seen)
+    expanded = set() if expanded is None else expanded
     diagnostics: list[Diagnostic] = []
-    body_lines = split_imports_with_diagnostics(text, file_label, base_dir, diagnostics, seen, tokens, parser)
+    body_lines = split_imports_with_diagnostics(text, file_label, base_dir, diagnostics, seen, expanded, tokens, parser)
     if diagnostics:
         return diagnostics
     body_text = "\n".join(body_lines)
@@ -82,7 +84,7 @@ def check_text(
         cleaned_body = remove_comments(normalized_body)
         body_line_offset = leading_blank_line_count(cleaned_body)
         body = strip_outer_blank_lines(cleaned_body)
-        ModuleCompiler(parser).compile(body)
+        ModuleCompiler(parser, validate_class_member_owners=False).compile(body)
     except CompileError as error:
         diagnostics.append(compile_error_to_diagnostic(error, file_label, body_line_offset, source_text=text))
 
@@ -95,6 +97,7 @@ def split_imports_with_diagnostics(
     base_dir: Path,
     diagnostics: list[Diagnostic],
     seen: set[Path],
+    expanded: set[Path],
     tokens: dict[str, str],
     parser: Any,
 ) -> list[str]:
@@ -136,6 +139,8 @@ def split_imports_with_diagnostics(
                 )
             )
             continue
+        if import_path in expanded:
+            continue
         if not import_path.exists():
             diagnostics.append(
                 make_diagnostic(
@@ -149,6 +154,7 @@ def split_imports_with_diagnostics(
                 )
             )
             continue
+        expanded.add(import_path)
         try:
             imported = import_path.read_text(encoding="utf-8")
         except OSError as error:
@@ -164,7 +170,7 @@ def split_imports_with_diagnostics(
                 )
             )
             continue
-        diagnostics.extend(check_text(imported, str(import_path), import_path.parent, tokens, parser, seen | {import_path}))
+        diagnostics.extend(check_text(imported, str(import_path), import_path.parent, tokens, parser, seen | {import_path}, expanded))
     return body_lines
 
 

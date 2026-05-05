@@ -88,6 +88,13 @@ The AST is intended as a precise intermediate logic form that can support human-
     - module-text forms: imports, sections, comments, branches, function declarations, class declarations, image-set syntax
 - if a `intrinsic-sym` appears in `module.syms`, it is omitted. e.g. `M("| value, sym | PS | TS") = M("| sym | PS | TS")`
 
+### Source Naming Convention
+- Class symbols should start with a capital letter, e.g. `Stmt`, `Sym_type`.
+- Function, predicate, method, and field symbols should use lower snake case and should not start with `_`, e.g. `get_sym_type`, `call_sym`.
+- Local pure variables should start with `_`, including declaration inputs/outputs, method receivers, quantifier/set binders, premise binders, and temporary body variables.
+- Global pure constants may use lower snake case without `_` when explicitly class-typed and not used as callable heads, e.g. `class_sym_type`, `true`, `false`.
+- Member references rename only the receiver variable; public field names stay unchanged. For example, `stmt.sub_stmts` should be written as `_stmt.sub_stmts`.
+
 ## Module Text
 - introduce `module-text` as the written syntax of `logic-language`.
     - `M(module-text)` translates `module-text` to a module
