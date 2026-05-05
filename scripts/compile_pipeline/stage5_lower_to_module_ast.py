@@ -142,7 +142,11 @@ class AstLowerer:
         target_pss = [*generated_target_nodes, *target_pss]
 
         generated_syms = self.generated_bound_stack.pop()
-        bound_names = [sym_node(sym, self.loc) for sym in module.syms]
+        bound_locs = module.bound_sym_locs or []
+        bound_names = [
+            sym_node(sym, bound_locs[index] if index < len(bound_locs) and bound_locs[index] is not None else self.loc)
+            for index, sym in enumerate(module.syms)
+        ]
         kind = "quantified_stmt" if module.type == "quantifier" else "set_stmt"
         ast: AstNode = {
             "kind": kind,

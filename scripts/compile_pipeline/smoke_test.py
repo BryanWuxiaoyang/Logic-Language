@@ -331,7 +331,7 @@ Stmt::has_direct_sym_alias: (stmt, sym1, sym2) => bool
 
 
 def test_operator_head_declaration_round_trip() -> None:
-    text = "+: (list, list1) => list2\n        list2 = list"
+    text = "+: (list, list1) => list2\n    list2 = list"
     ast = compile_text(text)
     assert calls(ast, "+")
     source = translate_ast_to_source(ast)
@@ -475,7 +475,11 @@ def test_inheritance_fact_does_not_declare_class_body() -> None:
     try:
         compile_text("A ~ B\n    ::func: b => out")
     except CompileError as error:
-        assert "class-declaration body line must start with '::'" in str(error) or "unsupported '::' usage" in str(error)
+        assert (
+            "class-declaration body line must start with '::'" in str(error)
+            or "unsupported '::' usage" in str(error)
+            or "indentation body is only allowed after quantifier, branch, declaration, or class declaration" in str(error)
+        )
         return
     raise AssertionError("A ~ B with an indented :: body should require an explicit B declaration")
 
@@ -563,7 +567,7 @@ def test_capital_wrapper_predicates_normalize_to_infix() -> None:
 
 
 def test_stage2_ancestor_scope_for_function_decl() -> None:
-    text = "-: (list, list1) => list2\n        list2.size = (list.size + list1.size)"
+    text = "-: (list, list1) => list2\n    list2.size = (list.size + list1.size)"
     desugared = run_stage2(text, ".").text
     assert "| list, list1, list2" in desugared
     assert "| list ~ list1" not in desugared
@@ -584,7 +588,7 @@ def test_stage2_capital_inheritance_when_visible() -> None:
 
 
 def test_stage2_function_output_inheritance_is_target() -> None:
-    text = "List\n-: (list, list1) => list2\n        list2.size = (list.size + list1.size)"
+    text = "List\n-: (list, list1) => list2\n    list2.size = (list.size + list1.size)"
     desugared = run_stage2(text, SKILL_DIR).text
     assert "\n    | List\n" in desugared
     assert "\n    | Symbol ~ List\n" not in desugared
@@ -805,8 +809,58 @@ def test_branch_allows_function_output_in_nested_target() -> None:
     assert not any(entry["code"] == "function_output_in_premise" for entry in payload["entries"])
 
 
+def test_indentation_body_headers_are_validated() -> None:
+    valid_sources = [
+        "∀\n    | x\n    P(x)",
+        "∃\n    | x\n    P(x)",
+        "@\n    | x\n    P(x)",
+        "| x\n| ∀\n    P(x)\nz = z",
+        "| x\n| ∃\n    | y\n    P(y)\nz = z",
+        "| x\n|- P(x)\n    Q(x)\nz = z",
+        "F: x => y\n    y = x",
+        "F: x => y\n    | G: a => b\n        b = a\n    y = G(x)",
+        "Class\n    ::field\n    ::func: _class => _out\n        P(_out)",
+        "Class\nClass::func: _class => _out\n    P(_out)",
+    ]
+    for source in valid_sources:
+        payload = module_check.check_module(source, module_check.STDIN_FILE, Path("."), is_file=False)
+        assert payload["summary"]["error_count"] == 0, (source, payload)
+
+
+def test_indentation_body_rejects_invalid_owner_and_level_jump() -> None:
+    invalid_owner = module_check.check_module("P(x)\n    Q(x)", module_check.STDIN_FILE, Path("."), is_file=False)
+    assert invalid_owner["summary"]["error_count"] == 1
+    owner_entry = invalid_owner["entries"][0]
+    assert owner_entry["stage"] == "syntax"
+    assert owner_entry["reason"] == "indentation body is only allowed after quantifier, branch, declaration, or class declaration"
+    assert owner_entry["lineno"] == 0
+    assert owner_entry["col_start_no"] == 0
+
+    level_jump = module_check.check_module("∀\n        | x\n    P(x)", module_check.STDIN_FILE, Path("."), is_file=False)
+    assert level_jump["summary"]["error_count"] == 1
+    jump_entry = level_jump["entries"][0]
+    assert jump_entry["stage"] == "syntax"
+    assert jump_entry["reason"] == "indentation can only increase by one level"
+    assert jump_entry["lineno"] == 1
+    assert jump_entry["col_start_no"] == 8
+
+    try:
+        compile_text("P(x)\n    Q(x)")
+    except CompileError as error:
+        assert "indentation body is only allowed after quantifier, branch, declaration, or class declaration" in str(error)
+    else:
+        raise AssertionError("expected compiler to reject arbitrary indentation body owner")
+
+    try:
+        compile_text("∀\n        | x\n    P(x)")
+    except CompileError as error:
+        assert "indentation can only increase by one level" in str(error)
+    else:
+        raise AssertionError("expected compiler to reject skipped indentation level")
+
+
 def test_target_nested_declaration_expands_in_function_body() -> None:
-    source = translate_ast_to_source(compile_text("F: x => y\n  G: a => b\n    P(b)\n  y = G(x)", base_dir=SKILL_DIR))
+    source = translate_ast_to_source(compile_text("F: x => y\n    G: a => b\n        P(b)\n    y = G(x)", base_dir=SKILL_DIR))
     assert "\n    Function ~ G\n" in source
     assert "\n      | ^b = G(^a)\n" in source
     assert "\n      P(^b)\n" in source
@@ -814,7 +868,7 @@ def test_target_nested_declaration_expands_in_function_body() -> None:
 
 
 def test_premise_nested_declaration_expands_in_function_body() -> None:
-    source = translate_ast_to_source(compile_text("F: func => y\n  | func: a => b\n    P(b)\n  P(func)", base_dir=SKILL_DIR))
+    source = translate_ast_to_source(compile_text("F: func => y\n    | func: a => b\n        P(b)\n    P(func)", base_dir=SKILL_DIR))
     assert "\n    | Function ~ ^func\n" in source
     assert "\n    | ∀{\n" in source
     assert "\n      | ^b = ^func(^a)\n" in source
@@ -823,17 +877,17 @@ def test_premise_nested_declaration_expands_in_function_body() -> None:
 
 
 def test_no_body_premise_declaration_expands_signature() -> None:
-    source = translate_ast_to_source(compile_text("F: x => y\n  | f: a => b\n  y = x", base_dir=SKILL_DIR))
+    source = translate_ast_to_source(compile_text("F: x => y\n    | f: a => b\n    y = x", base_dir=SKILL_DIR))
     assert "\n    | Function ~ ^f\n" in source
     assert "\n      | ^b = ^f(^a)\n" in source
 
 
 def test_bool_declarations_emit_predicate_fact() -> None:
-    source = translate_ast_to_source(compile_text("P: x => bool\n  P(x)", base_dir=SKILL_DIR))
+    source = translate_ast_to_source(compile_text("P: x => bool\n    P(x)", base_dir=SKILL_DIR))
     assert "\n  Predicate ~ P\n" in source
     assert "\n  Function ~ P\n" not in source
 
-    premise_source = translate_ast_to_source(compile_text("F: x => y\n  | P: a => bool\n  y = x", base_dir=SKILL_DIR))
+    premise_source = translate_ast_to_source(compile_text("F: x => y\n    | P: a => bool\n    y = x", base_dir=SKILL_DIR))
     assert "\n    | Predicate ~ ^P\n" in premise_source
     assert "\n    | Function ~ ^P\n" not in premise_source
 
@@ -957,7 +1011,7 @@ def test_translate_keeps_binder_line_when_present() -> None:
 
 
 def test_nested_module_disassembly_is_indented() -> None:
-    ast = compile_text("-: (list, list1) => list2\n        list2.size = (list.size + list1.size)")
+    ast = compile_text("-: (list, list1) => list2\n    list2.size = (list.size + list1.size)")
     source = translate_ast_to_source(ast)
     assert "\n  Function ~ -\n" in source
     assert "\n  ∀{\n" in source
@@ -967,7 +1021,7 @@ def test_nested_module_disassembly_is_indented() -> None:
 
 
 def test_function_output_inheritance_disassembles_as_target() -> None:
-    text = "List\n-: (list, list1) => list2\n        list2.size = (list.size + list1.size)"
+    text = "List\n-: (list, list1) => list2\n    list2.size = (list.size + list1.size)"
     first_source = translate_ast_to_source(compile_text(text, base_dir=SKILL_DIR))
     second_source = translate_ast_to_source(compile_text(first_source, base_dir=SKILL_DIR))
     assert "\n  | ^List\n" in first_source
@@ -1150,7 +1204,7 @@ def test_round_trip_disassembly_is_idempotent() -> None:
 
 
 def test_generated_temp_round_trip_is_idempotent() -> None:
-    text = "-: (list, list1) => list2\n        list2.size = (list.size + list1.size)"
+    text = "-: (list, list1) => list2\n    list2.size = (list.size + list1.size)"
     first_ast = compile_text(text)
     first_source = translate_ast_to_source(first_ast)
     second_ast = compile_text(first_source)
@@ -1400,7 +1454,7 @@ def test_module_check_positioned_class_field_assignment_error() -> None:
 
 def test_module_check_positioned_arrow_and_literal_errors() -> None:
     cases = [
-        ("f: x -> y\n  P(y)\n", "function-assign '->' is not supported; use '=>' with an indented function body", 0, 5, 7),
+        ("f: x -> y\n    P(y)\n", "function-assign '->' is not supported; use '=>' with an indented function body", 0, 5, 7),
         ("x = '\\q'\n", "invalid escape sequence \\q", 0, 5, 7),
         ("'x' = y\n", "literal cannot appear on assignment left-hand side", 0, 0, 1),
     ]
@@ -1585,6 +1639,66 @@ def test_module_check_final_ast_diagnostics_keep_location_and_code() -> None:
     assert payload["entries"] == [{**diagnostic, "stage": "final_ast"}]
 
 
+def test_module_check_final_ast_declaration_conflict_uses_output_location() -> None:
+    source = "\n".join(
+        [
+            "Model",
+            "",
+            "Camera",
+            "",
+            "Light",
+            "",
+            "Scene",
+            "    ::models",
+            "    ::lights",
+            "    ::camera",
+            "",
+            "Image",
+            "    ::color: (image, x, y) => color",
+            "",
+            "Render",
+            "    ::call: scene => image",
+            "",
+        ]
+    )
+    payload = module_check.check_module(source, "/tmp/render.lp", Path("."), is_file=False)
+
+    assert payload["summary"]["error_count"] == 1
+    entry = next(entry for entry in payload["entries"] if entry["stage"] == "final_ast")
+    assert entry["stage"] == "final_ast"
+    assert entry["code"] == "bound_sym_name_conflict"
+    assert entry["reason"] == "bound-sym name 'color' conflicts with ancestor statement"
+    assert entry["file"] == "/tmp/render.lp"
+    assert entry["lineno"] == 12
+    assert entry["col_start_no"] == source.splitlines()[12].rindex("color")
+    assert entry["col_end_no"] == entry["col_start_no"] + len("color")
+
+
+def test_module_check_final_ast_plain_declaration_conflict_uses_input_location() -> None:
+    source = "∀\n    | x\n    F: x => y\n"
+    payload = module_check.check_module(source, "/tmp/input.lp", Path("."), is_file=False)
+
+    assert payload["summary"]["error_count"] == 1
+    entry = next(entry for entry in payload["entries"] if entry["stage"] == "final_ast")
+    assert entry["stage"] == "final_ast"
+    assert entry["code"] == "bound_sym_name_conflict"
+    assert entry["reason"] == "bound-sym name 'x' conflicts with ancestor statement"
+    assert entry["lineno"] == 2
+    assert entry["col_start_no"] == source.splitlines()[2].index("x")
+
+
+def test_module_check_final_ast_class_method_body_conflict_uses_declaration_location() -> None:
+    source = "∀\n    | x\n    Class\n    Class::m: x => y\n        P(y)\n"
+    payload = module_check.check_module(source, "/tmp/input.lp", Path("."), is_file=False)
+
+    assert payload["summary"]["error_count"] == 2
+    entry = next(entry for entry in payload["entries"] if entry["stage"] == "final_ast")
+    assert entry["stage"] == "final_ast"
+    assert entry["code"] == "bound_sym_name_conflict"
+    assert entry["lineno"] == 3
+    assert entry["col_start_no"] == source.splitlines()[3].index("x")
+
+
 def test_module_check_text_import_resolves_standard_library_from_skill_dir() -> None:
     result = subprocess.run(
         [
@@ -1750,6 +1864,30 @@ def test_normalize_module_declarations_places_inheritance_before_member_bodies()
             "B",
             "    ::method: (_b, _in) => _out",
             "        P(_out)",
+            "",
+        ]
+    )
+
+
+def test_normalize_module_declarations_unindents_multiline_logical_member_body() -> None:
+    source = "\n".join(
+        [
+            "Class",
+            "Class::m: _class => _out",
+            "    _out = {",
+            "        | _item",
+            "        P(_item)",
+            "    }",
+        ]
+    )
+    assert normalize_module_declarations.normalize_module_declarations_text(source) == "\n".join(
+        [
+            "Class",
+            "    ::m: _class => _out",
+            "        _out = {",
+            "            | _item",
+            "            P(_item)",
+            "        }",
             "",
         ]
     )
@@ -1955,7 +2093,7 @@ def test_resolve_sym_type_definition_locations() -> None:
                 "A~B",
                 "B",
                 "f: x => y",
-                "  y = f(x)",
+                "    y = f(x)",
                 "Function ~ g",
                 "z = g(y)",
                 "Predicate ~ p",
@@ -2446,6 +2584,8 @@ def main() -> int:
         test_premise_universal_block_contains_target_branch_modules,
         test_branch_requires_indented_block,
         test_branch_allows_function_output_in_nested_target,
+        test_indentation_body_headers_are_validated,
+        test_indentation_body_rejects_invalid_owner_and_level_jump,
         test_target_nested_declaration_expands_in_function_body,
         test_premise_nested_declaration_expands_in_function_body,
         test_no_body_premise_declaration_expands_signature,
@@ -2508,6 +2648,9 @@ def main() -> int:
         test_module_check_compile_error_uses_entry_file_start,
         test_module_check_compile_error_uses_source_fragment_location,
         test_module_check_final_ast_diagnostics_keep_location_and_code,
+        test_module_check_final_ast_declaration_conflict_uses_output_location,
+        test_module_check_final_ast_plain_declaration_conflict_uses_input_location,
+        test_module_check_final_ast_class_method_body_conflict_uses_declaration_location,
         test_module_check_text_import_resolves_standard_library_from_skill_dir,
         test_module_check_standard_library_is_clean,
         test_module_check_stdin_import_uses_base_dir,
@@ -2517,6 +2660,7 @@ def main() -> int:
         test_expand_module_cli_invalid_input,
         test_normalize_module_declarations_groups_source_units,
         test_normalize_module_declarations_places_inheritance_before_member_bodies,
+        test_normalize_module_declarations_unindents_multiline_logical_member_body,
         test_normalize_module_declarations_respects_nested_block_barriers,
         test_normalize_module_declarations_opaque_exists_and_declaration_bodies,
         test_normalize_module_declarations_cli_modes_and_imports,

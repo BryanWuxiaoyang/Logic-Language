@@ -61,10 +61,12 @@ def run_compile_pipeline(
     from compile_pipeline.stage3_parse_module_sections import run as parse_sections
     from compile_pipeline.stage4_parse_statements import run as parse_statements
     from compile_pipeline.stage5_lower_to_module_ast import run as lower_to_ast
+    from compile_pipeline.declaration_locations import annotate_declaration_bound_locs
 
     normalized = normalize_source(text, base_dir, source=source, allow_imports=allow_imports)
     desugared = desugar_source(normalized.text, Path(base_dir).resolve())
     sections = parse_sections(desugared.text)
+    annotate_declaration_bound_locs(sections.module, normalized.text, normalized.source)
     statements = parse_statements(sections)
     lowered = lower_to_ast(statements, normalized.loc)
     stage_summaries = [

@@ -31,6 +31,15 @@ DECL_BODY_OUTPUT_MARKER = "__compiler_function_body_outputs"
 BRANCH_MODULE_MARKER = "__compiler_branch_module"
 CLASS_FIELD_MARKER = "__compiler_class_field"
 INTRINSIC_SYMS = tuple(sorted(CAPITAL_INTRINSIC_SYMS | {"true", "false"}))
+INDENT_WIDTH = 4
+INDENTATION_BODY_OWNER_ERROR = "indentation body is only allowed after quantifier, branch, declaration, or class declaration"
+INDENTATION_LEVEL_ERROR = "indentation can only increase by one level"
+PREMISE_QUANTIFIER_HEADERS = {
+    "| ∀": "∀",
+    "|∀": "∀",
+    "| ∃": "∃",
+    "|∃": "∃",
+}
 
 
 @dataclass
@@ -48,6 +57,7 @@ class Module:
     quantifier: str | None = None
     declaration_syms: list[str] = field(default_factory=list)
     suppress_inferred_syms: bool = False
+    bound_sym_locs: list[dict[str, Any] | None] = field(default_factory=list)
 
 
 @dataclass
@@ -120,6 +130,7 @@ class ModuleCompiler:
         return self.build_module("quantifier", quantifier, body)
 
     def lower_line_blocks(self, lines: list[str], *, visible_class_names: Iterable[str] = ()) -> list[str]:
+        validate_indentation_levels(lines)
         output: list[str] = []
         visible_classes = set(visible_class_names) | direct_class_header_names(lines)
         index = 0
@@ -136,10 +147,11 @@ class ModuleCompiler:
                     output.append(module_text)
                     index = next_index
                     continue
-            if content in {"| ∀", "|∀"} and index + 1 < len(lines):
+            premise_quantifier = premise_quantifier_header(content)
+            if premise_quantifier is not None and index + 1 < len(lines):
                 block, next_index = collect_indented_block(lines, index + 1, indent)
                 if block:
-                    module_text = "| ∀{\n" + self.lower_nested_block(unindent_block(block)) + "\n}"
+                    module_text = "| " + premise_quantifier + "{\n" + self.lower_nested_block(unindent_block(block)) + "\n}"
                     output.append(module_text)
                     index = next_index
                     continue
@@ -178,13 +190,13 @@ class ModuleCompiler:
             return ["∀{\n| " + BRANCH_MODULE_MARKER + "\n| " + branch_ps + "\n" + self.lower_nested_block(block) + "\n}"]
         if is_class_field_marker(header):
             raise CompileError("class-field shorthand cannot have a function body; use Class::field: input => output for an explicit function declaration")
-        class_sym = class_header_sym(header)
+        class_sym = explicit_class_header_sym(header)
         if class_sym is not None:
             return self.lower_class_block(header, class_sym, block)
         declaration = parse_declaration(header)
         if declaration is None:
             reject_unsupported_coloncolon(header)
-            return [header, "∀{\n" + block + "\n}"]
+            raise CompileError(INDENTATION_BODY_OWNER_ERROR)
         return self.lower_declaration(declaration, block=self.lower_nested_block(block))
 
     def lower_declaration(self, declaration: tuple[str, list[str], list[str], str], block: str | None) -> list[str]:
@@ -285,6 +297,7 @@ class ModuleCompiler:
             target_statements=target_statements,
             declaration_syms=dedupe([sym for sym in declaration_syms if sym in syms]),
             suppress_inferred_syms=suppress_inferred_syms,
+            bound_sym_locs=[None for _ in syms],
         )
 
     def parse_image_set(self, body: str) -> Module:
@@ -297,6 +310,7 @@ class ModuleCompiler:
             syms=[out_sym],
             predicate_statements=[],
             target_statements=[Statement(text="$module0", sub_modules=[submodule])],
+            bound_sym_locs=[None],
         )
 
     def lower_term(self, text: str, *, target_section: bool) -> LoweredTerm:
@@ -446,6 +460,25 @@ def split_indent(line: str) -> tuple[int, str]:
     return len(first_line) - len(first_line.lstrip(" ")), line.strip()
 
 
+def validate_indentation_levels(lines: list[str]) -> None:
+    if not lines:
+        return
+    stack = [0]
+    for index, line in enumerate(lines):
+        indent, _ = split_indent(line)
+        if index == 0 and indent != 0:
+            raise CompileError(INDENTATION_BODY_OWNER_ERROR)
+        if indent > stack[-1]:
+            if indent != stack[-1] + INDENT_WIDTH:
+                raise CompileError(INDENTATION_LEVEL_ERROR)
+            stack.append(indent)
+            continue
+        while stack and indent < stack[-1]:
+            stack.pop()
+        if not stack or indent != stack[-1]:
+            raise CompileError(INDENTATION_LEVEL_ERROR)
+
+
 def collect_indented_block(lines: list[str], start: int, parent_indent: int) -> tuple[list[str], int]:
     block: list[str] = []
     index = start
@@ -460,9 +493,17 @@ def collect_indented_block(lines: list[str], start: int, parent_indent: int) -> 
 
 def unindent_block(lines: Iterable[str]) -> str:
     block = list(lines)
-    indents = [len(line) - len(line.lstrip(" ")) for line in block if line.strip()]
+    physical_lines = [physical_line for line in block for physical_line in line.splitlines()]
+    indents = [len(line) - len(line.lstrip(" ")) for line in physical_lines if line.strip()]
     trim = min(indents) if indents else 0
-    return "\n".join(line[trim:] for line in block)
+    return "\n".join(
+        "\n".join(physical_line[trim:] for physical_line in line.splitlines())
+        for line in block
+    )
+
+
+def premise_quantifier_header(text: str) -> str | None:
+    return PREMISE_QUANTIFIER_HEADERS.get(text.strip())
 
 
 def split_sections(body: str) -> list[str]:

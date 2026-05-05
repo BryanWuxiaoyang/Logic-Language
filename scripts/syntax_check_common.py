@@ -13,11 +13,13 @@ from compile_pipeline.module_sections import (
     BRANCH_MODULE_MARKER,
     DECL_OUTPUT_MARKER,
     FRESH_PREFIX,
+    INDENT_WIDTH,
+    INDENTATION_BODY_OWNER_ERROR,
+    INDENTATION_LEVEL_ERROR,
     brace_delta,
     call_text,
     class_member_owner_name,
     class_block_prefix_lines,
-    class_header_sym,
     collect_indented_block,
     dedupe,
     erase_coloncolon_statement_head,
@@ -27,6 +29,7 @@ from compile_pipeline.module_sections import (
     is_class_field_marker,
     is_plain_sym,
     declaration_kind_fact,
+    premise_quantifier_header,
     parse_declaration,
     parse_premise_declaration,
     reject_unsupported_coloncolon,
@@ -596,6 +599,7 @@ class LocatedModuleParser:
         return self.build_module("quantifier", quantifier, body)
 
     def lower_line_blocks(self, lines: list[LocatedText]) -> list[LocatedText]:
+        validate_indentation_levels_located(lines)
         output: list[LocatedText] = []
         visible_classes = direct_class_header_names_located(lines)
         index = 0
@@ -619,13 +623,14 @@ class LocatedModuleParser:
                     )
                     index = next_index
                     continue
-            if content.text in {"| ∀", "|∀"} and index + 1 < len(lines):
+            premise_quantifier = premise_quantifier_header(content.text)
+            if premise_quantifier is not None and index + 1 < len(lines):
                 block, next_index = collect_indented_block_located(lines, index + 1, indent)
                 if block:
                     output.append(
                         concat_located(
                             [
-                                synthetic_text("| ∀{\n", content.positions[0]),
+                                synthetic_text("| " + premise_quantifier + "{\n", content.positions[0]),
                                 self.lower_nested_block(unindent_block_located(block)),
                                 synthetic_text("\n}", content.positions[0]),
                             ]
@@ -697,13 +702,13 @@ class LocatedModuleParser:
                 header,
                 width=2,
             )
-        class_sym = class_header_sym(header.text)
+        class_sym = explicit_class_header_sym(header.text)
         if class_sym is not None:
             return self.lower_class_block(header, class_sym, block)
         declaration = parse_declaration(header.text)
         if declaration is None:
             reject_unsupported_coloncolon_located(header)
-            return [header, concat_located([synthetic_text("∀{\n", header.positions[0]), block, synthetic_text("\n}", header.positions[0])])]
+            raise_located_error(INDENTATION_BODY_OWNER_ERROR, header)
         return self.lower_declaration(header, declaration, block=self.lower_nested_block(block))
 
     def lower_declaration(
@@ -931,6 +936,25 @@ def split_indent_located(line: LocatedText) -> tuple[int, LocatedText]:
     return indent, line.strip()
 
 
+def validate_indentation_levels_located(lines: list[LocatedText]) -> None:
+    if not lines:
+        return
+    stack = [0]
+    for index, line in enumerate(lines):
+        indent, _ = split_indent_located(line)
+        if index == 0 and indent != 0:
+            raise_located_error(INDENTATION_BODY_OWNER_ERROR, line)
+        if indent > stack[-1]:
+            if indent != stack[-1] + INDENT_WIDTH:
+                raise_located_error(INDENTATION_LEVEL_ERROR, line)
+            stack.append(indent)
+            continue
+        while stack and indent < stack[-1]:
+            stack.pop()
+        if not stack or indent != stack[-1]:
+            raise_located_error(INDENTATION_LEVEL_ERROR, line)
+
+
 def collect_indented_block_located(lines: list[LocatedText], start: int, parent_indent: int) -> tuple[list[LocatedText], int]:
     block: list[LocatedText] = []
     index = start
@@ -945,9 +969,20 @@ def collect_indented_block_located(lines: list[LocatedText], start: int, parent_
 
 def unindent_block_located(lines: Iterable[LocatedText]) -> LocatedText:
     block = list(lines)
-    indents = [len(line.text) - len(line.text.lstrip(" ")) for line in block if line.text.strip()]
+    physical_lines = [physical_line for line in block for physical_line in split_lines_located(line)]
+    indents = [len(line.text) - len(line.text.lstrip(" ")) for line in physical_lines if line.text.strip()]
     trim = min(indents) if indents else 0
-    return join_lines_located([line.slice(trim) for line in block])
+    return join_lines_located(
+        [
+            concat_located(
+                [
+                    physical_line.slice(trim)
+                    for physical_line in split_lines_located(line)
+                ]
+            )
+            for line in block
+        ]
+    )
 
 
 def join_lines_located(lines: Iterable[LocatedText]) -> LocatedText:
