@@ -26,7 +26,7 @@ from compile_pipeline.module_sections import (
     explicit_class_header_sym,
     find_matching,
     has_top_level,
-    is_class_field_marker,
+    is_bare_coloncolon_field_shorthand,
     is_plain_sym,
     declaration_kind_fact,
     premise_quantifier_header,
@@ -606,7 +606,17 @@ class LocatedModuleParser:
         while index < len(lines):
             line = lines[index]
             indent, content = split_indent_located(line)
+            if content.text.startswith("@"):
+                content = synthetic_text("∀", content.positions[0])
             self.record_class_member_owner(content, visible_classes)
+            if index + 1 < len(lines):
+                block, _ = collect_indented_block_located(lines, index + 1, indent)
+                if block and is_bare_coloncolon_field_shorthand(content.text):
+                    raise_located_error(
+                        "class-field shorthand cannot have a function body; use Class::field: input => output for an explicit function declaration",
+                        content,
+                        width=2,
+                    )
             content = erase_coloncolon_statement_head_located(content)
             if content.text in QUANTIFIERS and index + 1 < len(lines):
                 block, next_index = collect_indented_block_located(lines, index + 1, indent)
@@ -677,7 +687,7 @@ class LocatedModuleParser:
             return
         index = content.text.find(class_name)
         position = content.positions[index] if 0 <= index < len(content.positions) else content.positions[0]
-        self.class_member_owners.append(ClassMemberOwner(class_name, position, class_name in visible_classes))
+        self.class_member_owners.append(ClassMemberOwner(class_name, position, True))
 
     def lower_header_with_block(self, header: LocatedText, block: LocatedText) -> list[LocatedText]:
         if header.text.startswith("@"):
@@ -696,12 +706,6 @@ class LocatedModuleParser:
                     ]
                 )
             ]
-        if is_class_field_marker(header.text):
-            raise_located_error(
-                "class-field shorthand cannot have a function body; use Class::field: input => output for an explicit function declaration",
-                header,
-                width=2,
-            )
         class_sym = explicit_class_header_sym(header.text)
         if class_sym is not None:
             return self.lower_class_block(header, class_sym, block)
@@ -825,7 +829,14 @@ class LocatedModuleParser:
         if not sections:
             if module_type == "set":
                 raise CheckError("set module requires non-empty syms", position=error_position or first_position(body))
-            raise CheckError("module requires target statements", position=error_position or first_position(body))
+            return CheckModule(
+                type=module_type,
+                binders=[],
+                predicate_statements=[],
+                target_statements=[],
+                quantifier=quantifier if module_type == "quantifier" else None,
+                declaration=declaration,
+            )
         target_section = sections[-1]
         before_target = sections[:-1]
         binders: list[Binder] = []
@@ -844,12 +855,16 @@ class LocatedModuleParser:
         suppress_inferred_syms = suppress_inferred_syms or any(text.text == BRANCH_MODULE_MARKER for text in predicate_texts)
         predicate_texts = [text for text in predicate_texts if text.text != BRANCH_MODULE_MARKER]
         predicate_texts = [text for text in predicate_texts if not is_declaration_marker_text(text.text)]
-        target_texts = [text for text in split_terms_located(target_section) if not is_declaration_marker_text(text.text)]
+        target_texts = [
+            text
+            for text in split_terms_located(target_section)
+            if not is_declaration_marker_text(text.text) and not is_ignored_plain_target_text(text.text)
+        ]
         if not binders and not suppress_inferred_syms:
             binders = infer_binders(predicate_texts)
         if module_type == "set" and not binders:
             raise CheckError("set module requires non-empty syms", position=error_position or first_position(body))
-        if not target_texts and declaration is None:
+        if module_type == "set" and not target_texts and declaration is None:
             raise CheckError("module requires non-empty target_statements", position=error_position or first_position(target_section))
         predicate_statements = [self.compile_statement(term) for term in predicate_texts]
         premise_binding_statements: list[CheckStatement] = []
@@ -1027,7 +1042,7 @@ def reject_unsupported_coloncolon_located(located: LocatedText) -> None:
 
 
 def class_block_prefix_lines_located(header: LocatedText, class_sym: str) -> list[LocatedText]:
-    return [header]
+    return []
 
 
 def direct_class_header_names_located(lines: list[LocatedText]) -> set[str]:
@@ -1040,6 +1055,10 @@ def direct_class_header_names_located(lines: list[LocatedText]) -> set[str]:
         if class_name is not None:
             class_names.add(class_name)
     return class_names
+
+
+def is_ignored_plain_target_text(text: str) -> bool:
+    return is_plain_sym(text.strip())
 
 
 def split_sections_located(body: LocatedText) -> list[LocatedText]:
@@ -1081,11 +1100,6 @@ def split_multiline_sections_located(body: LocatedText) -> list[LocatedText]:
                     section_lines = [section]
                 else:
                     sections.append(section)
-        elif balance == 0 and is_plain_sym(line.text):
-            if target_lines:
-                sections.append(join_lines_located(target_lines))
-                target_lines = []
-            sections.append(line)
         else:
             target_lines.append(line)
             balance += brace_delta(line.text)

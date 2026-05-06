@@ -380,6 +380,7 @@ def collect_definitions(
 
         explicit_classes = collect_explicit_class_definitions(stripped, order)
         class_candidates.extend(explicit_classes)
+        class_candidates.extend(collect_qualified_class_owner_definitions(stripped, order))
         if explicit_classes:
             class_stack.append((indent, explicit_classes[0].name))
         declaration_candidates, signature_candidates = collect_declaration_definitions(
@@ -574,6 +575,19 @@ def collect_explicit_class_definitions(line: LocatedText, order: int) -> list[De
     if occurrence is None:
         return []
     return [definition_from_occurrence(occurrence, "class", order, kind="class_decl", owner_class=occurrence.name)]
+
+
+def collect_qualified_class_owner_definitions(line: LocatedText, order: int) -> list[Definition]:
+    match = re.match(r"^(?P<class>[^\s:]+)::", line.text)
+    if match is None:
+        return []
+    class_name = match.group("class")
+    if not is_plain_sym(class_name) or not is_capital_head(class_name):
+        return []
+    occurrence = occurrence_from_located(line, class_name)
+    if occurrence is None:
+        return []
+    return [definition_from_occurrence(occurrence, "class", order, kind="class_owner", owner_class=class_name)]
 
 
 def declaration_owner_class(line_text: str, class_stack: list[tuple[int, str]]) -> str | None:

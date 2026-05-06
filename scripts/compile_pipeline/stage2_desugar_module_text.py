@@ -21,15 +21,16 @@ from compile_pipeline.module_sections import (
     Module,
     ModuleCompiler,
     Statement,
-    call_text,
+    class_member_owner_name,
     dedupe,
+    explicit_class_header_sym,
     infer_syms,
-    lower_head,
-    parse_class_field_marker,
     GENERATED_SYM_PREFIX,
     is_plain_sym,
+    logical_lines,
     lower_member_calls,
     parse_signature_terms,
+    split_indent,
     strip_outer_blank_lines,
     top_level_assignment_index,
 )
@@ -94,7 +95,11 @@ def run(text: str, base_dir: Path | str = ".") -> DesugarResult:
 
     normalized_body = normalize_latex(body_text, tokens)
     visible_text = visible_context_text(text, base_path, tokens)
-    visible_syms = collect_visible_syms(visible_text)
+    visible_syms = (
+        collect_visible_syms(visible_text)
+        | collect_free_class_owner_syms(visible_text)
+        | collect_free_class_owner_syms(normalized_body)
+    )
 
     body = strip_outer_blank_lines(remove_comments(normalized_body))
     if not body:
@@ -143,6 +148,27 @@ def collect_visible_syms(text: str) -> set[str]:
     cleaned = remove_comments(text)
     located = make_located_text(cleaned, STDIN_FILE, import_origin=True)
     return {declaration.name for declaration in collect_top_level_declarations(located, import_origin_only=True)}
+
+
+def collect_free_class_owner_syms(text: str) -> set[str]:
+    owners: set[str] = set()
+    for line in logical_lines(remove_comments(text)):
+        _, content = split_indent(line)
+        class_header = explicit_class_header_sym(content)
+        if class_header is not None:
+            owners.add(class_header)
+        owner = class_member_owner_name(content)
+        if owner is not None and is_plain_sym(owner):
+            owners.add(owner)
+    return owners
+
+
+def is_bool_predicate_sym(sym: str) -> bool:
+    if is_generated_sym(sym):
+        return False
+    normalized = sym.lstrip("_").rstrip("'")
+    normalized = re.sub(r"\d+$", "", normalized)
+    return normalized.startswith("is_")
 
 
 class ModuleDesugarer:
@@ -240,31 +266,7 @@ class ModuleDesugarer:
     def render_target_statement(self, statement: Statement, scope: ScopeState) -> list[str]:
         if not statement.sub_modules and self.function_output_marker_name(statement.text.strip()) is not None:
             return []
-        parsed = parse_class_field_marker(statement.text)
-        if not statement.sub_modules and parsed is not None:
-            return self.render_class_field_shorthand(parsed, scope)
         return [self.render_statement(statement, scope)]
-
-    def render_class_field_shorthand(self, parsed: tuple[str, str], scope: ScopeState) -> list[str]:
-        class_name, field_name = parsed
-        param_name = lower_head(class_name)
-        output_name = self.class_field_output_name(field_name, {param_name, *scope.ancestor_bound_syms})
-        call = f"{output_name} = {call_text(field_name, [param_name])}"
-        premise_bindings = [BindingInfo(param_name)]
-        output_bindings = [BindingInfo(output_name)]
-        predicates = [
-            *self.implicit_predicates(premise_bindings, scope.ancestor_bound_syms, []),
-            call,
-        ]
-        targets = self.implicit_predicates(output_bindings, scope.ancestor_bound_syms, [])
-        declaration_module = self.format_module("∀{", [param_name, output_name], predicates, targets, indent=0)
-        return [render_infix("Function", "~", field_name), declaration_module]
-
-    def class_field_output_name(self, field_name: str, unavailable: set[str]) -> str:
-        candidate = field_name + "'"
-        while candidate in unavailable:
-            candidate += "'"
-        return candidate
 
     def rewrite_statement_text(self, statement: Statement, scope: ScopeState) -> str:
         return normalize_legacy_wrapper_statement(lower_member_calls(statement.text))
@@ -287,6 +289,10 @@ class ModuleDesugarer:
 
     def naming_inheritance(self, sym: str, visible_syms: set[str]) -> list[str]:
         predicates: list[str] = []
+        if is_bool_predicate_sym(sym):
+            predicates.append(render_infix("Bool", "~", sym))
+            return predicates
+
         source_sym = selected_inheritance_source(sym, visible_syms)
         if source_sym is not None and source_sym != sym:
             predicates.append(render_infix(source_sym, "~", sym))

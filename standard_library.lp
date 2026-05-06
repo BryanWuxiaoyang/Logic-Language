@@ -34,8 +34,8 @@ Function ~ Predicate
 Pred
 Pred = Predicate
 
+Predicate ~ Set
 Set
-Set = Predicate
 Value
 
 Tuple

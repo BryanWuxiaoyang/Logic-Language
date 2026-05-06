@@ -107,7 +107,6 @@ class SemanticChecker:
             declaration = VisibleDeclaration(binder.text, binder.position, context.scope_id)
             current_declarations.append(declaration)
             self.add_visible(declaration)
-        self.check_function_output_in_premise(module)
         self.check_bare_index_operator_statements(module)
         child_context = ScopeContext(self.allocate_scope(), (*context.ancestors, context.scope_id))
         for statement in [*module.premise_binding_statements, *module.predicate_statements, *module.target_statements]:
@@ -158,27 +157,6 @@ class SemanticChecker:
                     reason=undeclared_class_member_owner_reason(owner.name),
                 )
             )
-
-    def check_function_output_in_premise(self, module: CheckModule) -> None:
-        if module.declaration is None:
-            return
-        for output in module.declaration.outputs:
-            for statement in module.predicate_statements:
-                occurrence = find_symbol_occurrence(statement, output)
-                if occurrence is None:
-                    continue
-                position, width = occurrence
-                self.diagnostics.append(
-                    Diagnostic(
-                        file=position.file,
-                        lineno=max(position.line - 1, 0),
-                        col_start_no=max(position.column - 1, 0),
-                        col_end_no=max(position.column - 1 + width, 1),
-                        type="error",
-                        code="function_output_in_premise",
-                        reason=f"function/predicate declaration output '{output}' appears in premise statement '{statement.text}'",
-                    )
-                )
 
     def check_bare_index_operator_binder(self, binder: Binder) -> None:
         if binder.text != "[]":

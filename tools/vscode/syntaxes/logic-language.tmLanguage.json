@@ -12,6 +12,24 @@
       "include": "#strings"
     },
     {
+      "include": "#declarations"
+    },
+    {
+      "include": "#members"
+    },
+    {
+      "include": "#calls"
+    },
+    {
+      "include": "#builtins"
+    },
+    {
+      "include": "#numbers"
+    },
+    {
+      "include": "#identifiers"
+    },
+    {
       "include": "#quantifiers"
     },
     {
@@ -54,6 +72,90 @@
               "match": "\\\\[\\\\\"nrt]"
             }
           ]
+        }
+      ]
+    },
+    "declarations": {
+      "patterns": [
+        {
+          "captures": {
+            "1": {
+              "name": "entity.name.function.method.logic-language"
+            }
+          },
+          "match": "(?<=::)\\s*([a-z][A-Za-z0-9_]*)\\s*(?=:)"
+        },
+        {
+          "captures": {
+            "1": {
+              "name": "entity.name.function.logic-language"
+            }
+          },
+          "match": "(?<!:)\\b([a-z][A-Za-z0-9_]*)\\s*(?=:)"
+        },
+        {
+          "captures": {
+            "1": {
+              "name": "variable.other.member.logic-language"
+            }
+          },
+          "match": "(?<=::)\\s*([a-z][A-Za-z0-9_]*)\\b(?!\\s*:)"
+        }
+      ]
+    },
+    "members": {
+      "patterns": [
+        {
+          "captures": {
+            "1": {
+              "name": "variable.other.member.logic-language"
+            }
+          },
+          "match": "\\.\\s*([A-Za-z_][A-Za-z0-9_]*)"
+        }
+      ]
+    },
+    "calls": {
+      "patterns": [
+        {
+          "captures": {
+            "1": {
+              "name": "entity.name.function.logic-language"
+            }
+          },
+          "match": "\\b([a-z][A-Za-z0-9_]*)\\s*(?=\\()"
+        }
+      ]
+    },
+    "builtins": {
+      "patterns": [
+        {
+          "name": "support.class.logic-language",
+          "match": "\\b(?:Function|Predicate|Set|Bool|Symbol|Value|Tuple|List|String|Char|Num|Size)\\b"
+        },
+        {
+          "name": "constant.language.boolean.logic-language",
+          "match": "\\b(?:true|false)\\b"
+        }
+      ]
+    },
+    "numbers": {
+      "patterns": [
+        {
+          "name": "constant.numeric.logic-language",
+          "match": "(?<![A-Za-z_])(?:0[xX][0-9A-Fa-f]+|\\d+(?:\\.\\d+)?)(?![A-Za-z_])"
+        }
+      ]
+    },
+    "identifiers": {
+      "patterns": [
+        {
+          "name": "entity.name.type.class.logic-language",
+          "match": "\\b[A-Z][A-Za-z0-9_]*\\b"
+        },
+        {
+          "name": "variable.other.local.logic-language",
+          "match": "\\b_[a-z][A-Za-z0-9_]*\\b"
         }
       ]
     },

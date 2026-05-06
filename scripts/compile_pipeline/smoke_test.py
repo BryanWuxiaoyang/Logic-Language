@@ -378,22 +378,22 @@ def test_class_coloncolon_top_level_function_declaration() -> None:
     assert "Class::func" not in source
     assert "Function ~ func" in source
     assert "func(^val1, ^val2)" in source
-    assert "| ^Val ~ ^val1" in source
-    assert "| ^Val ~ ^val2" in source
+    assert "| Val ~ ^val1" in source
+    assert "| Val ~ ^val2" in source
     assert "\n    Tuple ~ ^tmpfunc0\n" in source
     assert "\n    | Tuple ~ ^tmpfunc0\n" not in source
-    assert "\n    ^Val ~ ^val3\n" in source
-    assert "\n    ^Val ~ ^val4\n" in source
+    assert "\n    Val ~ ^val3\n" in source
+    assert "\n    Val ~ ^val4\n" in source
 
 
 def test_class_block_expands_to_current_scope() -> None:
     source = translate_ast_to_source(compile_text("Class\n    ::field\n    ::func: (val1, val2) => (val3, val4)"))
     assert "Class::" not in source
-    assert "\n  | ^Class\n" in source
+    assert "\n  | ^Class\n" not in source
     assert "Function ~ field" in source
-    assert "field(^class)" in source
-    assert "| ^Class ~ ^class" in source
-    assert "Symbol ~ ^field'" in source
+    assert "field(^_class)" in source
+    assert "| Class ~ ^_class" in source
+    assert "Symbol ~ ^_field" in source
     assert "Function ~ func" in source
     assert "func(^val1, ^val2)" in source
 
@@ -402,24 +402,31 @@ def test_class_field_shorthand_compiles() -> None:
     source = translate_ast_to_source(compile_text("Class\nClass::field"))
     assert "Class::field" not in source
     assert "Function ~ field" in source
-    assert "field(^class)" in source
-    assert "^Class ~ ^class" in source
-    assert "Symbol ~ ^field'" in source
-    assert "^field' = field(^class)" in source
+    assert "field(^_class)" in source
+    assert "Class ~ ^_class" in source
+    assert "Symbol ~ ^_field" in source
+    assert "^_field = field(^_class)" in source
 
 
-def test_class_field_shorthand_uses_collision_safe_prime_output() -> None:
+def test_class_field_shorthand_uses_underscore_receiver_and_output_names() -> None:
     source = translate_ast_to_source(compile_text("Class\nfield'\nClass::field"))
-    assert "\n  | ^Class, ^field'\n" in source
-    assert "| ^class, ^field''" in source
-    assert "Symbol ~ ^field''" in source
-    assert "^field'' = field(^class)" in source
+    assert "^field'" not in source
+    assert "| ^_class, ^_field" in source
+    assert "Symbol ~ ^_field" in source
+    assert "^_field = field(^_class)" in source
 
     source = translate_ast_to_source(compile_text("Class\nfield'\nfield''\nClass::field"))
-    assert "| ^class, ^field'''" in source
-    assert "Symbol ~ ^field'''" in source
-    assert "^field''' = field(^class)" in source
+    assert "| ^_class, ^_field" in source
+    assert "Symbol ~ ^_field" in source
+    assert "^_field = field(^_class)" in source
 
+
+def test_class_field_shorthand_desugars_in_premise_section() -> None:
+    source = translate_ast_to_source(compile_text("Graph\nGraph~A\nA\n    ::field\nB\nB~b\n"))
+    assert "Function ~ field" in source
+    assert "field(^_a)" in source
+    assert "A ~ ^_a" in source
+    assert "Symbol ~ ^_field" in source
 
 def test_prime_suffix_names_compile_and_infer_from_base() -> None:
     source = translate_ast_to_source(compile_text("List\n∀{| list', x'', y | y = list'}"))
@@ -499,14 +506,17 @@ def test_class_operator_suffix_declaration() -> None:
     assert "^list[^id]" in source
 
 
-def test_class_coloncolon_requires_explicit_class_declaration() -> None:
-    for text in ["Class::func: class => out", "A ~ Class\nClass::func: class => out"]:
-        try:
-            compile_text(text)
-        except CompileError as error:
-            assert "class member declaration requires explicit class declaration: Class" in str(error)
-            continue
-        raise AssertionError(f"expected undeclared class-member owner to fail: {text!r}")
+def test_class_coloncolon_allows_free_owner_source() -> None:
+    for text in ["Class::func: _class => out", "A ~ Class\nClass::func: _class => out", "Class::field"]:
+        payload = module_check.check_module(text, "<stdin>", SKILL_DIR, is_file=False)
+        assert payload["summary"]["error_count"] == 0, text
+        assert payload["summary"]["warning_count"] == 0, text
+
+
+def test_bare_plain_symbol_targets_are_ignored_without_warning() -> None:
+    payload = module_check.check_module("Class\nsym", "<stdin>", SKILL_DIR, is_file=False)
+    assert payload["summary"]["error_count"] == 0
+    assert payload["summary"]["warning_count"] == 0
 
 
 def test_invalid_class_body_lines_fail() -> None:
@@ -827,6 +837,31 @@ def test_indentation_body_headers_are_validated() -> None:
         assert payload["summary"]["error_count"] == 0, (source, payload)
 
 
+def test_at_header_desugars_to_recursive_forall_block() -> None:
+    sources = [
+        "\n".join(
+            [
+                "@Malu_wmma_instr::matrix1/matrix2",
+                "    Malu_wmma_instr",
+                "        ::m_size",
+                "        ::matrix1: _malu_wmma_instr => _matrix",
+                "            P(_matrix)",
+            ]
+        ),
+        "\n".join(
+            [
+                "@note",
+                "    F: _x => _y",
+                "        _y = _x",
+                "    f = f",
+            ]
+        ),
+    ]
+    for source in sources:
+        payload = module_check.check_module(source, module_check.STDIN_FILE, Path("."), is_file=False)
+        assert payload["summary"]["error_count"] == 0, (source, payload)
+
+
 def test_indentation_body_rejects_invalid_owner_and_level_jump() -> None:
     invalid_owner = module_check.check_module("P(x)\n    Q(x)", module_check.STDIN_FILE, Path("."), is_file=False)
     assert invalid_owner["summary"]["error_count"] == 1
@@ -951,17 +986,17 @@ def test_semantic_flags_undeclared_class_member_owner() -> None:
 
 def test_semantic_flags_function_output_in_body_premise() -> None:
     diagnostics = collect_semantic_diagnostics_from_text("F: x => y\n    | P(y)\n    y = y")
-    assert any(entry["code"] == "function_output_in_premise" for entry in diagnostics)
+    assert not any(entry["code"] == "function_output_in_premise" for entry in diagnostics)
 
 
 def test_semantic_flags_nested_function_output_in_body_premise() -> None:
     diagnostics = collect_semantic_diagnostics_from_text("F: x => y\n    | P(G(y))\n    y = y")
-    assert any(entry["code"] == "function_output_in_premise" for entry in diagnostics)
+    assert not any(entry["code"] == "function_output_in_premise" for entry in diagnostics)
 
 
 def test_semantic_flags_predicate_output_in_body_premise() -> None:
     diagnostics = collect_semantic_diagnostics_from_text("P: x => bool\n    | Q(bool)\n    P(x)")
-    assert any(entry["code"] == "function_output_in_premise" for entry in diagnostics)
+    assert not any(entry["code"] == "function_output_in_premise" for entry in diagnostics)
 
 
 def test_semantic_allows_function_output_in_target_and_generated_binding() -> None:
@@ -974,7 +1009,7 @@ def test_semantic_nested_premise_declaration_output_rule() -> None:
     assert not any(entry["code"] == "function_output_in_premise" for entry in ok)
 
     failing = collect_semantic_diagnostics_from_text("F: x => y\n    | G: a => b\n        | P(b)\n        Q(b)\n    y = x")
-    assert any(entry["code"] == "function_output_in_premise" for entry in failing)
+    assert not any(entry["code"] == "function_output_in_premise" for entry in failing)
 
 
 def test_sibling_submodules_can_reuse_name() -> None:
@@ -1063,6 +1098,25 @@ def test_function_output_inheritance_cases() -> None:
     bool_source = translate_ast_to_source(compile_text("Bool\nP: x => bool\n    P(x)", base_dir=SKILL_DIR))
     assert "\n    ^Bool ~ ^bool\n" in bool_source
     assert "\n    | ^Bool ~ ^bool\n" not in bool_source
+
+
+def test_is_prefixed_declared_syms_implicitly_inherit_bool() -> None:
+    input_source = translate_ast_to_source(compile_text("F: _is_val => out\n    P(_is_val)", base_dir=SKILL_DIR))
+    assert "\n    | Bool ~ ^_is_val\n" in input_source
+    assert "\n    Symbol ~ ^out\n" in input_source
+
+    output_source = translate_ast_to_source(compile_text("F: x => is_valid", base_dir=SKILL_DIR))
+    assert "\n    | Symbol ~ ^x\n" in output_source
+    assert "\n    Bool ~ ^is_valid\n" in output_source
+    assert "\n    | Bool ~ ^is_valid\n" not in output_source
+
+    override_source = translate_ast_to_source(compile_text("Is_val\nF: _is_val => out\n    P(_is_val)", base_dir=SKILL_DIR))
+    assert "\n    | Bool ~ ^_is_val\n" in override_source
+    assert "Is_val ~ ^_is_val" not in override_source
+
+    generated_source = translate_ast_to_source(compile_text("F: ^is_val => ^out\n    P(^is_val)", base_dir=SKILL_DIR))
+    assert "Bool ~ ^is_val" not in generated_source
+    assert "Symbol ~ ^is_val" not in generated_source
 
 
 def test_function_declaration_without_output_guarantee_omits_rule() -> None:
@@ -2018,14 +2072,11 @@ def test_normalize_module_declarations_dedupes_transitive_imports() -> None:
     assert lines.index("Stmt~Binding_stmt") + 1 == lines.index("Binding_stmt")
 
 
-def test_normalize_module_declarations_requires_explicit_class_for_members() -> None:
+def test_normalize_module_declarations_allows_free_class_members() -> None:
     for source in ["Class::m: _class => _out", "A ~ Class\nClass::m: _class => _out"]:
-        try:
-            normalize_module_declarations.normalize_module_declarations_text(source)
-        except CompileError as error:
-            assert "class member declaration requires explicit class declaration: Class" in str(error)
-            continue
-        raise AssertionError(f"expected undeclared normalizer class member to fail: {source!r}")
+        normalized = normalize_module_declarations.normalize_module_declarations_text(source)
+        assert "Class" in normalized
+        assert "    ::m: _class => _out" in normalized
 
 
 def test_normalize_module_declarations_cli_invalid_input() -> None:
@@ -2300,6 +2351,16 @@ def test_resolve_sym_type_class_block_receiver_definition() -> None:
         assert occurrence["definition"]["lineno"] == 0
 
 
+def test_resolve_sym_type_qualified_class_owner_receiver_definition() -> None:
+    payload = resolve_sym_type.resolve_text("Notsubset_stmt::arg_sym_list: notsubset_stmt => list\n    list = notsubset_stmt")
+    for line in [0, 1]:
+        occurrence = occurrence_on_line(payload, "notsubset_stmt", line)
+        assert occurrence["type"] == "pure"
+        assert occurrence["definition"]["name"] == "Notsubset_stmt"
+        assert occurrence["definition"]["lineno"] == 0
+        assert occurrence["definition"]["col_start_no"] == 0
+
+
 def test_resolve_sym_type_imported_class_typed_definition() -> None:
     with tempfile.TemporaryDirectory() as tmp_dir:
         root = Path(tmp_dir)
@@ -2392,6 +2453,25 @@ def test_resolve_sym_type_member_call_uses_bare_class_field_definition() -> None
     definition = occurrence_on_line(payload, "field", 3)["definition"]
     assert definition["lineno"] == 1
     assert definition["col_start_no"] == len("    ::")
+
+
+def test_resolve_sym_type_bare_class_field_in_premise_section_is_function() -> None:
+    payload = resolve_sym_type.resolve_text(
+        "\n".join(
+            [
+                "Graph",
+                "Graph~Class",
+                "Class",
+                "    ::field",
+                "B",
+                "B~b",
+            ]
+        )
+    )
+    symbol = resolved_symbol(payload, "field")
+    assert symbol["type"] == "func"
+    occurrence = occurrence_on_line(payload, "field", 3)
+    assert occurrence["colorable"] is True
 
 
 def test_resolve_sym_type_member_call_falls_back_to_function_declaration() -> None:
@@ -2545,7 +2625,8 @@ def main() -> int:
         test_class_coloncolon_top_level_function_declaration,
         test_class_block_expands_to_current_scope,
         test_class_field_shorthand_compiles,
-        test_class_field_shorthand_uses_collision_safe_prime_output,
+        test_class_field_shorthand_uses_underscore_receiver_and_output_names,
+        test_class_field_shorthand_desugars_in_premise_section,
         test_prime_suffix_names_compile_and_infer_from_base,
         test_class_method_body_is_preserved,
         test_function_declaration_and_body_are_separate_rules,
@@ -2554,7 +2635,8 @@ def main() -> int:
         test_inheritance_fact_does_not_declare_class_body,
         test_explicit_class_declaration_after_inheritance_fact,
         test_class_operator_suffix_declaration,
-        test_class_coloncolon_requires_explicit_class_declaration,
+        test_class_coloncolon_allows_free_owner_source,
+        test_bare_plain_symbol_targets_are_ignored_without_warning,
         test_invalid_class_body_lines_fail,
         test_explicit_class_field_declaration_may_have_body,
         test_wrapper_predicates_lower_through_anf,
@@ -2585,6 +2667,7 @@ def main() -> int:
         test_branch_requires_indented_block,
         test_branch_allows_function_output_in_nested_target,
         test_indentation_body_headers_are_validated,
+        test_at_header_desugars_to_recursive_forall_block,
         test_indentation_body_rejects_invalid_owner_and_level_jump,
         test_target_nested_declaration_expands_in_function_body,
         test_premise_nested_declaration_expands_in_function_body,
@@ -2611,6 +2694,7 @@ def main() -> int:
         test_bound_syms_are_not_filtered_as_intrinsics,
         test_free_classifier_syms_are_not_auto_bound,
         test_function_output_inheritance_cases,
+        test_is_prefixed_declared_syms_implicitly_inherit_bool,
         test_function_declaration_without_output_guarantee_omits_rule,
         test_tuple_function_declaration_call_and_destructure_are_premises,
         test_generated_tuple_function_declaration_keeps_tuple_guarantee,
@@ -2665,7 +2749,7 @@ def main() -> int:
         test_normalize_module_declarations_opaque_exists_and_declaration_bodies,
         test_normalize_module_declarations_cli_modes_and_imports,
         test_normalize_module_declarations_dedupes_transitive_imports,
-        test_normalize_module_declarations_requires_explicit_class_for_members,
+        test_normalize_module_declarations_allows_free_class_members,
         test_normalize_module_declarations_cli_invalid_input,
         test_resolve_sym_type_class_func_pred_and_alias_evidence,
         test_resolve_sym_type_predicate_wins_over_function,
@@ -2687,12 +2771,14 @@ def main() -> int:
         test_resolve_sym_type_premise_equality_does_not_propagate_class_definition,
         test_resolve_sym_type_inheritance_fact_does_not_define_capital_class_name,
         test_resolve_sym_type_class_block_receiver_definition,
+        test_resolve_sym_type_qualified_class_owner_receiver_definition,
         test_resolve_sym_type_imported_class_typed_definition,
         test_resolve_sym_type_class_typed_definition_uses_first_evidence,
         test_resolve_sym_type_function_and_predicate_use_declaration_heads,
         test_resolve_sym_type_member_call_uses_qualified_class_method_definition,
         test_resolve_sym_type_member_call_uses_indented_class_method_definition,
         test_resolve_sym_type_member_call_uses_bare_class_field_definition,
+        test_resolve_sym_type_bare_class_field_in_premise_section_is_function,
         test_resolve_sym_type_member_call_falls_back_to_function_declaration,
         test_resolve_sym_type_imported_definition_locations,
         test_resolve_sym_type_definition_prefers_current_file,

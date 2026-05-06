@@ -8,6 +8,7 @@ const DIAGNOSTIC_SOURCE = "logic-language";
 const DEFAULT_PYTHON_PATH = process.platform === "win32" ? "py" : "python3";
 const CLASS_SYMBOL_COLOR = "#4EC9B0";
 const CALLABLE_SYMBOL_COLOR = "#DCDCAA";
+const IMPORT_CANDIDATE_LIMIT = 100;
 
 function activate(context) {
   const diagnostics = vscode.languages.createDiagnosticCollection(DIAGNOSTIC_SOURCE);
@@ -15,6 +16,7 @@ function activate(context) {
   const warningCache = new Set();
   const rootsByUri = new Map();
   const symbolPayloads = new Map();
+  const analysisGenerations = new Map();
   const classSymbolDecoration = vscode.window.createTextEditorDecorationType({
     color: CLASS_SYMBOL_COLOR
   });
@@ -81,9 +83,11 @@ function activate(context) {
   }
 
   function pythonEnvironment(document) {
+    const env = { ...process.env };
+    env.PYTHONIOENCODING = "utf-8";
     return {
       cwd: getBaseDir(document),
-      env: { ...process.env },
+      env,
       windowsHide: true
     };
   }
@@ -244,6 +248,26 @@ function activate(context) {
     clearSymbolHighlights(document);
   }
 
+  function savedDocumentStateKey(document) {
+    return `${document.version}`;
+  }
+
+  function cachedSymbolPayload(document) {
+    const cached = symbolPayloads.get(document.uri.toString());
+    return cached ? cached.payload : undefined;
+  }
+
+  function nextAnalysisGeneration(document) {
+    const key = document.uri.toString();
+    const nextGeneration = (analysisGenerations.get(key) || 0) + 1;
+    analysisGenerations.set(key, nextGeneration);
+    return nextGeneration;
+  }
+
+  function isCurrentAnalysis(document, generation) {
+    return !document.isDirty && analysisGenerations.get(document.uri.toString()) === generation;
+  }
+
   function applySymbolHighlights(document, payload) {
     const entries = Array.isArray(payload.occurrences) ? payload.occurrences : [];
     const classRanges = rangesFor(entries, "class");
@@ -257,6 +281,267 @@ function activate(context) {
     }
   }
 
+  function normalizeImportPath(text) {
+    return text.replace(/\\/g, "/");
+  }
+
+  function isQuotedImport(text) {
+    return text.startsWith("\"") || text.startsWith("'");
+  }
+
+  function stripImportLineComment(text) {
+    let quote = "";
+    for (let index = 0; index < text.length; index += 1) {
+      const char = text[index];
+      if (quote) {
+        if (char === "\\") {
+          index += 1;
+          continue;
+        }
+        if (char === quote) {
+          quote = "";
+        }
+        continue;
+      }
+      if (char === "#") {
+        return text.slice(0, index);
+      }
+      if (char === "\"" || char === "'") {
+        quote = char;
+      }
+    }
+    return text;
+  }
+
+  function isRelativeImportPath(importPath) {
+    return (
+      importPath === "." ||
+      importPath === ".." ||
+      importPath.startsWith("./") ||
+      importPath.startsWith("../")
+    );
+  }
+
+  function normalizeFsPath(fsPath) {
+    const resolved = path.resolve(fsPath);
+    return process.platform === "win32" ? resolved.toLowerCase() : resolved;
+  }
+
+  function splitImportPrefix(importPath) {
+    const normalized = normalizeImportPath(importPath);
+    if (!normalized) {
+      return { directoryPrefix: "", namePrefix: "" };
+    }
+    if (normalized.endsWith("/")) {
+      return { directoryPrefix: normalized, namePrefix: "" };
+    }
+    const lastSlash = normalized.lastIndexOf("/");
+    if (lastSlash === -1) {
+      return { directoryPrefix: "", namePrefix: normalized };
+    }
+    return {
+      directoryPrefix: normalized.slice(0, lastSlash + 1),
+      namePrefix: normalized.slice(lastSlash + 1)
+    };
+  }
+
+  function importRootOptions(document, relativeMode) {
+    const roots = [];
+    const seen = new Set();
+
+    function addRoot(fsPath, detail, rank) {
+      if (!fsPath || !fs.existsSync(fsPath)) {
+        return;
+      }
+      const key = normalizeFsPath(fsPath);
+      if (seen.has(key)) {
+        return;
+      }
+      seen.add(key);
+      roots.push({ fsPath, detail, rank });
+    }
+
+    addRoot(path.dirname(document.fileName), "current directory", 0);
+    if (relativeMode) {
+      return roots;
+    }
+
+    try {
+      const { skillRoot } = backendPaths();
+      addRoot(skillRoot, "logic-language skill", 1);
+      addRoot(path.dirname(skillRoot), "skills directory", 2);
+    } catch (_error) {
+      // Fall back to current-directory suggestions only when the workspace root is unavailable.
+    }
+    return roots;
+  }
+
+  function importContextForLine(document, lineNumber) {
+    if (!isLogicLanguageDocument(document) || document.isUntitled) {
+      return undefined;
+    }
+    const line = document.lineAt(lineNumber);
+    const textWithoutComment = stripImportLineComment(line.text);
+    const match = textWithoutComment.match(/^(\s*\$import\s+)(.*)$/);
+    if (!match) {
+      return undefined;
+    }
+
+    const prefixLength = match[1].length;
+    const rawPath = match[2];
+
+    let quote = "";
+    let pathStart = prefixLength;
+    let pathEnd = textWithoutComment.length;
+    if (isQuotedImport(rawPath)) {
+      quote = rawPath[0];
+      pathStart += 1;
+      const closingQuoteIndex = textWithoutComment.indexOf(quote, pathStart);
+      pathEnd = closingQuoteIndex >= 0 ? closingQuoteIndex : textWithoutComment.length;
+    } else {
+      pathEnd = pathStart;
+      while (pathEnd < textWithoutComment.length && !/\s/.test(textWithoutComment[pathEnd])) {
+        pathEnd += 1;
+      }
+    }
+
+    const fullPath = normalizeImportPath(textWithoutComment.slice(pathStart, pathEnd));
+    return {
+      line,
+      quote,
+      fullPath,
+      pathStart,
+      pathEnd
+    };
+  }
+
+  function importContextAt(document, position) {
+    const lineContext = importContextForLine(document, position.line);
+    if (!lineContext) {
+      return undefined;
+    }
+
+    const currentCharacter = Math.min(position.character, lineContext.line.text.length);
+    if (currentCharacter < lineContext.pathStart || currentCharacter > lineContext.pathEnd) {
+      return undefined;
+    }
+
+    const typedPath = normalizeImportPath(
+      lineContext.line.text.slice(lineContext.pathStart, currentCharacter)
+    );
+    return {
+      ...lineContext,
+      typedPath,
+      insertRange: new vscode.Range(position.line, lineContext.pathStart, position.line, lineContext.pathEnd)
+    };
+  }
+
+  function existingImportFile(fsPath) {
+    try {
+      return fs.existsSync(fsPath) && fs.statSync(fsPath).isFile() ? path.resolve(fsPath) : undefined;
+    } catch (_error) {
+      return undefined;
+    }
+  }
+
+  function resolveImportTarget(document, importPath) {
+    const normalizedImportPath = normalizeImportPath(importPath).trim();
+    if (!normalizedImportPath) {
+      return undefined;
+    }
+
+    if (path.isAbsolute(normalizedImportPath)) {
+      return existingImportFile(normalizedImportPath);
+    }
+
+    const relativeMode = isRelativeImportPath(normalizedImportPath);
+    for (const root of importRootOptions(document, relativeMode)) {
+      const resolved = existingImportFile(path.resolve(root.fsPath, normalizedImportPath));
+      if (resolved) {
+        return resolved;
+      }
+    }
+    return undefined;
+  }
+
+  function makeImportReplacement(candidatePath, quote) {
+    const needsQuotes = /\s/.test(candidatePath);
+    const quoteCharToUse = quote || (needsQuotes ? "\"" : "");
+    return quoteCharToUse ? `${quoteCharToUse}${candidatePath}${quoteCharToUse}` : candidatePath;
+  }
+
+  function collectImportCandidates(document, importPath, options = {}) {
+    const normalizedImportPath = normalizeImportPath(importPath);
+    const { directoryPrefix, namePrefix } = splitImportPrefix(normalizedImportPath);
+    const relativeMode = isRelativeImportPath(normalizedImportPath);
+    const roots = importRootOptions(document, relativeMode);
+    const includeAllIfNoPrefixMatches = options.includeAllIfNoPrefixMatches === true;
+
+    function collect(prefixFilter) {
+      const candidates = new Map();
+      const normalizedPrefix = prefixFilter.toLowerCase();
+
+      for (const root of roots) {
+        const searchDir = path.resolve(root.fsPath, directoryPrefix || ".");
+        if (!fs.existsSync(searchDir) || !fs.statSync(searchDir).isDirectory()) {
+          continue;
+        }
+
+        let entries;
+        try {
+          entries = fs.readdirSync(searchDir, { withFileTypes: true });
+        } catch (_error) {
+          continue;
+        }
+
+        for (const entry of entries) {
+          const entryName = entry.name;
+          const isDirectory = entry.isDirectory();
+          if (!isDirectory && path.extname(entryName).toLowerCase() !== ".lp") {
+            continue;
+          }
+          if (normalizedPrefix && !entryName.toLowerCase().startsWith(normalizedPrefix)) {
+            continue;
+          }
+
+          const resolvedEntryPath = path.resolve(searchDir, entryName);
+          const relativeCandidate = normalizeImportPath(path.relative(root.fsPath, resolvedEntryPath));
+          const insertPath = isDirectory ? `${relativeCandidate}/` : relativeCandidate;
+          const candidateKey = normalizeFsPath(resolvedEntryPath);
+          const candidate = {
+            insertPath,
+            detail: root.detail,
+            isDirectory,
+            rank: root.rank
+          };
+          const existing = candidates.get(candidateKey);
+          if (
+            !existing ||
+            insertPath.length < existing.insertPath.length ||
+            (insertPath.length === existing.insertPath.length && candidate.rank < existing.rank)
+          ) {
+            candidates.set(candidateKey, candidate);
+          }
+        }
+      }
+
+      return Array.from(candidates.values())
+        .sort((left, right) => {
+          if (left.isDirectory !== right.isDirectory) {
+            return left.isDirectory ? -1 : 1;
+          }
+          return left.insertPath.localeCompare(right.insertPath);
+        })
+        .slice(0, IMPORT_CANDIDATE_LIMIT);
+    }
+
+    const exactMatches = collect(namePrefix);
+    if (exactMatches.length || !includeAllIfNoPrefixMatches) {
+      return exactMatches;
+    }
+    return collect("");
+  }
+
   async function runDiagnostics(document) {
     if (!isLogicLanguageDocument(document)) {
       return;
@@ -267,14 +552,22 @@ function activate(context) {
       return;
     }
     if (document.isDirty) {
-      clearSymbolState(document);
       return;
     }
 
+    const generation = nextAnalysisGeneration(document);
+    const stateKey = savedDocumentStateKey(document);
+
     try {
       const payload = await runModuleCheck(document);
+      if (!isCurrentAnalysis(document, generation)) {
+        return;
+      }
       applyDiagnostics(document.uri, payload);
     } catch (error) {
+      if (!isCurrentAnalysis(document, generation)) {
+        return;
+      }
       diagnostics.delete(document.uri);
       showWarningOnce(
         `Logic Language diagnostics are unavailable: ${error instanceof Error ? error.message : String(error)}`
@@ -282,11 +575,21 @@ function activate(context) {
     }
 
     try {
-      const payload = await runSymbolResolver(document);
-      symbolPayloads.set(document.uri.toString(), payload);
+      if (!isCurrentAnalysis(document, generation)) {
+        return;
+      }
+      const key = document.uri.toString();
+      const cached = symbolPayloads.get(key);
+      const payload = cached && cached.stateKey === stateKey ? cached.payload : await runSymbolResolver(document);
+      if (!isCurrentAnalysis(document, generation)) {
+        return;
+      }
+      symbolPayloads.set(key, { stateKey, payload });
       applySymbolHighlights(document, payload);
     } catch (error) {
-      clearSymbolState(document);
+      if (!isCurrentAnalysis(document, generation)) {
+        return;
+      }
       showWarningOnce(
         `Logic Language symbol highlighting is unavailable: ${error instanceof Error ? error.message : String(error)}`
       );
@@ -313,16 +616,12 @@ function activate(context) {
 
   context.subscriptions.push(
     vscode.workspace.onDidOpenTextDocument((document) => scheduleDiagnostics(document)),
-    vscode.workspace.onDidChangeTextDocument((event) => {
-      if (isLogicLanguageDocument(event.document)) {
-        clearSymbolState(event.document);
-      }
-    }),
     vscode.workspace.onDidSaveTextDocument((document) => scheduleDiagnostics(document)),
     vscode.workspace.onDidCloseTextDocument((document) => {
       diagnostics.delete(document.uri);
       clearSymbolState(document);
       rootsByUri.delete(document.uri.toString());
+      analysisGenerations.delete(document.uri.toString());
       const key = document.uri.toString();
       const timer = timers.get(key);
       if (timer) {
@@ -353,19 +652,33 @@ function activate(context) {
 
   async function resolveSymbolPayload(document) {
     const key = document.uri.toString();
-    const cached = symbolPayloads.get(key);
+    const cached = cachedSymbolPayload(document);
     if (cached) {
       return cached;
     }
+    const stateKey = savedDocumentStateKey(document);
     const payload = await runSymbolResolver(document);
-    symbolPayloads.set(key, payload);
+    symbolPayloads.set(key, { stateKey, payload });
     return payload;
   }
 
   context.subscriptions.push(
     vscode.languages.registerDefinitionProvider("logic-language", {
       async provideDefinition(document, position) {
-        if (!isLogicLanguageDocument(document) || document.isUntitled || document.isDirty) {
+        if (!isLogicLanguageDocument(document) || document.isUntitled) {
+          return undefined;
+        }
+
+        const importContext = importContextAt(document, position);
+        if (importContext) {
+          const importTarget = resolveImportTarget(document, importContext.fullPath);
+          if (importTarget) {
+            return new vscode.Location(vscode.Uri.file(importTarget), new vscode.Position(0, 0));
+          }
+          return undefined;
+        }
+
+        if (document.isDirty) {
           return undefined;
         }
         try {
@@ -390,9 +703,92 @@ function activate(context) {
   );
 
   context.subscriptions.push(
+    vscode.languages.registerCompletionItemProvider(
+      "logic-language",
+      {
+        provideCompletionItems(document, position) {
+          const importContext = importContextAt(document, position);
+          if (!importContext) {
+            return undefined;
+          }
+
+          const candidates = collectImportCandidates(document, importContext.typedPath);
+          return candidates.map((candidate) => {
+            const item = new vscode.CompletionItem(
+              candidate.insertPath,
+              candidate.isDirectory ? vscode.CompletionItemKind.Folder : vscode.CompletionItemKind.File
+            );
+            item.detail = candidate.detail;
+            item.range = importContext.insertRange;
+            item.insertText = importContext.quote
+              ? candidate.insertPath
+              : makeImportReplacement(candidate.insertPath, "");
+            item.filterText = candidate.insertPath;
+            item.sortText = `${candidate.isDirectory ? "0" : "1"}-${candidate.insertPath.toLowerCase()}`;
+            return item;
+          });
+        }
+      },
+      "/",
+      "\"",
+      "'",
+      "."
+    )
+  );
+
+  context.subscriptions.push(
+    vscode.languages.registerCodeActionsProvider(
+      "logic-language",
+      {
+        provideCodeActions(document, _range, contextForActions) {
+          if (!isLogicLanguageDocument(document)) {
+            return undefined;
+          }
+
+          const actions = [];
+          for (const diagnostic of contextForActions.diagnostics) {
+            if (String(diagnostic.code || "") !== "missing_import") {
+              continue;
+            }
+
+            const importContext = importContextForLine(document, diagnostic.range.start.line);
+            if (!importContext) {
+              continue;
+            }
+
+            const candidates = collectImportCandidates(document, importContext.fullPath, {
+              includeAllIfNoPrefixMatches: true
+            });
+            candidates.forEach((candidate, index) => {
+              const replacement = makeImportReplacement(candidate.insertPath, importContext.quote);
+              const action = new vscode.CodeAction(
+                `Replace import with ${replacement}`,
+                vscode.CodeActionKind.QuickFix
+              );
+              action.diagnostics = [diagnostic];
+              action.isPreferred = index === 0;
+              action.edit = new vscode.WorkspaceEdit();
+              action.edit.replace(document.uri, diagnostic.range, replacement);
+              actions.push(action);
+            });
+          }
+
+          return actions;
+        }
+      },
+      {
+        providedCodeActionKinds: [vscode.CodeActionKind.QuickFix]
+      }
+    )
+  );
+
+  context.subscriptions.push(
     vscode.window.onDidChangeVisibleTextEditors((editors) => {
       for (const editor of editors) {
-        scheduleDiagnostics(editor.document);
+        const payload = cachedSymbolPayload(editor.document);
+        if (payload) {
+          applySymbolHighlights(editor.document, payload);
+        }
       }
     })
   );

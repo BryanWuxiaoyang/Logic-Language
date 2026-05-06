@@ -29,7 +29,6 @@ FRESH_PREFIX = "^logic_language_out"
 DECL_OUTPUT_MARKER = "__compiler_function_outputs"
 DECL_BODY_OUTPUT_MARKER = "__compiler_function_body_outputs"
 BRANCH_MODULE_MARKER = "__compiler_branch_module"
-CLASS_FIELD_MARKER = "__compiler_class_field"
 INTRINSIC_SYMS = tuple(sorted(CAPITAL_INTRINSIC_SYMS | {"true", "false"}))
 INDENT_WIDTH = 4
 INDENTATION_BODY_OWNER_ERROR = "indentation body is only allowed after quantifier, branch, declaration, or class declaration"
@@ -137,8 +136,14 @@ class ModuleCompiler:
         while index < len(lines):
             line = lines[index]
             indent, content = split_indent(line)
+            if content.startswith("@"):
+                content = "∀"
             if self.validate_class_member_owners:
                 validate_class_member_owner(content, visible_classes)
+            if index + 1 < len(lines):
+                block, _ = collect_indented_block(lines, index + 1, indent)
+                if block and is_bare_coloncolon_field_shorthand(content):
+                    raise CompileError("class-field shorthand cannot have a function body; use Class::field: input => output for an explicit function declaration")
             content = erase_coloncolon_statement_head(content)
             if content in {"∀", "∃"} and index + 1 < len(lines):
                 block, next_index = collect_indented_block(lines, index + 1, indent)
@@ -183,13 +188,9 @@ class ModuleCompiler:
         return output
 
     def lower_header_with_block(self, header: str, block: str) -> list[str]:
-        if header.startswith("@"):
-            return ["∀{\n" + block + "\n}"]
         if header.startswith("|-"):
             branch_ps = header[2:].strip()
             return ["∀{\n| " + BRANCH_MODULE_MARKER + "\n| " + branch_ps + "\n" + self.lower_nested_block(block) + "\n}"]
-        if is_class_field_marker(header):
-            raise CompileError("class-field shorthand cannot have a function body; use Class::field: input => output for an explicit function declaration")
         class_sym = explicit_class_header_sym(header)
         if class_sym is not None:
             return self.lower_class_block(header, class_sym, block)
@@ -250,7 +251,16 @@ class ModuleCompiler:
         declaration_syms = collect_standalone_declaration_syms(body)
         sections = split_sections(body)
         if not sections:
-            raise CompileError("module requires target statements")
+            if module_type == "set":
+                raise CompileError("set module requires non-empty syms")
+            return Module(
+                type=module_type,
+                quantifier=quantifier if module_type == "quantifier" else None,
+                syms=[],
+                predicate_statements=[],
+                target_statements=[],
+                bound_sym_locs=[],
+            )
         target_section = sections[-1]
         before_target = sections[:-1]
         syms: list[str] = []
@@ -268,7 +278,7 @@ class ModuleCompiler:
         predicate_texts = split_terms("\n".join(predicate_sections))
         suppress_inferred_syms = suppress_inferred_syms or BRANCH_MODULE_MARKER in predicate_texts
         predicate_texts = [text for text in predicate_texts if text != BRANCH_MODULE_MARKER]
-        target_texts = split_terms(target_section)
+        target_texts = [text for text in split_terms(target_section) if not is_ignored_plain_target(text)]
         if not syms and not suppress_inferred_syms:
             syms = infer_syms(predicate_texts)
         predicate_statements: list[Statement] = []
@@ -287,8 +297,8 @@ class ModuleCompiler:
         syms = dedupe([*syms, *generated_syms])
         if module_type == "set" and not syms:
             raise CompileError("set module requires non-empty syms")
-        if not target_statements:
-            raise CompileError("module requires non-empty target_statements")
+        if module_type == "set" and not target_statements:
+            raise CompileError("set module requires non-empty target_statements")
         return Module(
             type=module_type,
             quantifier=quantifier if module_type == "quantifier" else None,
@@ -546,11 +556,6 @@ def split_multiline_sections(body: str) -> list[str]:
                     section_lines = [section]
                 else:
                     sections.append(section)
-        elif balance == 0 and is_plain_sym(line):
-            if target_lines:
-                sections.append("\n".join(target_lines))
-                target_lines = []
-            sections.append(line)
         else:
             target_lines.append(line)
             balance += brace_delta(line)
@@ -564,37 +569,7 @@ def split_multiline_sections(body: str) -> list[str]:
 
 
 def collect_standalone_declaration_syms(body: str) -> list[str]:
-    if "\n" not in body:
-        return []
-    syms: list[str] = []
-    section_balance = 0
-    target_balance = 0
-    in_bar_section = False
-    for raw_line in body.splitlines():
-        line = raw_line.strip()
-        if not line:
-            continue
-        if in_bar_section:
-            section_balance += brace_delta(line)
-            if section_balance <= 0:
-                in_bar_section = False
-                section_balance = 0
-            continue
-        if target_balance > 0:
-            target_balance += brace_delta(line)
-            if target_balance < 0:
-                target_balance = 0
-            continue
-        if line.startswith("|"):
-            section = line[1:].strip()
-            section_balance = brace_delta(section)
-            in_bar_section = section_balance > 0
-            continue
-        if is_plain_sym(line):
-            syms.append(line)
-            continue
-        target_balance = max(0, brace_delta(line))
-    return dedupe(syms)
+    return []
 
 
 def split_terms(text: str) -> list[str]:
@@ -761,6 +736,10 @@ def infer_syms(predicate_texts: list[str]) -> list[str]:
     return dedupe(syms)
 
 
+def is_ignored_plain_target(text: str) -> bool:
+    return is_plain_sym(text.strip())
+
+
 def class_header_sym(header: str) -> str | None:
     header = header.strip()
     if is_plain_sym(header):
@@ -793,7 +772,7 @@ def direct_class_header_names(lines: list[str]) -> set[str]:
 
 
 def class_block_prefix_lines(header: str, class_sym: str) -> list[str]:
-    return [header.strip()]
+    return []
 
 
 def class_member_owner_name(text: str) -> str | None:
@@ -817,9 +796,9 @@ def class_member_owner_name(text: str) -> str | None:
 
 
 def validate_class_member_owner(text: str, visible_class_names: set[str]) -> None:
-    class_name = class_member_owner_name(text)
-    if class_name is not None and class_name not in visible_class_names:
-        raise CompileError(undeclared_class_member_owner_reason(class_name))
+    # Class::member uses the owner as a free source symbol; it does not require
+    # or create a local Class declaration.
+    return None
 
 
 def erase_coloncolon_statement_head(text: str) -> str:
@@ -839,7 +818,7 @@ def erase_coloncolon_statement_head(text: str) -> str:
         return stripped
 
     if is_bare_coloncolon_field_shorthand(stripped):
-        return coloncolon_field_marker(stripped)
+        return coloncolon_field_declaration(stripped)
     reject_unsupported_coloncolon(stripped)
     return stripped
 
@@ -859,18 +838,13 @@ def erase_coloncolon_name(name: str) -> str:
 
 
 def coloncolon_field_declaration(name: str) -> str:
-    if not is_coloncolon_name(name):
-        raise CompileError("unsupported '::' usage; '::' is only supported in declaration heads")
-    class_name, field_name = (part.strip() for part in name.split("::", 1))
-    param_name = lower_head(class_name)
-    return f"{field_name}: {param_name} => {field_name}'"
-
-
-def coloncolon_field_marker(name: str) -> str:
     if not is_bare_coloncolon_field_shorthand(name):
         raise CompileError("unsupported '::' usage; bare class-field shorthand requires ordinary symbol names")
     class_name, field_name = (part.strip() for part in name.split("::", 1))
-    return f"{CLASS_FIELD_MARKER}({class_name}, {field_name})"
+    param_name = "_" + lower_head(class_name)
+    output_name = "_" + field_name
+    return f"{field_name}: {param_name} => {output_name}"
+
 
 
 def lower_head(name: str) -> str:
@@ -882,21 +856,6 @@ def is_bare_coloncolon_field_shorthand(name: str) -> bool:
         return False
     prefix, suffix = (part.strip() for part in name.split("::", 1))
     return bool(prefix and suffix and is_plain_sym(prefix) and is_plain_sym(suffix))
-
-
-def is_class_field_marker(text: str) -> bool:
-    return parse_class_field_marker(text) is not None
-
-
-def parse_class_field_marker(text: str) -> tuple[str, str] | None:
-    stripped = text.strip()
-    if not stripped.startswith(CLASS_FIELD_MARKER + "(") or not stripped.endswith(")"):
-        return None
-    inner = stripped[len(CLASS_FIELD_MARKER) + 1 : -1]
-    terms = parse_signature_terms(inner)
-    if len(terms) != 2 or not all(is_plain_sym(term) for term in terms):
-        return None
-    return terms[0], terms[1]
 
 
 def is_coloncolon_name(name: str) -> bool:

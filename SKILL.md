@@ -349,6 +349,8 @@ The AST is intended as a precise intermediate logic form that can support human-
     - A visible inheritance-source sym is an imported or ancestor declared sym whose first character is uppercase.
     - If the base part does not resolve to a visible inheritance-source sym, the name-implicit inheritance rule does not apply.
     - Regardless, every declared-sym inherits `Symbol` when the standard library universal symbol axiom is in scope, except generated `^...` syms.
+    - A declared-sym whose normalized name starts with `is_` implicitly inherits `Bool`. Normalization for this rule strips leading `_`, trailing primes, and trailing digits; generated `^...` syms are excluded. This `Bool` rule overrides other name-derived implicit inheritance for that sym, but does not suppress the ordinary `Symbol` inheritance fallback.
+        `is_valid`, `_is_val`, and `is_ready1` infer `Bool`; `^is_valid` does not.
     - Candidate lookup strips trailing primes and trailing digits, then tries the full remaining name and repeatedly removes the first `_` segment. Only the first character of each candidate is capitalized.
         `max_head_val1` tries `Max_head_val`, then `Head_val`, then `Val`.
     - When multiple visible candidates match, the longest candidate wins.
@@ -540,10 +542,11 @@ The AST is intended as a precise intermediate logic form that can support human-
     - `=>` is part of surface `module-text` only. After rewrite, `image-set-text` is represented by ordinary `set-module-text`.
 
 - introduce `class-declaration`
-    - `class-declaration` is a surface syntax form only. Semantically it is sugar that expands to ordinary declarations and `~` facts.
+    - `class-declaration` is a surface syntax form only. Semantically it is sugar that expands to ordinary function declarations and `~` facts.
     - it does not introduce a new primitive semantic kind named `class`.
+    - `Class::...` and `Class` body syntax do not implicitly declare or bind `Class`; the owner name is a free inheritance-source symbol unless the author explicitly binds it with `| Class`.
 
-    M("Class::field") = M("field: class => field'")
+    M("Class::field") = M("field: _class => _field")
     M("Class::func: inputs => outputs") = M("func: inputs => outputs")
 
     M(
@@ -554,8 +557,7 @@ The AST is intended as a precise intermediate logic form that can support human-
         ::sym3: (sym, sym3') => sym3''
     "
     ) = M("
-    Sym
-    Sym::sym1: sym => sym1'
+    Sym::sym1
     Sym::sym2: sym => sym2'
     Sym::sym3: (sym, sym3') => sym3''
     ")
@@ -563,35 +565,30 @@ The AST is intended as a precise intermediate logic form that can support human-
     M(
     "
     Sym
-    Sym::sym1: sym => sym1'
+    Sym::sym1
     Sym::sym2: sym => sym2'
     Sym::sym3: (sym, sym3') => sym3''
     "
     ) = M("
-    Sym
-    sym1: sym => sym1'
+    sym1: _sym => _sym1
     sym2: sym => sym2'
     sym3: (sym, sym3') => sym3''
     ")
 
-    Note that the indentation is not a real `nested-module-text`, it is still expanded to current-scope, with `sym` prefix
-    - Induction: `::` itself has no semantics, it's just for readability for OOP programmers. in `module-text` it is omitted.
-    - to mimic `class-method` behavior, make `sym::sym2`'s first-parameter as `sym` will make it work like `class-method` or `class-field`
+    Note that the indentation is not a real `nested-module-text`; it is expanded to current scope with the owner prefix applied to each `::` member.
+    - `::` itself has no core semantics; it is omitted after surface expansion.
+    - To mimic class-method behavior, make the first parameter the lower-head owner name, such as `_class` for `Class`, so name-implicit inheritance can infer `Class ~ _class`.
+    - A standalone plain symbol target such as `Class` or `sym` with no `|`, declaration, call, assignment, or body is ignored. It does not add an implicit premise binder like `| Class`.
 
 - `~` inheritance facts do not introduce class declarations for `::` bodies.
     - `A ~ B` is only an inheritance statement.
-    - To attach fields or methods to `B`, declare `B` explicitly:
-        ```
-        B
-            ::field
-        A ~ B
-        ```
+    - To attach fields or methods to `B`, use `B::field` or a `B` body; `B` remains a free owner symbol unless explicitly bound with `| B`.
 
 - introduce `class-method-call` as sugar
     `M("sym1.sym2(sym3)") = M("sym2(sym1, sym3)")`
     `M("sym1.sym2") = M("sym2(sym1)")`
 
-- introduce `section`: `M("@...") = M("∀")`
+- introduce `section`: `M("@...") = M("∀")`; text after `@` is non-semantic section metadata and is discarded.
 
 - introduce `comment`: `M("#...") = M("")`
 
@@ -806,6 +803,11 @@ The AST is intended as a precise intermediate logic form that can support human-
     - input: `module_AST` JSON from stdin or file.
     - output: canonical parseable `.lp` source text.
 
+- `normalize_module_declarations`
+    - path: `scripts/normalize_module_declarations.py`
+    - input: `module-text` via stdin/`--text`, or a `module-file` path.
+    - output: normalized module text with declarations grouped into canonical ordering.
+
 - `syntax_check`
     - path: `scripts/syntax_check.py`
     - input: `module-text` via stdin/`--text`, or a `module-file` path.
@@ -815,6 +817,12 @@ The AST is intended as a precise intermediate logic form that can support human-
     - path: `scripts/semantic_check.py`
     - input: `module-text` via stdin/`--text`, or a `module-file` path.
     - output: JSON semantic diagnostics.
+
+- `module_check`
+    - path: `scripts/module_check.py`
+    - input: `module-text` via stdin/`--text`, or a `module-file` via `--file`.
+    - output: unified JSON diagnostics from syntax, semantic, compile, and final-AST checks.
+    - useful flags: `--pretty`, `--filename`, `--base-dir`.
 
 ## Compiler Validation
 - `golden_tests.md` is the executable semantic-review corpus for compiler expansion.

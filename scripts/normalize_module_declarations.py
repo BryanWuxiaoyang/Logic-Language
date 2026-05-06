@@ -271,6 +271,7 @@ def normalize_units(units: list[SourceUnit]) -> list[SourceUnit]:
 
 def merge_direct_class_units(units: list[SourceUnit]) -> list[SourceUnit]:
     first_class: dict[str, SourceUnit] = {}
+    synthetic_class_order: list[str] = []
     collected_members: dict[str, list[ClassMember]] = {}
     for unit in units:
         if unit.kind == "class" and unit.name not in first_class:
@@ -282,7 +283,9 @@ def merge_direct_class_units(units: list[SourceUnit]) -> list[SourceUnit]:
         elif unit.kind == "class_member":
             first = first_class.get(unit.class_name)
             if first is None:
-                raise CompileError(undeclared_class_member_owner_reason(unit.class_name))
+                first = SourceUnit(kind="class", name=unit.class_name)
+                first_class[unit.class_name] = first
+                synthetic_class_order.append(unit.class_name)
             collected_members.setdefault(unit.class_name, []).extend(unit.members)
 
     for name, first in first_class.items():
@@ -298,6 +301,7 @@ def merge_direct_class_units(units: list[SourceUnit]) -> list[SourceUnit]:
         if unit.kind == "class_member":
             continue
         output.append(unit)
+    output.extend(first_class[name] for name in synthetic_class_order)
     return output
 
 

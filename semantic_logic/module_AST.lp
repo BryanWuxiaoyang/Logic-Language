@@ -10,7 +10,7 @@ Stmt
         |- _stmt.sub_stmts = {}
             _stmts = {_stmt}
         |- _stmt.sub_stmts \neq {}
-            _stmts = {| _stmt' | _stmt' \in _stmt.sub_stmts => _stmt'.all_stmts}
+            _stmts = {| _stmt' | _stmt' \in _stmt.sub_stmts => _stmt'.all_stmts} \union {_stmt}
         # in the final module_AST, bound-symbol names must not conflict with
         # current-statement or ancestor bound-symbol names.
 
@@ -20,8 +20,9 @@ Stmt
     ::all_free_syms: _stmt => _syms
         _syms = {| _stmt' \in _stmt.all_stmts => _stmt'.free_syms}
 
-    ::active_free_syms: _stmt => _syms
-        _syms = _stmt.all_free_syms - _stmt.all_bound_syms
+    ::real_free_syms: _stmt => _syms
+        | _free_syms = _stmt.free_syms \union (\union({| _stmt' | _stmt' \in _stmt.sub_stmts => _stmt'.real_free_syms}))
+        _syms = _free_syms - _stmt.bound_syms
 
 Stmt~Binding_stmt
 Binding_stmt
