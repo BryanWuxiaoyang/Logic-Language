@@ -41,6 +41,13 @@ def inheritance_candidate_chain(name: str) -> list[str]:
     base = re.sub(r"\d+$", "", base)
     if not base:
         return []
+    candidates = base_candidate_chain(base)
+    if base.endswith("_class"):
+        candidates.extend(base_candidate_chain(base[: -len("_class")]))
+    return dedupe(candidates)
+
+
+def base_candidate_chain(base: str) -> list[str]:
     candidates: list[str] = []
     parts = base.split("_")
     for index in range(len(parts)):
@@ -48,7 +55,7 @@ def inheritance_candidate_chain(name: str) -> list[str]:
         if not candidate:
             continue
         candidates.append(candidate[0].upper() + candidate[1:])
-    return dedupe(candidates)
+    return candidates
 
 
 def matched_inheritance_sources(name: str, visible_syms: set[str]) -> list[str]:

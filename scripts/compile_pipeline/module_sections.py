@@ -67,6 +67,14 @@ class LoweredTerm:
     output_statements: list[Statement] = field(default_factory=list)
 
 
+@dataclass(frozen=True)
+class ClassFieldAssignment:
+    class_name: str
+    field_name: str
+    rhs: str
+    premise: bool = False
+
+
 UNDECLARED_CLASS_MEMBER_OWNER_CODE = "undeclared_class_member_owner"
 INVALID_CLASS_DECLARATION_NAME_CODE = "invalid_class_declaration_name"
 
@@ -146,10 +154,15 @@ class ModuleCompiler:
                 content = "∀"
             if self.validate_class_member_owners:
                 validate_class_member_owner(content, visible_classes)
+            class_field_assignment = parse_class_field_assignment(content)
             if index + 1 < len(lines):
                 block, _ = collect_indented_block(lines, index + 1, indent)
-                if block and is_bare_coloncolon_field_shorthand(content):
+                if block and (is_bare_coloncolon_field_shorthand(content) or class_field_assignment is not None):
                     raise CompileError("class-field shorthand cannot have a function body; use Class::field: input => output for an explicit function declaration")
+            if class_field_assignment is not None:
+                output.extend(self.lower_class_field_assignment(class_field_assignment))
+                index += 1
+                continue
             content = erase_coloncolon_statement_head(content)
             if content in {"∀", "∃"} and index + 1 < len(lines):
                 block, next_index = collect_indented_block(lines, index + 1, indent)
@@ -219,6 +232,37 @@ class ModuleCompiler:
 
     def lower_premise_declaration(self, declaration: tuple[str, list[str], list[str], str], block: str | None) -> list[str]:
         return [premise_artifact(artifact) for artifact in self.lower_declaration(declaration, block)]
+
+    def lower_class_field_assignment(self, assignment: ClassFieldAssignment) -> list[str]:
+        field_declaration = coloncolon_field_declaration(f"{assignment.class_name}::{assignment.field_name}")
+        declaration = parse_declaration(field_declaration)
+        if declaration is None:
+            raise CompileError("unsupported '::' usage; bare class-field shorthand requires ordinary symbol names")
+        artifacts = [
+            *self.lower_declaration(declaration, block=None),
+            self.class_field_assignment_module_text(assignment),
+        ]
+        if assignment.premise:
+            return [premise_artifact(artifact) for artifact in artifacts]
+        return artifacts
+
+    def class_field_assignment_module_text(self, assignment: ClassFieldAssignment) -> str:
+        receiver = "_" + lower_head(assignment.class_name)
+        return (
+            "∀{\n| "
+            + receiver
+            + "\n| "
+            + assignment.class_name
+            + " ~ "
+            + receiver
+            + "\n"
+            + receiver
+            + "."
+            + assignment.field_name
+            + " = "
+            + assignment.rhs
+            + "\n}"
+        )
 
     def declaration_module_text(self, name: str, inputs: list[str], outputs: list[str]) -> str:
         call = call_text(name, inputs)
@@ -819,6 +863,12 @@ def class_member_owner_name(text: str) -> str | None:
         return class_member_owner_name(stripped[1:].strip())
     if "::" not in stripped:
         return None
+    try:
+        assignment = parse_class_field_assignment(stripped)
+    except CompileError:
+        assignment = None
+    if assignment is not None:
+        return assignment.class_name
     assignment_index = top_level_assignment_index(stripped)
     if assignment_index is not None and "::" in stripped[:assignment_index]:
         return None
@@ -850,7 +900,7 @@ def erase_coloncolon_statement_head(text: str) -> str:
         return stripped
     assignment_index = top_level_assignment_index(stripped)
     if assignment_index is not None and "::" in stripped[:assignment_index]:
-        raise CompileError("class-field assignment with '::' is not supported")
+        raise CompileError("unsupported '::' usage; class-field assignment must be lowered before erasing '::'")
 
     colon_index = declaration_colon_index(stripped)
     if colon_index is not None:
@@ -887,6 +937,29 @@ def coloncolon_field_declaration(name: str) -> str:
     param_name = "_" + lower_head(class_name)
     output_name = "_" + field_name
     return f"{field_name}: {param_name} => {output_name}"
+
+
+def parse_class_field_assignment(text: str) -> ClassFieldAssignment | None:
+    stripped = text.strip()
+    if stripped.startswith("|") and not stripped.startswith("|-"):
+        inner = parse_class_field_assignment(stripped[1:].strip())
+        if inner is None:
+            return None
+        return ClassFieldAssignment(inner.class_name, inner.field_name, inner.rhs, premise=True)
+
+    assignment_index = top_level_assignment_index(stripped)
+    if assignment_index is None:
+        return None
+    lhs = stripped[:assignment_index].strip()
+    rhs = stripped[assignment_index + 1 :].strip()
+    if "::" not in lhs:
+        return None
+    if not is_bare_coloncolon_field_shorthand(lhs):
+        raise CompileError("unsupported '::' usage; class-field assignment requires bare Class::field")
+    if not rhs:
+        raise CompileError("class-field assignment requires a value")
+    class_name, field_name = (part.strip() for part in lhs.split("::", 1))
+    return ClassFieldAssignment(class_name, field_name, rhs)
 
 
 

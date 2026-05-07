@@ -20,10 +20,12 @@ from compile_pipeline.module_sections import (
     is_bare_coloncolon_field_shorthand,
     is_plain_sym,
     logical_lines,
+    parse_class_field_assignment,
     parse_declaration,
     split_indent,
     split_top_level,
     strip_outer_blank_lines,
+    top_level_assignment_index,
     unindent_block,
     undeclared_class_member_owner_reason,
 )
@@ -136,6 +138,9 @@ def classify_block_unit(header: str, body: str) -> SourceUnit:
         return SourceUnit(kind="opaque", header=header, body=body)
     if header.startswith("|-"):
         return SourceUnit(kind="opaque", header=header, body=body)
+    member = explicit_class_field_member(header)
+    if member is not None:
+        raise CompileError("class-field shorthand cannot have a function body; use Class::field: input => output for an explicit function declaration")
     if is_class_header(header):
         return SourceUnit(kind="class", name=header.strip(), members=parse_class_members(body))
     declaration = declaration_info(header)
@@ -199,11 +204,20 @@ def parse_class_members(body: str) -> list[ClassMember]:
 
 
 def class_member_from_header(header: str, body: str | None = None) -> ClassMember:
+    if body is not None and top_level_assignment_index(header.strip()) is not None:
+        raise CompileError("class-field shorthand cannot have a function body; use Class::field: input => output for an explicit function declaration")
     name = member_name(header)
     return ClassMember(header=header.strip(), body=body, name=name, is_method=declaration_colon_index(header) is not None)
 
 
 def explicit_class_field_member(text: str) -> tuple[str, ClassMember] | None:
+    assignment = parse_class_field_assignment(text)
+    if assignment is not None and not assignment.premise:
+        return assignment.class_name, ClassMember(
+            header=f"::{assignment.field_name} = {assignment.rhs}",
+            name=assignment.field_name,
+            is_method=False,
+        )
     if not is_bare_coloncolon_field_shorthand(text):
         return None
     class_name, field_name = (part.strip() for part in text.split("::", 1))
@@ -248,6 +262,9 @@ def member_name(header: str) -> str:
     stripped = header.strip()
     if stripped.startswith("::"):
         stripped = stripped[2:].strip()
+    assignment_index = top_level_assignment_index(stripped)
+    if assignment_index is not None:
+        stripped = stripped[:assignment_index].strip()
     colon_index = declaration_colon_index(stripped)
     if colon_index is not None:
         return stripped[:colon_index].strip()

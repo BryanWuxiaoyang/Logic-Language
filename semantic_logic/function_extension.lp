@@ -11,8 +11,7 @@ Typed_sym
 
 Quantified_stmt~Func_decl_stmt
 Func_decl_stmt
-    ::quantifier_sym: _func_decl_stmt => _quantifier_sym
-        _quantifier_sym = '\all'
+    ::quantifier_sym = '\all'
 
     ::func_sym
 
@@ -30,8 +29,7 @@ Func_decl_stmt
         _list[_id] = _typed_sym.sym
 
     ::func_bound_syms
-    ::bound_syms: _func_decl_stmt => _syms
-        _syms = _func_decl_stmt.input_sym_list \union _func_decl_stmt.output_sym_list \union _func_decl_stmt.func_bound_syms
+    ::bound_syms = _func_decl_stmt.input_sym_list \union _func_decl_stmt.output_sym_list \union _func_decl_stmt.func_bound_syms
 
     ::function_stmt: _func_decl_stmt => _stmt
         _stmt.call_sym = _func_decl_stmt.func_sym
@@ -39,8 +37,7 @@ Func_decl_stmt
 
     ::output_binding_stmts
     ::func_premise_binding_stmts
-    ::premise_binding_stmts: _func_decl_stmt => _stmts
-        _stmts = _func_decl_stmt.output_binding_stmts \union _func_decl_stmt.func_premise_binding_stmts
+    ::premise_binding_stmts = _func_decl_stmt.output_binding_stmts \union _func_decl_stmt.func_premise_binding_stmts
 
     ::premise_proposition_stmts
     ::target_proposition_stmts

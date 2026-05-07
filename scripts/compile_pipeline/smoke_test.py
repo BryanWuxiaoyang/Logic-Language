@@ -408,6 +408,39 @@ def test_class_field_shorthand_compiles() -> None:
     assert "^_field = field(^_class)" in source
 
 
+def test_class_field_assignment_sugar_compiles() -> None:
+    source = translate_ast_to_source(compile_text("Value\nField\nClass\nValue ~ value\nClass::field = value"))
+    assert "Class::field" not in source
+    assert "Function ~ field" in source
+    assert "^_field = field(^_class)" in source
+    assert "Class ~ ^_class" in source
+    assert "field(^_class)" in source
+    assert " = value" in source
+
+
+def test_class_field_assignment_sugar_compiles_in_class_body() -> None:
+    source = translate_ast_to_source(compile_text("Value\nField\nClass\nValue ~ value\nClass\n    ::field = value"))
+    assert "Class::field" not in source
+    assert "Function ~ field" in source
+    assert "^_field = field(^_class)" in source
+    assert "Class ~ ^_class" in source
+    assert "field(^_class)" in source
+
+
+def test_class_field_assignment_sugar_allows_expression_rhs() -> None:
+    source = translate_ast_to_source(compile_text("Value\nField\nClass\nValue ~ value\nF: value => value'\nClass::field = F(value)"))
+    assert "F(value)" in source
+    assert "field(^_class)" in source
+
+
+def test_class_field_assignment_sugar_desugars_in_premise_section() -> None:
+    source = translate_ast_to_source(compile_text("Value\nField\nClass\nValue ~ value\n| Class::field = value\nP(value)"))
+    assert "| Function ~ ^field" in source
+    assert "| ∀{" in source
+    assert "^field(^_class)" in source
+    assert "P(^value)" in source
+
+
 def test_class_field_shorthand_uses_underscore_receiver_and_output_names() -> None:
     source = translate_ast_to_source(compile_text("Class\n| field'\nClass::field"))
     assert "| ^_class, ^_field" in source
@@ -609,6 +642,23 @@ def test_stage2_capital_inheritance_when_visible() -> None:
     assert "| list ~ list1" not in desugared
 
 
+def test_stage2_class_suffix_fallback_inheritance() -> None:
+    desugared = run_stage2("Chip_mem\nF: _chip_mem_class => _out", ".").text
+    assert "| Chip_mem ~ _chip_mem_class" in desugared
+    assert "| Symbol ~ _chip_mem_class" not in desugared
+
+    primary_desugared = run_stage2("Chip_mem_class\nChip_mem\nF: _chip_mem_class => _out", ".").text
+    assert "| Chip_mem_class ~ _chip_mem_class" in primary_desugared
+    assert "| Chip_mem ~ _chip_mem_class" not in primary_desugared
+
+    numeric_desugared = run_stage2("Chip_mem\nF: _chip_mem_class1 => _out", ".").text
+    assert "| Chip_mem ~ _chip_mem_class1" in numeric_desugared
+    assert "| Symbol ~ _chip_mem_class1" not in numeric_desugared
+
+    diagnostics = collect_semantic_diagnostics_from_text("F: _chip_mem_class => _out")
+    assert any(entry["code"] == "implicit_inheritance_fallback_symbol" for entry in diagnostics)
+
+
 def test_stage2_function_output_inheritance_is_target() -> None:
     text = "List\n-: (list, list1) => list2\n    list2.size = (list.size + list1.size)"
     desugared = run_stage2(text, SKILL_DIR).text
@@ -753,7 +803,7 @@ def test_module_check_dedupes_located_imports() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
         bad = root / "bad.lp"
-        bad.write_text("Class\n    ::field = x\n", encoding="utf-8")
+        bad.write_text("Class\n    ::field = x\n        P(x)\n", encoding="utf-8")
         payload = module_check.check_module(
             "$import bad.lp\n$import bad.lp\n",
             str(root / "main.lp"),
@@ -1509,13 +1559,20 @@ def test_module_check_positioned_unsupported_coloncolon_errors() -> None:
     assert entry["col_end_no"] == 6
 
 
-def test_module_check_positioned_class_field_assignment_error() -> None:
-    payload = module_check.check_module("Class\n    ::field = x\n", module_check.STDIN_FILE, Path("."), is_file=False)
+def test_module_check_class_field_assignment_succeeds() -> None:
+    payload = module_check.check_module("Value\nField\nClass\nValue ~ value\nClass\n    ::field = value\n", module_check.STDIN_FILE, Path("."), is_file=False)
+
+    assert payload["summary"]["error_count"] == 0
+    assert payload["summary"]["warning_count"] == 0
+
+
+def test_module_check_positioned_class_field_assignment_body_error() -> None:
+    payload = module_check.check_module("Class\n    ::field = x\n        P(x)\n", module_check.STDIN_FILE, Path("."), is_file=False)
 
     assert payload["summary"]["error_count"] == 1
     entry = payload["entries"][0]
     assert entry["stage"] == "syntax"
-    assert entry["reason"] == "class-field assignment with '::' is not supported"
+    assert entry["reason"] == "class-field shorthand cannot have a function body; use Class::field: input => output for an explicit function declaration"
     assert entry["lineno"] == 1
     assert entry["col_start_no"] == 4
     assert entry["col_end_no"] == 6
@@ -1543,7 +1600,7 @@ def test_module_check_imported_located_syntax_error_uses_import_file() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         tmp_path = Path(tmp)
         imported = tmp_path / "bad.lp"
-        imported.write_text("Class\n    ::field = x\n", encoding="utf-8")
+        imported.write_text("Class\n    ::field = x\n        P(x)\n", encoding="utf-8")
         payload = module_check.check_module(
             "$import bad.lp\nok = ok",
             str(tmp_path / "main.lp"),
@@ -1555,7 +1612,7 @@ def test_module_check_imported_located_syntax_error_uses_import_file() -> None:
     entry = payload["entries"][0]
     assert entry["stage"] == "syntax"
     assert entry["file"] == str(imported.resolve())
-    assert entry["reason"] == "class-field assignment with '::' is not supported"
+    assert entry["reason"] == "class-field shorthand cannot have a function body; use Class::field: input => output for an explicit function declaration"
     assert entry["lineno"] == 1
     assert entry["col_start_no"] == 4
 
@@ -2057,7 +2114,7 @@ def test_normalize_module_declarations_dedupes_transitive_imports() -> None:
 
 
 def test_normalize_module_declarations_requires_explicit_class_members() -> None:
-    for source in ["Class::m: _class => _out", "A ~ Class\nClass::m: _class => _out"]:
+    for source in ["Class::m: _class => _out", "A ~ Class\nClass::m: _class => _out", "Class::field = value"]:
         try:
             normalize_module_declarations.normalize_module_declarations_text(source)
         except CompileError as error:
@@ -2067,6 +2124,12 @@ def test_normalize_module_declarations_requires_explicit_class_members() -> None
 
     normalized = normalize_module_declarations.normalize_module_declarations_text("Class::m: _class => _out\nClass")
     assert "Class\n    ::m: _class => _out" in normalized
+
+    normalized = normalize_module_declarations.normalize_module_declarations_text("Class::field = value\nClass")
+    assert "Class\n    ::field = value" in normalized
+
+    normalized = normalize_module_declarations.normalize_module_declarations_text("Class\n    ::field = value")
+    assert "Class\n    ::field = value" in normalized
 
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)
@@ -2242,6 +2305,15 @@ def test_resolve_sym_type_signature_class_evidence_uses_numeric_suffixes() -> No
     assert occurrence_on_line(payload, "_val1", 2)["definition"]["name"] == "Val"
     assert occurrence_on_line(payload, "_val2", 2)["definition"]["name"] == "Val"
     assert occurrence_on_line(payload, "_list", 2)["definition"]["name"] == "List"
+
+
+def test_resolve_sym_type_class_suffix_fallback_definition() -> None:
+    payload = resolve_sym_type.resolve_text("Chip_mem\nF: _chip_mem_class => _out")
+    occurrence = occurrence_on_line(payload, "_chip_mem_class", 1)
+    assert occurrence["type"] == "pure"
+    assert not occurrence["colorable"]
+    assert occurrence["definition"]["name"] == "Chip_mem"
+    assert occurrence["definition"]["lineno"] == 0
 
 
 def test_resolve_sym_type_generated_binder_class_evidence_defines_pure_symbol() -> None:
@@ -2642,6 +2714,7 @@ def main() -> int:
         test_capital_wrapper_predicates_normalize_to_infix,
         test_stage2_ancestor_scope_for_function_decl,
         test_stage2_capital_inheritance_when_visible,
+        test_stage2_class_suffix_fallback_inheritance,
         test_stage2_function_output_inheritance_is_target,
         test_stage2_does_not_inject_implicit_stdlib_import,
         test_standard_library_supplies_universal_inheritance_axioms,
@@ -2722,7 +2795,8 @@ def main() -> int:
         test_module_check_warning_only_bare_index_operator_symbol_exits_clean,
         test_module_check_positioned_branch_error_avoids_file_start_fallback,
         test_module_check_positioned_unsupported_coloncolon_errors,
-        test_module_check_positioned_class_field_assignment_error,
+        test_module_check_class_field_assignment_succeeds,
+        test_module_check_positioned_class_field_assignment_body_error,
         test_module_check_positioned_arrow_and_literal_errors,
         test_module_check_imported_located_syntax_error_uses_import_file,
         test_module_check_undeclared_class_member_owner_is_semantic_error,
@@ -2761,6 +2835,7 @@ def main() -> int:
         test_resolve_sym_type_output_uses_generated_signature_class_evidence,
         test_resolve_sym_type_inputs_use_generated_signature_class_evidence,
         test_resolve_sym_type_signature_class_evidence_uses_numeric_suffixes,
+        test_resolve_sym_type_class_suffix_fallback_definition,
         test_resolve_sym_type_generated_binder_class_evidence_defines_pure_symbol,
         test_resolve_sym_type_authored_premise_class_fact_does_not_define_pure_symbol,
         test_resolve_sym_type_authored_premise_class_fact_is_not_class_navigation_evidence,

@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Iterable
 
@@ -22,6 +22,7 @@ from compile_pipeline.module_sections import (
     class_block_prefix_lines,
     class_member_owner_name,
     collect_indented_block,
+    coloncolon_field_declaration,
     dedupe,
     erase_coloncolon_statement_head,
     explicit_class_header_sym,
@@ -30,7 +31,9 @@ from compile_pipeline.module_sections import (
     invalid_class_declaration_name_reason,
     is_bare_coloncolon_field_shorthand,
     is_plain_sym,
+    lower_head,
     declaration_kind_fact,
+    parse_class_field_assignment,
     premise_quantifier_header,
     parse_declaration,
     parse_premise_declaration,
@@ -38,6 +41,7 @@ from compile_pipeline.module_sections import (
     split_indent,
     split_top_level,
     strip_outer_blank_lines,
+    top_level_assignment_index,
     tuple_or_single,
 )
 from compile_pipeline.source_utils import (
@@ -202,7 +206,7 @@ def raise_compile_error_located(error: CompileError, located: LocatedText) -> No
 
 
 def token_for_compile_error(message: str, text: str) -> str | None:
-    if "unsupported '::' usage" in message or "class-field assignment with '::'" in message:
+    if "unsupported '::' usage" in message:
         return "::"
     if "bare class-field shorthand" in message or "missing declaration name after '::'" in message:
         return "::"
@@ -641,14 +645,20 @@ class LocatedModuleParser:
             if content.text.startswith("@"):
                 content = synthetic_text("∀", content.positions[0])
             self.record_class_member_owner(content, visible_classes)
+            class_field_assignment = parse_class_field_assignment_located(content)
             if index + 1 < len(lines):
                 block, _ = collect_indented_block_located(lines, index + 1, indent)
-                if block and is_bare_coloncolon_field_shorthand(content.text):
+                if block and (is_bare_coloncolon_field_shorthand(content.text) or class_field_assignment is not None):
                     raise_located_error(
                         "class-field shorthand cannot have a function body; use Class::field: input => output for an explicit function declaration",
                         content,
                         width=2,
                     )
+            if class_field_assignment is not None:
+                assignment, rhs = class_field_assignment
+                output.extend(self.lower_class_field_assignment(content, assignment, rhs))
+                index += 1
+                continue
             content = erase_coloncolon_statement_head_located(content)
             if content.text in QUANTIFIERS and index + 1 < len(lines):
                 block, next_index = collect_indented_block_located(lines, index + 1, indent)
@@ -786,6 +796,28 @@ class LocatedModuleParser:
         block: LocatedText | None,
     ) -> list[LocatedText]:
         return [prefix_premise_located(header, artifact) for artifact in self.lower_declaration(header.slice(1).strip(), declaration, block=block)]
+
+    def lower_class_field_assignment(
+        self,
+        header: LocatedText,
+        assignment,
+        rhs: LocatedText,
+    ) -> list[LocatedText]:
+        origin = header.positions[0]
+        field_header = synthetic_text(
+            coloncolon_field_declaration(f"{assignment.class_name}::{assignment.field_name}"),
+            origin,
+        )
+        declaration = parse_declaration(field_header.text)
+        if declaration is None:
+            raise_located_error("unsupported '::' usage; bare class-field shorthand requires ordinary symbol names", header, width=2)
+        artifacts = [
+            *self.lower_declaration(field_header, declaration, block=None),
+            class_field_assignment_module_located(header, assignment, rhs),
+        ]
+        if assignment.premise:
+            return [prefix_premise_located(header, artifact) for artifact in artifacts]
+        return artifacts
 
     def declaration_module_located(self, header: LocatedText, name: str, inputs: list[str], outputs: list[str]) -> LocatedText:
         origin = header.positions[0]
@@ -1077,6 +1109,53 @@ def erase_coloncolon_statement_head_located(located: LocatedText) -> LocatedText
             return concat_located([stripped.slice(suffix_start, suffix_start + len(suffix_name)), stripped.slice(suffix_start + len(suffix_name))])
         return synthetic_text(rewritten, stripped.positions[0])
     return synthetic_text(rewritten, stripped.positions[0])
+
+
+def parse_class_field_assignment_located(located: LocatedText):
+    stripped = located.strip()
+    if stripped.text.startswith("|") and not stripped.text.startswith("|-"):
+        inner = parse_class_field_assignment_located(stripped.slice(1).strip())
+        if inner is None:
+            return None
+        assignment, rhs = inner
+        return replace(assignment, premise=True), rhs
+
+    assignment_index = top_level_assignment_index(stripped.text)
+    if assignment_index is None:
+        return None
+    rhs = stripped.slice(assignment_index + 1).strip()
+    try:
+        assignment = parse_class_field_assignment(stripped.text)
+    except CompileError as error:
+        raise_compile_error_located(error, stripped)
+    if assignment is None:
+        return None
+    return assignment, rhs
+
+
+def class_field_assignment_module_located(header: LocatedText, assignment, rhs: LocatedText) -> LocatedText:
+    origin = header.positions[0]
+    receiver = "_" + lower_head(assignment.class_name)
+    return concat_located(
+        [
+            synthetic_text(
+                "∀{\n| "
+                + receiver
+                + "\n| "
+                + assignment.class_name
+                + " ~ "
+                + receiver
+                + "\n"
+                + receiver
+                + "."
+                + assignment.field_name
+                + " = ",
+                origin,
+            ),
+            rhs,
+            synthetic_text("\n}", origin),
+        ]
+    )
 
 
 def reject_unsupported_coloncolon_located(located: LocatedText) -> None:

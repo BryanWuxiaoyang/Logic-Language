@@ -355,6 +355,8 @@ The AST is intended as a precise intermediate logic form that can support human-
         `is_valid`, `_is_val`, and `is_ready1` infer `Bool`; `^is_valid` does not.
     - Candidate lookup strips trailing primes and trailing digits, then tries the full remaining name and repeatedly removes the first `_` segment. Only the first character of each candidate is capitalized.
         `max_head_val1` tries `Max_head_val`, then `Head_val`, then `Val`.
+    - If the normal candidate lookup finds no visible declared class and the normalized name ends with `_class`, lookup then drops the `_class` suffix and repeats the same candidate lookup as a low-priority fallback.
+        `_chip_mem_class` first tries `Chip_mem_class`, `Mem_class`, and `Class`; only if none are visible, it tries `Chip_mem` and then `Mem`.
     - When multiple visible candidates match, the longest candidate wins.
     - If the current module target or premise section already contains an inheritance fact `source ~ sym`, compiler-generated premise inheritance for `sym` may be omitted so target guarantees remain canonical after disassembly.
     - `{base}{digit}` and `{prefix}_{base}` syms inherit the selected visible capital-head base.
@@ -552,6 +554,24 @@ The AST is intended as a precise intermediate logic form that can support human-
     - inheritance facts such as `A ~ Class` do not declare `Class`.
 
     M("Class::field") = M("field: _class => _field")
+    M("Class::field = expr") = M(
+    "
+    Class::field
+    ∀{
+        | _class
+        | Class ~ _class
+        _class.field = expr
+    }
+    ")
+    M("| Class::field = expr") = M(
+    "
+    | Class::field
+    | ∀{
+        | _class
+        | Class ~ _class
+        _class.field = expr
+    }
+    ")
     M("Class::func: inputs => outputs") = M("func: inputs => outputs")
 
     M(
@@ -582,6 +602,7 @@ The AST is intended as a precise intermediate logic form that can support human-
 
     Note that the indentation is not a real `nested-module-text`; it is expanded to current scope with the owner prefix applied to each `::` member.
     - `::` itself has no core semantics; it is omitted after surface expansion.
+    - `Class::field = expr` is class field assignment sugar. The right-hand side can be any ordinary expression.
     - To mimic class-method behavior, make the first parameter the lower-head owner name, such as `_class` for `Class`, so name-implicit inheritance can infer `Class ~ _class`.
     - A standalone class declaration such as `Class` does not add an implicit premise binder like `| Class`.
 
