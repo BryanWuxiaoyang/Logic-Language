@@ -9,6 +9,8 @@ const DEFAULT_PYTHON_PATH = process.platform === "win32" ? "py" : "python3";
 const CLASS_SYMBOL_COLOR = "#4EC9B0";
 const CALLABLE_SYMBOL_COLOR = "#DCDCAA";
 const IMPORT_CANDIDATE_LIMIT = 100;
+const LATEX_CANDIDATE_LIMIT = 200;
+const LATEX_TRIGGER_CHARACTERS = ["\\"];
 
 function activate(context) {
   const diagnostics = vscode.languages.createDiagnosticCollection(DIAGNOSTIC_SOURCE);
@@ -17,6 +19,7 @@ function activate(context) {
   const rootsByUri = new Map();
   const symbolPayloads = new Map();
   const analysisGenerations = new Map();
+  let latexCompletionCache;
   const classSymbolDecoration = vscode.window.createTextEditorDecorationType({
     color: CLASS_SYMBOL_COLOR
   });
@@ -80,6 +83,24 @@ function activate(context) {
 
   function backendPaths() {
     return resolveWorkspaceRoot();
+  }
+
+  function latexTokensPath() {
+    return path.join(backendPaths().skillRoot, "latex-tokens.json");
+  }
+
+  function latexTokenEntries() {
+    const tokensPath = latexTokensPath();
+    if (latexCompletionCache && latexCompletionCache.tokensPath === tokensPath) {
+      return latexCompletionCache.entries;
+    }
+
+    const parsed = JSON.parse(fs.readFileSync(tokensPath, "utf8"));
+    const entries = Object.entries(parsed)
+      .filter((entry) => entry[0].startsWith("\\") && entry[1] !== "")
+      .sort((left, right) => left[0].localeCompare(right[0]));
+    latexCompletionCache = { tokensPath, entries };
+    return entries;
   }
 
   function pythonEnvironment(document) {
@@ -662,6 +683,91 @@ function activate(context) {
     return payload;
   }
 
+  function lineStateAt(text, character) {
+    let quote = "";
+    let escaped = false;
+
+    for (let index = 0; index < character; index += 1) {
+      const current = text[index];
+      if (quote) {
+        if (escaped) {
+          escaped = false;
+          continue;
+        }
+        if (current === "\\") {
+          escaped = true;
+          continue;
+        }
+        if (current === quote) {
+          quote = "";
+        }
+        continue;
+      }
+
+      if (current === "#") {
+        return { inComment: true, inQuote: false };
+      }
+      if (current === "\"" || current === "'") {
+        quote = current;
+      }
+    }
+
+    return { inComment: false, inQuote: quote !== "" };
+  }
+
+  function isLatexTokenCharacter(char) {
+    return /[A-Za-z_]/.test(char);
+  }
+
+  function latexContextAt(document, position) {
+    if (!isLogicLanguageDocument(document) || document.isUntitled) {
+      return undefined;
+    }
+
+    const line = document.lineAt(position.line);
+    const text = line.text;
+    const character = Math.min(position.character, text.length);
+    const state = lineStateAt(text, character);
+    if (state.inComment || state.inQuote) {
+      return undefined;
+    }
+
+    let tokenStart = character;
+    while (tokenStart > 0 && isLatexTokenCharacter(text[tokenStart - 1])) {
+      tokenStart -= 1;
+    }
+    if (tokenStart === 0 || text[tokenStart - 1] !== "\\") {
+      return undefined;
+    }
+    tokenStart -= 1;
+
+    let tokenEnd = character;
+    while (tokenEnd < text.length && isLatexTokenCharacter(text[tokenEnd])) {
+      tokenEnd += 1;
+    }
+
+    const typedToken = text.slice(tokenStart, character);
+    if (!typedToken.startsWith("\\")) {
+      return undefined;
+    }
+
+    return {
+      typedToken,
+      insertRange: new vscode.Range(position.line, tokenStart, position.line, tokenEnd)
+    };
+  }
+
+  function collectLatexCandidates(typedToken) {
+    const normalizedPrefix = typedToken.toLowerCase();
+    return latexTokenEntries()
+      .filter((entry) => entry[0].toLowerCase().startsWith(normalizedPrefix))
+      .slice(0, LATEX_CANDIDATE_LIMIT)
+      .map((entry) => ({
+        latex: entry[0],
+        normalized: entry[1]
+      }));
+  }
+
   context.subscriptions.push(
     vscode.languages.registerDefinitionProvider("logic-language", {
       async provideDefinition(document, position) {
@@ -708,28 +814,59 @@ function activate(context) {
       {
         provideCompletionItems(document, position) {
           const importContext = importContextAt(document, position);
-          if (!importContext) {
+          if (importContext) {
+            const candidates = collectImportCandidates(document, importContext.typedPath);
+            return candidates.map((candidate) => {
+              const item = new vscode.CompletionItem(
+                candidate.insertPath,
+                candidate.isDirectory ? vscode.CompletionItemKind.Folder : vscode.CompletionItemKind.File
+              );
+              item.detail = candidate.detail;
+              item.range = importContext.insertRange;
+              item.insertText = importContext.quote
+                ? candidate.insertPath
+                : makeImportReplacement(candidate.insertPath, "");
+              item.filterText = candidate.insertPath;
+              item.sortText = `${candidate.isDirectory ? "0" : "1"}-${candidate.insertPath.toLowerCase()}`;
+              return item;
+            });
+          }
+
+          const latexContext = latexContextAt(document, position);
+          if (!latexContext) {
             return undefined;
           }
 
-          const candidates = collectImportCandidates(document, importContext.typedPath);
-          return candidates.map((candidate) => {
-            const item = new vscode.CompletionItem(
-              candidate.insertPath,
-              candidate.isDirectory ? vscode.CompletionItemKind.Folder : vscode.CompletionItemKind.File
+          try {
+            const candidates = collectLatexCandidates(latexContext.typedToken);
+            return candidates.map((candidate) => {
+              const item = new vscode.CompletionItem(
+                {
+                  label: candidate.normalized,
+                  description: candidate.latex
+                },
+                vscode.CompletionItemKind.Keyword
+              );
+              item.detail = `LaTeX ${candidate.latex}`;
+              item.documentation = new vscode.MarkdownString(
+                `Normalize \`${candidate.latex}\` to \`${candidate.normalized}\``
+              );
+              item.range = latexContext.insertRange;
+              item.insertText = candidate.normalized;
+              item.filterText = candidate.latex;
+              item.sortText = candidate.latex.toLowerCase();
+              return item;
+            });
+          } catch (error) {
+            showWarningOnce(
+              `Logic Language latex completions are unavailable: ${error instanceof Error ? error.message : String(error)}`
             );
-            item.detail = candidate.detail;
-            item.range = importContext.insertRange;
-            item.insertText = importContext.quote
-              ? candidate.insertPath
-              : makeImportReplacement(candidate.insertPath, "");
-            item.filterText = candidate.insertPath;
-            item.sortText = `${candidate.isDirectory ? "0" : "1"}-${candidate.insertPath.toLowerCase()}`;
-            return item;
-          });
+            return undefined;
+          }
         }
       },
       "/",
+      ...LATEX_TRIGGER_CHARACTERS,
       "\"",
       "'",
       "."

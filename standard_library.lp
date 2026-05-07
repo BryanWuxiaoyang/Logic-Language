@@ -1,18 +1,18 @@
 
 ~
 
-\all
+∀
     | ^sym
     ^sym ~ ^sym
 
-\all
+∀
     | ^sym1, ^sym2, ^sym3
     | ^sym1 ~ ^sym2
     | ^sym2 ~ ^sym3
     ^sym1 ~ ^sym3
     
 Symbol
-\all{| ^sym | Symbol ~ ^sym}
+∀{| ^sym | Symbol ~ ^sym}
 
 Sym
 Sym = symbol
@@ -46,10 +46,10 @@ String
 Str
 Str = String
 Tuple ~ String
-\all
+∀
     | _string
     | String ~ _string
-    | _char \in _string
+    | _char ∈ _string
     Char ~ _char
 
 Val
@@ -153,7 +153,7 @@ Set::min: _set => _min_sym
 Set::argmax: (_set, _mapping_f, _max_f) => _argmax_sym
     | _mapping_f: _sym => _sym1
     | _max_map_sym = max({| _sym ∈ _set => _mapping_f(_sym)}, _max_f)
-    | _max_syms = {| _sym | _sym \in _set, _mapping_f(_sym) = _max_map_sym}
+    | _max_syms = {| _sym | _sym ∈ _set, _mapping_f(_sym) = _max_map_sym}
     _argmax_sym = *_max_syms
 Set::argmax: (_set, _mapping_f) => _argmax_sym
     _argmax_sym = _set.argmax(_mapping_f, max)
