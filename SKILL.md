@@ -338,23 +338,25 @@ The AST is intended as a precise intermediate logic form that can support human-
     "
     )
     in multi-line form, when statement starts with `|` it is either a `sym` or `PS`, otherwise it is `TS`
-    a standalone plain `sym` line is a binder declaration, equivalent to `| sym`
+    a standalone plain `sym` line without `|` is a class declaration, not a binder declaration. Binders must be written with `| sym`.
+    a standalone plain class declaration must be a capital-head symbol such as `Val`; standalone lowercase symbols and standalone operator symbols are invalid.
 
 - when multiple same `sym` appears in the same `syms` section, deduplicate it
     `M("| sym1, sym1 | PS | TS") = M("| sym1 | PS | TS")`
     a `bound-sym` name must not equal any `bound-sym` in the current statement or any ancestor statement; such conflicts are invalid and are not freshened.
 
-- introduce `implicit-inheritance` that in `PS` and `TS`, a `sym` name can implicitly add `~` predicate-statement
-    - A name-implicit inheritance is applied only when the base part of the name resolves to a visible capital-head inheritance-source sym.
-    - A visible inheritance-source sym is an imported or ancestor declared sym whose first character is uppercase.
-    - If the base part does not resolve to a visible inheritance-source sym, the name-implicit inheritance rule does not apply.
-    - Regardless, every declared-sym inherits `Symbol` when the standard library universal symbol axiom is in scope, except generated `^...` syms.
-    - A declared-sym whose normalized name starts with `is_` implicitly inherits `Bool`. Normalization for this rule strips leading `_`, trailing primes, and trailing digits; generated `^...` syms are excluded. This `Bool` rule overrides other name-derived implicit inheritance for that sym, but does not suppress the ordinary `Symbol` inheritance fallback.
+- introduce `implicit-inheritance` that for a bound `sym`, the compiler may add a generated `~` predicate-statement
+    - Each scope has declared class syms. A class is declared by a standalone capital-head target line such as `Val`; the declaration itself emits no logical target statement.
+    - Name-implicit inheritance searches declared classes from the current scope and all ancestor scopes, plus imported class declarations. Sibling nested scopes do not share local class declarations.
+    - A name-implicit inheritance is applied only when the base part of the name resolves to a visible declared class sym by the naming convention below.
+    - If the base part does not resolve to a visible declared class sym, the bound sym falls back to generated `Symbol ~ sym` and semantic-check reports warning `implicit_inheritance_fallback_symbol`.
+    - Explicit inheritance facts such as `A ~ sym` do not declare `A`; they use `A` as an ordinary free sym.
+    - A declared-sym whose normalized name starts with `is_` implicitly inherits `Bool`. Normalization for this rule strips leading `_`, trailing primes, and trailing digits; generated `^...` syms are excluded. This `Bool` rule is magic and does not require a visible `Bool` declaration.
         `is_valid`, `_is_val`, and `is_ready1` infer `Bool`; `^is_valid` does not.
     - Candidate lookup strips trailing primes and trailing digits, then tries the full remaining name and repeatedly removes the first `_` segment. Only the first character of each candidate is capitalized.
         `max_head_val1` tries `Max_head_val`, then `Head_val`, then `Val`.
     - When multiple visible candidates match, the longest candidate wins.
-    - If the current module target section already contains an inheritance fact `source ~ sym`, compiler-generated premise inheritance for `sym` is omitted so target guarantees remain canonical after disassembly.
+    - If the current module target or premise section already contains an inheritance fact `source ~ sym`, compiler-generated premise inheritance for `sym` may be omitted so target guarantees remain canonical after disassembly.
     - `{base}{digit}` and `{prefix}_{base}` syms inherit the selected visible capital-head base.
         `list1` infers `List ~ list1` only if `List` is visible.
         `out_value` infers `Value ~ out_value` only if `Value` is visible.
@@ -544,7 +546,10 @@ The AST is intended as a precise intermediate logic form that can support human-
 - introduce `class-declaration`
     - `class-declaration` is a surface syntax form only. Semantically it is sugar that expands to ordinary function declarations and `~` facts.
     - it does not introduce a new primitive semantic kind named `class`.
-    - `Class::...` and `Class` body syntax do not implicitly declare or bind `Class`; the owner name is a free inheritance-source symbol unless the author explicitly binds it with `| Class`.
+    - A standalone capital-head target line such as `Class` declares `Class` as a class in the current scope and emits no logical statement.
+    - Standalone non-capital symbols such as `class` and standalone operator symbols such as `~` are invalid as class declarations.
+    - `Class::...` and `Class` body syntax require an explicit visible `Class` declaration in the same direct module body or an imported module.
+    - inheritance facts such as `A ~ Class` do not declare `Class`.
 
     M("Class::field") = M("field: _class => _field")
     M("Class::func: inputs => outputs") = M("func: inputs => outputs")
@@ -578,11 +583,11 @@ The AST is intended as a precise intermediate logic form that can support human-
     Note that the indentation is not a real `nested-module-text`; it is expanded to current scope with the owner prefix applied to each `::` member.
     - `::` itself has no core semantics; it is omitted after surface expansion.
     - To mimic class-method behavior, make the first parameter the lower-head owner name, such as `_class` for `Class`, so name-implicit inheritance can infer `Class ~ _class`.
-    - A standalone plain symbol target such as `Class` or `sym` with no `|`, declaration, call, assignment, or body is ignored. It does not add an implicit premise binder like `| Class`.
+    - A standalone class declaration such as `Class` does not add an implicit premise binder like `| Class`.
 
 - `~` inheritance facts do not introduce class declarations for `::` bodies.
     - `A ~ B` is only an inheritance statement.
-    - To attach fields or methods to `B`, use `B::field` or a `B` body; `B` remains a free owner symbol unless explicitly bound with `| B`.
+    - To attach fields or methods to `B`, declare `B` explicitly, then use `B::field` or a `B` body.
 
 - introduce `class-method-call` as sugar
     `M("sym1.sym2(sym3)") = M("sym2(sym1, sym3)")`

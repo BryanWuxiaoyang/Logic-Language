@@ -380,7 +380,6 @@ def collect_definitions(
 
         explicit_classes = collect_explicit_class_definitions(stripped, order)
         class_candidates.extend(explicit_classes)
-        class_candidates.extend(collect_qualified_class_owner_definitions(stripped, order))
         if explicit_classes:
             class_stack.append((indent, explicit_classes[0].name))
         declaration_candidates, signature_candidates = collect_declaration_definitions(

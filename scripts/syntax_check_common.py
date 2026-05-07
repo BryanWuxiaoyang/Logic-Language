@@ -18,14 +18,16 @@ from compile_pipeline.module_sections import (
     INDENTATION_LEVEL_ERROR,
     brace_delta,
     call_text,
-    class_member_owner_name,
+    class_declaration_from_plain_target,
     class_block_prefix_lines,
+    class_member_owner_name,
     collect_indented_block,
     dedupe,
     erase_coloncolon_statement_head,
     explicit_class_header_sym,
     find_matching,
     has_top_level,
+    invalid_class_declaration_name_reason,
     is_bare_coloncolon_field_shorthand,
     is_plain_sym,
     declaration_kind_fact,
@@ -101,6 +103,7 @@ class CheckModule:
     predicate_statements: list[CheckStatement]
     target_statements: list[CheckStatement]
     quantifier: str | None = None
+    class_declarations: list[Declaration] = field(default_factory=list)
     premise_binding_statements: list[CheckStatement] = field(default_factory=list)
     declaration: CheckDeclaration | None = None
     suppress_inferred_syms: bool = False
@@ -126,6 +129,7 @@ class CheckResult:
     expanded_text: str
     ast: CheckModule
     import_declarations: list[Declaration]
+    import_class_declarations: list[Declaration] = field(default_factory=list)
     class_member_owners: list[ClassMemberOwner] = field(default_factory=list)
 
 
@@ -220,6 +224,10 @@ def token_for_compile_error(message: str, text: str) -> str | None:
             return text[quote_index]
     if message.startswith("set module requires") and "{" in text:
         return "{"
+    if message.startswith("class declaration requires a capital-head symbol: "):
+        fragment = message.split(": ", 1)[1].strip()
+        if fragment in text:
+            return fragment
     return None
 
 
@@ -239,10 +247,12 @@ def analyze_module_text(
     import_base_dir = base_dir or (file_path.parent if file_path else Path.cwd())
     expanded = expand_for_checking(normalized, base_dir=import_base_dir, seen=set())
     import_declarations = collect_import_declarations(expanded)
+    import_class_declarations = collect_import_class_declarations(expanded)
+    import_class_names = {declaration.name for declaration in import_class_declarations}
     cleaned = strip_outer_blank_lines_located(remove_comments_located(expanded))
     if not cleaned.text.strip():
         raise CheckError("empty module text")
-    parser = LocatedModuleParser()
+    parser = LocatedModuleParser(visible_class_names=import_class_names)
     ast = parser.parse_module(cleaned, default_quantifier="∀")
     return CheckResult(
         file=source_file,
@@ -250,6 +260,7 @@ def analyze_module_text(
         expanded_text=expanded.text,
         ast=ast,
         import_declarations=import_declarations,
+        import_class_declarations=import_class_declarations,
         class_member_owners=parser.class_member_owners,
     )
 
@@ -261,6 +272,10 @@ def analyze_module_file(file_path: Path) -> CheckResult:
 
 def collect_import_declarations(expanded: LocatedText) -> list[Declaration]:
     return collect_top_level_declarations(expanded, import_origin_only=True)
+
+
+def collect_import_class_declarations(expanded: LocatedText) -> list[Declaration]:
+    return collect_top_level_class_declarations(expanded, import_origin_only=True)
 
 
 def make_located_text(text: str, file_name: str, *, import_origin: bool) -> LocatedText:
@@ -484,6 +499,22 @@ def collect_top_level_declarations(located: LocatedText, *, import_origin_only: 
     return dedupe_declarations(declarations)
 
 
+def collect_top_level_class_declarations(located: LocatedText, *, import_origin_only: bool) -> list[Declaration]:
+    declarations: list[Declaration] = []
+    cleaned = remove_comments_located(located)
+    for logical_line in logical_lines_for_declaration_scan(cleaned):
+        indent, stripped = split_indent_located(logical_line)
+        if indent != 0 or not stripped.text:
+            continue
+        class_name = explicit_class_header_sym(stripped.text)
+        if class_name is None:
+            continue
+        declaration = declaration_at_text(stripped, class_name, import_origin_only=import_origin_only)
+        if declaration is not None:
+            declarations.append(declaration)
+    return dedupe_declarations(declarations)
+
+
 def import_header_located(located: LocatedText) -> LocatedText:
     lines = split_lines_located(located)
     if not lines:
@@ -502,7 +533,7 @@ def parse_top_level_binders(line: LocatedText) -> list[Binder] | None:
     stripped = line.strip()
     if stripped.text.startswith("|"):
         return parse_binder_list_located(stripped.slice(1).strip())
-    return parse_binder_list_located(stripped)
+    return None
 
 
 def scan_line_declarations(line: LocatedText, *, import_origin_only: bool) -> list[Declaration]:
@@ -528,7 +559,7 @@ def scan_line_declarations(line: LocatedText, *, import_origin_only: bool) -> li
                 if is_plain_sym(term):
                     declarations.append(declaration_at_text(stripped, term, import_origin_only=import_origin_only))
 
-    if is_plain_sym(stripped.text):
+    if explicit_class_header_sym(stripped.text) is not None:
         declarations.append(Declaration(stripped.text, stripped.positions[0]))
     return [declaration for declaration in declarations if declaration is not None]
 
@@ -556,10 +587,11 @@ def dedupe_declarations(declarations: Iterable[Declaration]) -> list[Declaration
 
 
 class LocatedModuleParser:
-    def __init__(self) -> None:
+    def __init__(self, *, visible_class_names: Iterable[str] = ()) -> None:
         self.fresh_index = 0
         self.declarations_by_module: dict[tuple[str, SourcePosition | None], CheckDeclaration] = {}
         self.class_member_owners: list[ClassMemberOwner] = []
+        self.visible_class_names = set(visible_class_names)
 
     def parse_module(self, located: LocatedText, default_quantifier: str = "∀") -> CheckModule:
         located = strip_outer_blank_lines_located(located).strip()
@@ -598,10 +630,10 @@ class LocatedModuleParser:
         body = join_lines_located(lowered)
         return self.build_module("quantifier", quantifier, body)
 
-    def lower_line_blocks(self, lines: list[LocatedText]) -> list[LocatedText]:
+    def lower_line_blocks(self, lines: list[LocatedText], *, visible_class_names: Iterable[str] | None = None) -> list[LocatedText]:
         validate_indentation_levels_located(lines)
         output: list[LocatedText] = []
-        visible_classes = direct_class_header_names_located(lines)
+        visible_classes = set(visible_class_names or self.visible_class_names) | direct_class_header_names_located(lines)
         index = 0
         while index < len(lines):
             line = lines[index]
@@ -626,7 +658,7 @@ class LocatedModuleParser:
                             [
                                 content,
                                 synthetic_text("{\n", content.positions[0]),
-                                self.lower_nested_block(unindent_block_located(block)),
+                                self.lower_nested_block(unindent_block_located(block), visible_classes),
                                 synthetic_text("\n}", content.positions[0]),
                             ]
                         )
@@ -641,7 +673,7 @@ class LocatedModuleParser:
                         concat_located(
                             [
                                 synthetic_text("| " + premise_quantifier + "{\n", content.positions[0]),
-                                self.lower_nested_block(unindent_block_located(block)),
+                                self.lower_nested_block(unindent_block_located(block), visible_classes),
                                 synthetic_text("\n}", content.positions[0]),
                             ]
                         )
@@ -657,12 +689,12 @@ class LocatedModuleParser:
                             self.lower_premise_declaration(
                                 content,
                                 premise_declaration,
-                                block=self.lower_nested_block(unindent_block_located(block)),
+                                block=self.lower_nested_block(unindent_block_located(block), visible_classes),
                             )
                         )
                         index = next_index
                         continue
-                    output.extend(self.lower_header_with_block(content, unindent_block_located(block)))
+                    output.extend(self.lower_header_with_block(content, unindent_block_located(block), visible_classes))
                     index = next_index
                     continue
             if content.text.startswith("|-"):
@@ -687,9 +719,9 @@ class LocatedModuleParser:
             return
         index = content.text.find(class_name)
         position = content.positions[index] if 0 <= index < len(content.positions) else content.positions[0]
-        self.class_member_owners.append(ClassMemberOwner(class_name, position, True))
+        self.class_member_owners.append(ClassMemberOwner(class_name, position, class_name in visible_classes))
 
-    def lower_header_with_block(self, header: LocatedText, block: LocatedText) -> list[LocatedText]:
+    def lower_header_with_block(self, header: LocatedText, block: LocatedText, visible_classes: set[str]) -> list[LocatedText]:
         if header.text.startswith("@"):
             return [concat_located([synthetic_text("∀{\n", header.positions[0]), block, synthetic_text("\n}", header.positions[0])])]
         if header.text.startswith("|-"):
@@ -701,19 +733,21 @@ class LocatedModuleParser:
                         synthetic_text(BRANCH_MODULE_MARKER + "\n| ", header.positions[0]),
                         branch_ps,
                         synthetic_text("\n", header.positions[0]),
-                        self.lower_nested_block(block),
+                        self.lower_nested_block(block, visible_classes),
                         synthetic_text("\n}", header.positions[0]),
                     ]
                 )
             ]
+        if is_plain_sym(header.text) and explicit_class_header_sym(header.text) is None:
+            raise_located_error(invalid_class_declaration_name_reason(header.text.strip()), header, width=len(header.text.strip()))
         class_sym = explicit_class_header_sym(header.text)
         if class_sym is not None:
-            return self.lower_class_block(header, class_sym, block)
+            return self.lower_class_block(header, class_sym, block, visible_classes)
         declaration = parse_declaration(header.text)
         if declaration is None:
             reject_unsupported_coloncolon_located(header)
             raise_located_error(INDENTATION_BODY_OWNER_ERROR, header)
-        return self.lower_declaration(header, declaration, block=self.lower_nested_block(block))
+        return self.lower_declaration(header, declaration, block=self.lower_nested_block(block, visible_classes))
 
     def lower_declaration(
         self,
@@ -796,7 +830,7 @@ class LocatedModuleParser:
             ]
         )
 
-    def lower_class_block(self, header: LocatedText, class_sym: str, block: LocatedText) -> list[LocatedText]:
+    def lower_class_block(self, header: LocatedText, class_sym: str, block: LocatedText, visible_classes: Iterable[str]) -> list[LocatedText]:
         expanded_lines = class_block_prefix_lines_located(header, class_sym)
         body_lines = logical_lines_located(block)
         index = 0
@@ -811,10 +845,10 @@ class LocatedModuleParser:
             nested, next_index = collect_indented_block_located(body_lines, index + 1, indent)
             expanded_lines.extend(nested)
             index = next_index
-        return self.lower_line_blocks(expanded_lines)
+        return self.lower_line_blocks(expanded_lines, visible_class_names={*visible_classes, class_sym})
 
-    def lower_nested_block(self, block: LocatedText) -> LocatedText:
-        return join_lines_located(self.lower_line_blocks(logical_lines_located(block)))
+    def lower_nested_block(self, block: LocatedText, visible_class_names: Iterable[str] | None = None) -> LocatedText:
+        return join_lines_located(self.lower_line_blocks(logical_lines_located(block), visible_class_names=visible_class_names))
 
     def build_module(
         self,
@@ -825,6 +859,7 @@ class LocatedModuleParser:
         declaration: CheckDeclaration | None = None,
         error_position: SourcePosition | None = None,
     ) -> CheckModule:
+        body, class_declarations = extract_class_declarations_from_body_located(body)
         sections = split_sections_located(body)
         if not sections:
             if module_type == "set":
@@ -836,6 +871,7 @@ class LocatedModuleParser:
                 target_statements=[],
                 quantifier=quantifier if module_type == "quantifier" else None,
                 declaration=declaration,
+                class_declarations=class_declarations,
             )
         target_section = sections[-1]
         before_target = sections[:-1]
@@ -855,11 +891,15 @@ class LocatedModuleParser:
         suppress_inferred_syms = suppress_inferred_syms or any(text.text == BRANCH_MODULE_MARKER for text in predicate_texts)
         predicate_texts = [text for text in predicate_texts if text.text != BRANCH_MODULE_MARKER]
         predicate_texts = [text for text in predicate_texts if not is_declaration_marker_text(text.text)]
-        target_texts = [
-            text
-            for text in split_terms_located(target_section)
-            if not is_declaration_marker_text(text.text) and not is_ignored_plain_target_text(text.text)
-        ]
+        target_texts: list[LocatedText] = []
+        for text in split_terms_located(target_section):
+            if is_declaration_marker_text(text.text):
+                continue
+            class_declaration = class_declaration_from_plain_target_located(text)
+            if class_declaration is not None:
+                class_declarations.append(class_declaration)
+                continue
+            target_texts.append(text)
         if not binders and not suppress_inferred_syms:
             binders = infer_binders(predicate_texts)
         if module_type == "set" and not binders:
@@ -878,6 +918,7 @@ class LocatedModuleParser:
             binders=binders,
             predicate_statements=predicate_statements,
             target_statements=[self.compile_statement(term) for term in target_texts],
+            class_declarations=dedupe_declarations(class_declarations),
             premise_binding_statements=premise_binding_statements,
             declaration=declaration,
             suppress_inferred_syms=suppress_inferred_syms,
@@ -1017,6 +1058,10 @@ def join_lines_located(lines: Iterable[LocatedText]) -> LocatedText:
 
 def erase_coloncolon_statement_head_located(located: LocatedText) -> LocatedText:
     stripped = located.strip()
+    if stripped.text.startswith("|") and not stripped.text.startswith("|-") and "::" in stripped.text:
+        pipe = stripped.slice(0, 1)
+        rest = erase_coloncolon_statement_head_located(stripped.slice(1).strip())
+        return concat_located([pipe, synthetic_text(" ", pipe.positions[0]), rest])
     try:
         rewritten = erase_coloncolon_statement_head(stripped.text)
     except CompileError as error:
@@ -1042,7 +1087,7 @@ def reject_unsupported_coloncolon_located(located: LocatedText) -> None:
 
 
 def class_block_prefix_lines_located(header: LocatedText, class_sym: str) -> list[LocatedText]:
-    return []
+    return [synthetic_text(class_sym, header.positions[0])]
 
 
 def direct_class_header_names_located(lines: list[LocatedText]) -> set[str]:
@@ -1057,8 +1102,33 @@ def direct_class_header_names_located(lines: list[LocatedText]) -> set[str]:
     return class_names
 
 
-def is_ignored_plain_target_text(text: str) -> bool:
-    return is_plain_sym(text.strip())
+def extract_class_declarations_from_body_located(body: LocatedText) -> tuple[LocatedText, list[Declaration]]:
+    if "\n" not in body.text:
+        return body, []
+    lines: list[LocatedText] = []
+    declarations: list[Declaration] = []
+    for line in logical_lines_located(body):
+        _, stripped = split_indent_located(line)
+        if not stripped.text:
+            lines.append(line)
+            continue
+        declaration = class_declaration_from_plain_target_located(stripped)
+        if declaration is not None:
+            declarations.append(declaration)
+            continue
+        lines.append(line)
+    return join_lines_located(lines), dedupe_declarations(declarations)
+
+
+def class_declaration_from_plain_target_located(located: LocatedText) -> Declaration | None:
+    stripped = located.strip()
+    try:
+        class_name = class_declaration_from_plain_target(stripped.text)
+    except CompileError as error:
+        raise_compile_error_located(error, stripped)
+    if class_name is None:
+        return None
+    return Declaration(class_name, stripped.positions[0])
 
 
 def split_sections_located(body: LocatedText) -> list[LocatedText]:

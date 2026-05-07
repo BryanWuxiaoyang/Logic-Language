@@ -21,7 +21,6 @@ from compile_pipeline.module_sections import (
     Module,
     ModuleCompiler,
     Statement,
-    class_member_owner_name,
     dedupe,
     explicit_class_header_sym,
     infer_syms,
@@ -65,6 +64,7 @@ class BindingInfo:
 @dataclass(frozen=True)
 class ScopeState:
     ancestor_bound_syms: set[str]
+    visible_class_names: set[str]
 
 
 @dataclass(frozen=True)
@@ -95,9 +95,10 @@ def run(text: str, base_dir: Path | str = ".") -> DesugarResult:
 
     normalized_body = normalize_latex(body_text, tokens)
     visible_text = visible_context_text(text, base_path, tokens)
+    visible_class_names = collect_free_class_owner_syms(visible_text)
     visible_syms = (
         collect_visible_syms(visible_text)
-        | collect_free_class_owner_syms(visible_text)
+        | visible_class_names
         | collect_free_class_owner_syms(normalized_body)
     )
 
@@ -106,10 +107,10 @@ def run(text: str, base_dir: Path | str = ".") -> DesugarResult:
         desugared = "\n".join(output_imports) + "\n"
         return DesugarResult(desugared, len(output_imports), 0, len(visible_syms))
 
-    compiler = ModuleCompiler(load_lark_parser())
+    compiler = ModuleCompiler(load_lark_parser(), visible_class_names=visible_class_names)
     module = compiler.compile(body)
     desugarer = ModuleDesugarer(visible_syms)
-    desugared_body = desugarer.render_module(module, ScopeState(set(visible_syms)), indent=0)
+    desugared_body = desugarer.render_module(module, ScopeState(set(visible_syms), set(visible_class_names)), indent=0)
     desugared = "\n".join([*output_imports, desugared_body]) + "\n"
     return DesugarResult(desugared, len(output_imports), len(desugared_body.splitlines()), len(visible_syms))
 
@@ -153,13 +154,12 @@ def collect_visible_syms(text: str) -> set[str]:
 def collect_free_class_owner_syms(text: str) -> set[str]:
     owners: set[str] = set()
     for line in logical_lines(remove_comments(text)):
-        _, content = split_indent(line)
+        indent, content = split_indent(line)
+        if indent != 0:
+            continue
         class_header = explicit_class_header_sym(content)
         if class_header is not None:
             owners.add(class_header)
-        owner = class_member_owner_name(content)
-        if owner is not None and is_plain_sym(owner):
-            owners.add(owner)
     return owners
 
 
@@ -184,6 +184,7 @@ class ModuleDesugarer:
         inferred_syms = [] if module.suppress_inferred_syms else self.infer_statement_syms(predicate_statements)
         original_syms = dedupe([*module.syms, *inferred_syms])
         ancestor_bound_syms = set(scope.ancestor_bound_syms)
+        visible_class_names = set(scope.visible_class_names) | set(module.declared_classes)
         local_bindings: list[BindingInfo] = []
         local_syms_set: set[str] = set()
         self.reserved_syms.update(ancestor_bound_syms)
@@ -193,7 +194,7 @@ class ModuleDesugarer:
             local_syms_set.add(source)
             self.reserved_syms.add(source)
 
-        current_scope = ScopeState(ancestor_bound_syms | local_syms_set)
+        current_scope = ScopeState(ancestor_bound_syms | local_syms_set, visible_class_names)
         local_syms = [binding.name for binding in local_bindings]
         rendered_predicates = [self.render_statement(statement, current_scope) for statement in predicate_statements]
         rendered_targets: list[str] = []
@@ -211,8 +212,8 @@ class ModuleDesugarer:
             and binding.name not in target_inheritance_rhs
         ]
         output_bindings = [binding for binding in local_bindings if binding.name in target_binding_names]
-        predicates = self.implicit_predicates(premise_bindings, ancestor_bound_syms, rendered_predicates)
-        target_inheritance = self.implicit_predicates(output_bindings, ancestor_bound_syms, rendered_targets)
+        predicates = self.implicit_predicates(premise_bindings, visible_class_names, rendered_predicates)
+        target_inheritance = self.implicit_predicates(output_bindings, visible_class_names, rendered_targets)
         targets = [*target_inheritance, *rendered_targets]
         predicates.extend(rendered_predicates)
         predicates.extend(self.local_wrapper_predicates(rendered_predicates + targets))

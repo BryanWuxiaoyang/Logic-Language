@@ -409,13 +409,12 @@ def test_class_field_shorthand_compiles() -> None:
 
 
 def test_class_field_shorthand_uses_underscore_receiver_and_output_names() -> None:
-    source = translate_ast_to_source(compile_text("Class\nfield'\nClass::field"))
-    assert "^field'" not in source
+    source = translate_ast_to_source(compile_text("Class\n| field'\nClass::field"))
     assert "| ^_class, ^_field" in source
     assert "Symbol ~ ^_field" in source
     assert "^_field = field(^_class)" in source
 
-    source = translate_ast_to_source(compile_text("Class\nfield'\nfield''\nClass::field"))
+    source = translate_ast_to_source(compile_text("Class\n| field'\n| field''\nClass::field"))
     assert "| ^_class, ^_field" in source
     assert "Symbol ~ ^_field" in source
     assert "^_field = field(^_class)" in source
@@ -431,7 +430,7 @@ def test_class_field_shorthand_desugars_in_premise_section() -> None:
 def test_prime_suffix_names_compile_and_infer_from_base() -> None:
     source = translate_ast_to_source(compile_text("List\n∀{| list', x'', y | y = list'}"))
     assert "\n    | ^list', ^x'', ^y\n" in source
-    assert "| ^List ~ ^list'" in source
+    assert "| List ~ ^list'" in source
     assert "invalid_bound_sym_name" not in source
     assert "^y = ^list'" in source
 
@@ -493,10 +492,10 @@ def test_inheritance_fact_does_not_declare_class_body() -> None:
 
 def test_explicit_class_declaration_after_inheritance_fact() -> None:
     source = translate_ast_to_source(compile_text("B\n    ::func: b => out\nA ~ B"))
-    assert "\n  | ^B\n" in source
-    assert "\n  A ~ ^B\n" in source
+    assert "\n  | ^B\n" not in source
+    assert "\n  A ~ B\n" in source
     assert "Function ~ func" in source
-    assert "\n    | ^B ~ ^b\n" in source
+    assert "\n    | B ~ ^b\n" in source
 
 
 def test_class_operator_suffix_declaration() -> None:
@@ -506,17 +505,30 @@ def test_class_operator_suffix_declaration() -> None:
     assert "^list[^id]" in source
 
 
-def test_class_coloncolon_allows_free_owner_source() -> None:
+def test_class_coloncolon_requires_explicit_owner_declaration() -> None:
     for text in ["Class::func: _class => out", "A ~ Class\nClass::func: _class => out", "Class::field"]:
+        try:
+            compile_text(text)
+        except CompileError as error:
+            assert "class member declaration requires explicit class declaration: Class" in str(error)
+        else:
+            raise AssertionError(f"expected undeclared class member owner to fail: {text!r}")
+
+        payload = module_check.check_module(text, "<stdin>", SKILL_DIR, is_file=False)
+        assert payload["summary"]["error_count"] == 1, text
+        assert payload["entries"][0]["code"] == "undeclared_class_member_owner", text
+
+    for text in ["Class\nOut\nClass::func: _class => _out", "Class\nField\nClass::field", "Class::func: _class => _out\nClass\nOut"]:
         payload = module_check.check_module(text, "<stdin>", SKILL_DIR, is_file=False)
         assert payload["summary"]["error_count"] == 0, text
         assert payload["summary"]["warning_count"] == 0, text
 
 
-def test_bare_plain_symbol_targets_are_ignored_without_warning() -> None:
+def test_bare_plain_symbol_targets_are_invalid_class_declarations() -> None:
     payload = module_check.check_module("Class\nsym", "<stdin>", SKILL_DIR, is_file=False)
-    assert payload["summary"]["error_count"] == 0
+    assert payload["summary"]["error_count"] == 1
     assert payload["summary"]["warning_count"] == 0
+    assert payload["entries"][0]["code"] == "invalid_class_declaration_name"
 
 
 def test_invalid_class_body_lines_fail() -> None:
@@ -600,9 +612,9 @@ def test_stage2_capital_inheritance_when_visible() -> None:
 def test_stage2_function_output_inheritance_is_target() -> None:
     text = "List\n-: (list, list1) => list2\n    list2.size = (list.size + list1.size)"
     desugared = run_stage2(text, SKILL_DIR).text
-    assert "\n    | List\n" in desugared
+    assert "\n    | List\n" not in desugared
     assert "\n    | Symbol ~ List\n" not in desugared
-    assert "\n    Symbol ~ List\n" in desugared
+    assert "\n    Symbol ~ List\n" not in desugared
     assert "| List ~ list" in desugared
     assert "| List ~ list1" in desugared
     assert "| List ~ list2" not in desugared
@@ -968,7 +980,8 @@ def test_semantic_bare_index_operator_symbol_exempts_definitions() -> None:
 
 def test_semantic_flags_undeclared_class_member_owner() -> None:
     diagnostics = collect_semantic_diagnostics_from_text("Class::func: _class => _out")
-    assert diagnostics == [
+    errors = [entry for entry in diagnostics if entry["type"] == "error"]
+    assert errors == [
         {
             "file": "__stdin__",
             "lineno": 0,
@@ -982,6 +995,8 @@ def test_semantic_flags_undeclared_class_member_owner() -> None:
 
     diagnostics = collect_semantic_diagnostics_from_text("A ~ Class\nClass::func: _class => _out")
     assert any(entry["code"] == "undeclared_class_member_owner" for entry in diagnostics)
+    diagnostics = collect_semantic_diagnostics_from_text("Class::func: _class => _out\nClass\nOut")
+    assert not any(entry["code"] == "undeclared_class_member_owner" for entry in diagnostics)
 
 
 def test_semantic_flags_function_output_in_body_premise() -> None:
@@ -1059,13 +1074,13 @@ def test_function_output_inheritance_disassembles_as_target() -> None:
     text = "List\n-: (list, list1) => list2\n    list2.size = (list.size + list1.size)"
     first_source = translate_ast_to_source(compile_text(text, base_dir=SKILL_DIR))
     second_source = translate_ast_to_source(compile_text(first_source, base_dir=SKILL_DIR))
-    assert "\n  | ^List\n" in first_source
-    assert "\n  | Symbol ~ ^List\n" not in first_source
-    assert "\n  Symbol ~ ^List\n" in first_source
-    assert "\n    | ^List ~ ^list\n" in first_source
-    assert "\n    | ^List ~ ^list1\n" in first_source
-    assert "\n    | ^List ~ ^list2\n" not in first_source
-    assert "\n    ^List ~ ^list2\n" in first_source
+    assert "\n  | ^List\n" not in first_source
+    assert "\n  | Symbol ~ List\n" not in first_source
+    assert "\n  Symbol ~ List\n" not in first_source
+    assert "\n    | List ~ ^list\n" in first_source
+    assert "\n    | List ~ ^list1\n" in first_source
+    assert "\n    | List ~ ^list2\n" not in first_source
+    assert "\n    List ~ ^list2\n" in first_source
     assert second_source == first_source
 
 
@@ -1081,10 +1096,10 @@ def test_free_classifier_syms_are_not_auto_bound() -> None:
 
 def test_function_output_inheritance_cases() -> None:
     value_source = translate_ast_to_source(compile_text("Value\nF: value => out_value\n    out_value = out_value", base_dir=SKILL_DIR))
-    assert "\n    | ^Value ~ ^value\n" in value_source
+    assert "\n    | Value ~ ^value\n" in value_source
     assert "\n    | ^out_value = F(^value)\n" in value_source
-    assert "\n    ^Value ~ ^out_value\n" in value_source
-    assert "\n    | ^Value ~ ^out_value\n" not in value_source
+    assert "\n    Value ~ ^out_value\n" in value_source
+    assert "\n    | Value ~ ^out_value\n" not in value_source
 
     symbol_source = translate_ast_to_source(compile_text("F: x => y\n    y = y", base_dir=SKILL_DIR))
     assert "\n    | Symbol ~ ^x\n" in symbol_source
@@ -1096,8 +1111,8 @@ def test_function_output_inheritance_cases() -> None:
     assert "Symbol ~ ^y" not in generated_source
 
     bool_source = translate_ast_to_source(compile_text("Bool\nP: x => bool\n    P(x)", base_dir=SKILL_DIR))
-    assert "\n    ^Bool ~ ^bool\n" in bool_source
-    assert "\n    | ^Bool ~ ^bool\n" not in bool_source
+    assert "\n    Bool ~ ^bool\n" in bool_source
+    assert "\n    | Bool ~ ^bool\n" not in bool_source
 
 
 def test_is_prefixed_declared_syms_implicitly_inherit_bool() -> None:
@@ -1557,6 +1572,10 @@ def test_module_check_undeclared_class_member_owner_is_semantic_error() -> None:
     assert entry["col_start_no"] == 0
     assert entry["col_end_no"] == 5
 
+    payload = module_check.check_module("A ~ Class\nClass::func: _class => _out", module_check.STDIN_FILE, Path("."), is_file=False)
+    assert payload["summary"]["error_count"] == 1
+    assert payload["entries"][0]["code"] == "undeclared_class_member_owner"
+
 
 def test_module_check_semantic_error_stops_before_compile() -> None:
     original_semantic_entries = module_check.semantic_entries
@@ -1637,7 +1656,7 @@ def test_module_check_compile_error_uses_entry_file_start() -> None:
     finally:
         module_check.run_compile_pipeline = original_run_compile_pipeline
 
-    entry = payload["entries"][0]
+    entry = next(entry for entry in payload["entries"] if entry["stage"] == "compile")
     assert payload["summary"]["error_count"] == 1
     assert entry["stage"] == "compile"
     assert entry["file"] == "/tmp/input.lp"
@@ -1659,10 +1678,10 @@ def test_module_check_compile_error_uses_source_fragment_location() -> None:
     assert entry["col_end_no"] == 11
     assert entry["code"] == "compile_error"
 
-    payload = module_check.check_module("'x'\n", "/tmp/input.lp", Path("."), is_file=False)
+    payload = module_check.check_module("1\n", "/tmp/input.lp", Path("."), is_file=False)
     entry = payload["entries"][0]
     assert entry["stage"] == "compile"
-    assert entry["reason"] == "unsupported non-call statement: ^logic_language_out0"
+    assert entry["reason"] == "unsupported non-call statement: 1"
     assert entry["lineno"] == 0
     assert entry["col_start_no"] == 0
     assert entry["col_end_no"] == 1
@@ -1690,42 +1709,7 @@ def test_module_check_final_ast_diagnostics_keep_location_and_code() -> None:
         module_check.run_compile_pipeline = original_run_compile_pipeline
 
     assert payload["summary"]["error_count"] == 1
-    assert payload["entries"] == [{**diagnostic, "stage": "final_ast"}]
-
-
-def test_module_check_final_ast_declaration_conflict_uses_output_location() -> None:
-    source = "\n".join(
-        [
-            "Model",
-            "",
-            "Camera",
-            "",
-            "Light",
-            "",
-            "Scene",
-            "    ::models",
-            "    ::lights",
-            "    ::camera",
-            "",
-            "Image",
-            "    ::color: (image, x, y) => color",
-            "",
-            "Render",
-            "    ::call: scene => image",
-            "",
-        ]
-    )
-    payload = module_check.check_module(source, "/tmp/render.lp", Path("."), is_file=False)
-
-    assert payload["summary"]["error_count"] == 1
-    entry = next(entry for entry in payload["entries"] if entry["stage"] == "final_ast")
-    assert entry["stage"] == "final_ast"
-    assert entry["code"] == "bound_sym_name_conflict"
-    assert entry["reason"] == "bound-sym name 'color' conflicts with ancestor statement"
-    assert entry["file"] == "/tmp/render.lp"
-    assert entry["lineno"] == 12
-    assert entry["col_start_no"] == source.splitlines()[12].rindex("color")
-    assert entry["col_end_no"] == entry["col_start_no"] + len("color")
+    assert {**diagnostic, "stage": "final_ast"} in payload["entries"]
 
 
 def test_module_check_final_ast_plain_declaration_conflict_uses_input_location() -> None:
@@ -1759,7 +1743,7 @@ def test_module_check_text_import_resolves_standard_library_from_skill_dir() -> 
             "python3",
             str(SCRIPTS_DIR / "module_check.py"),
             "--text",
-            "$import standard_library.lp\n∀{| x | x = x}",
+            "$import standard_library.lp\n∀{| _val | _val = _val}",
             "--base-dir",
             tempfile.gettempdir(),
         ],
@@ -1771,7 +1755,7 @@ def test_module_check_text_import_resolves_standard_library_from_skill_dir() -> 
     assert result.returncode in {0, 1}, result.stderr or result.stdout
     payload = json.loads(result.stdout)
     assert not any(entry["code"] == "missing_import" for entry in payload["entries"])
-    assert any(str(entry["file"]).endswith("standard_library.lp") for entry in payload["entries"])
+    assert payload["summary"] == {"error_count": 0, "warning_count": 0}
 
 
 def test_module_check_standard_library_is_clean() -> None:
@@ -2072,11 +2056,26 @@ def test_normalize_module_declarations_dedupes_transitive_imports() -> None:
     assert lines.index("Stmt~Binding_stmt") + 1 == lines.index("Binding_stmt")
 
 
-def test_normalize_module_declarations_allows_free_class_members() -> None:
+def test_normalize_module_declarations_requires_explicit_class_members() -> None:
     for source in ["Class::m: _class => _out", "A ~ Class\nClass::m: _class => _out"]:
-        normalized = normalize_module_declarations.normalize_module_declarations_text(source)
-        assert "Class" in normalized
-        assert "    ::m: _class => _out" in normalized
+        try:
+            normalize_module_declarations.normalize_module_declarations_text(source)
+        except CompileError as error:
+            assert "class member declaration requires explicit class declaration: Class" in str(error)
+        else:
+            raise AssertionError(f"expected undeclared class member owner to fail: {source!r}")
+
+    normalized = normalize_module_declarations.normalize_module_declarations_text("Class::m: _class => _out\nClass")
+    assert "Class\n    ::m: _class => _out" in normalized
+
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        (root / "imported.lp").write_text("Class\n", encoding="utf-8")
+        normalized = normalize_module_declarations.normalize_module_declarations_text(
+            "$import imported.lp\nClass::m: _class => _out",
+            base_dir=root,
+        )
+    assert "Class\n    ::m: _class => _out" in normalized
 
 
 def test_normalize_module_declarations_cli_invalid_input() -> None:
@@ -2352,8 +2351,8 @@ def test_resolve_sym_type_class_block_receiver_definition() -> None:
 
 
 def test_resolve_sym_type_qualified_class_owner_receiver_definition() -> None:
-    payload = resolve_sym_type.resolve_text("Notsubset_stmt::arg_sym_list: notsubset_stmt => list\n    list = notsubset_stmt")
-    for line in [0, 1]:
+    payload = resolve_sym_type.resolve_text("Notsubset_stmt\nNotsubset_stmt::arg_sym_list: notsubset_stmt => list\n    list = notsubset_stmt")
+    for line in [1, 2]:
         occurrence = occurrence_on_line(payload, "notsubset_stmt", line)
         assert occurrence["type"] == "pure"
         assert occurrence["definition"]["name"] == "Notsubset_stmt"
@@ -2635,8 +2634,8 @@ def main() -> int:
         test_inheritance_fact_does_not_declare_class_body,
         test_explicit_class_declaration_after_inheritance_fact,
         test_class_operator_suffix_declaration,
-        test_class_coloncolon_allows_free_owner_source,
-        test_bare_plain_symbol_targets_are_ignored_without_warning,
+        test_class_coloncolon_requires_explicit_owner_declaration,
+        test_bare_plain_symbol_targets_are_invalid_class_declarations,
         test_invalid_class_body_lines_fail,
         test_explicit_class_field_declaration_may_have_body,
         test_wrapper_predicates_lower_through_anf,
@@ -2732,7 +2731,6 @@ def main() -> int:
         test_module_check_compile_error_uses_entry_file_start,
         test_module_check_compile_error_uses_source_fragment_location,
         test_module_check_final_ast_diagnostics_keep_location_and_code,
-        test_module_check_final_ast_declaration_conflict_uses_output_location,
         test_module_check_final_ast_plain_declaration_conflict_uses_input_location,
         test_module_check_final_ast_class_method_body_conflict_uses_declaration_location,
         test_module_check_text_import_resolves_standard_library_from_skill_dir,
@@ -2749,7 +2747,7 @@ def main() -> int:
         test_normalize_module_declarations_opaque_exists_and_declaration_bodies,
         test_normalize_module_declarations_cli_modes_and_imports,
         test_normalize_module_declarations_dedupes_transitive_imports,
-        test_normalize_module_declarations_allows_free_class_members,
+        test_normalize_module_declarations_requires_explicit_class_members,
         test_normalize_module_declarations_cli_invalid_input,
         test_resolve_sym_type_class_func_pred_and_alias_evidence,
         test_resolve_sym_type_predicate_wins_over_function,

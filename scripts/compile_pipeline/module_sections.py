@@ -54,6 +54,7 @@ class Module:
     predicate_statements: list[Statement]
     target_statements: list[Statement]
     quantifier: str | None = None
+    declared_classes: list[str] = field(default_factory=list)
     declaration_syms: list[str] = field(default_factory=list)
     suppress_inferred_syms: bool = False
     bound_sym_locs: list[dict[str, Any] | None] = field(default_factory=list)
@@ -67,10 +68,15 @@ class LoweredTerm:
 
 
 UNDECLARED_CLASS_MEMBER_OWNER_CODE = "undeclared_class_member_owner"
+INVALID_CLASS_DECLARATION_NAME_CODE = "invalid_class_declaration_name"
 
 
 def undeclared_class_member_owner_reason(class_name: str) -> str:
     return f"class member declaration requires explicit class declaration: {class_name}"
+
+
+def invalid_class_declaration_name_reason(name: str) -> str:
+    return f"class declaration requires a capital-head symbol: {name}"
 
 
 class ModuleCompiler:
@@ -148,7 +154,7 @@ class ModuleCompiler:
             if content in {"∀", "∃"} and index + 1 < len(lines):
                 block, next_index = collect_indented_block(lines, index + 1, indent)
                 if block:
-                    module_text = content + "{\n" + self.lower_nested_block(unindent_block(block)) + "\n}"
+                    module_text = content + "{\n" + self.lower_nested_block(unindent_block(block), visible_classes) + "\n}"
                     output.append(module_text)
                     index = next_index
                     continue
@@ -156,7 +162,7 @@ class ModuleCompiler:
             if premise_quantifier is not None and index + 1 < len(lines):
                 block, next_index = collect_indented_block(lines, index + 1, indent)
                 if block:
-                    module_text = "| " + premise_quantifier + "{\n" + self.lower_nested_block(unindent_block(block)) + "\n}"
+                    module_text = "| " + premise_quantifier + "{\n" + self.lower_nested_block(unindent_block(block), visible_classes) + "\n}"
                     output.append(module_text)
                     index = next_index
                     continue
@@ -165,10 +171,10 @@ class ModuleCompiler:
                 if block:
                     premise_declaration = parse_premise_declaration(content)
                     if premise_declaration is not None:
-                        output.extend(self.lower_premise_declaration(premise_declaration, block=self.lower_nested_block(unindent_block(block))))
+                        output.extend(self.lower_premise_declaration(premise_declaration, block=self.lower_nested_block(unindent_block(block), visible_classes)))
                         index = next_index
                         continue
-                    output.extend(self.lower_header_with_block(content, unindent_block(block)))
+                    output.extend(self.lower_header_with_block(content, unindent_block(block), visible_classes))
                     index = next_index
                     continue
             if content.startswith("|-"):
@@ -187,18 +193,20 @@ class ModuleCompiler:
             index += 1
         return output
 
-    def lower_header_with_block(self, header: str, block: str) -> list[str]:
+    def lower_header_with_block(self, header: str, block: str, visible_classes: set[str]) -> list[str]:
         if header.startswith("|-"):
             branch_ps = header[2:].strip()
-            return ["∀{\n| " + BRANCH_MODULE_MARKER + "\n| " + branch_ps + "\n" + self.lower_nested_block(block) + "\n}"]
+            return ["∀{\n| " + BRANCH_MODULE_MARKER + "\n| " + branch_ps + "\n" + self.lower_nested_block(block, visible_classes) + "\n}"]
+        if class_header_sym(header) is not None and explicit_class_header_sym(header) is None:
+            raise CompileError(invalid_class_declaration_name_reason(header.strip()))
         class_sym = explicit_class_header_sym(header)
         if class_sym is not None:
-            return self.lower_class_block(header, class_sym, block)
+            return self.lower_class_block(header, class_sym, block, visible_classes)
         declaration = parse_declaration(header)
         if declaration is None:
             reject_unsupported_coloncolon(header)
             raise CompileError(INDENTATION_BODY_OWNER_ERROR)
-        return self.lower_declaration(declaration, block=self.lower_nested_block(block))
+        return self.lower_declaration(declaration, block=self.lower_nested_block(block, visible_classes))
 
     def lower_declaration(self, declaration: tuple[str, list[str], list[str], str], block: str | None) -> list[str]:
         name, inputs, outputs, arrow = declaration
@@ -224,7 +232,7 @@ class ModuleCompiler:
         marker = f"{DECL_BODY_OUTPUT_MARKER}({', '.join(outputs)})"
         return "∀{\n| " + ", ".join(inputs + outputs) + "\n| " + marker + "\n| " + binding + "\n" + block + "\n}"
 
-    def lower_class_block(self, header: str, class_sym: str, block: str) -> list[str]:
+    def lower_class_block(self, header: str, class_sym: str, block: str, visible_classes: Iterable[str]) -> list[str]:
         expanded_lines = class_block_prefix_lines(header, class_sym)
         body_lines = logical_lines(block)
         index = 0
@@ -242,12 +250,13 @@ class ModuleCompiler:
             expanded_lines.append(class_line)
             expanded_lines.extend(nested)
             index = next_index
-        return self.lower_line_blocks(expanded_lines)
+        return self.lower_line_blocks(expanded_lines, visible_class_names={*visible_classes, class_sym})
 
-    def lower_nested_block(self, block: str) -> str:
-        return "\n".join(self.lower_line_blocks(logical_lines(block)))
+    def lower_nested_block(self, block: str, visible_class_names: Iterable[str] | None = None) -> str:
+        return "\n".join(self.lower_line_blocks(logical_lines(block), visible_class_names=visible_class_names or self.visible_class_names))
 
     def build_module(self, module_type: str, quantifier: str | None, body: str) -> Module:
+        body, declared_classes = extract_class_declarations_from_body(body)
         declaration_syms = collect_standalone_declaration_syms(body)
         sections = split_sections(body)
         if not sections:
@@ -260,6 +269,7 @@ class ModuleCompiler:
                 predicate_statements=[],
                 target_statements=[],
                 bound_sym_locs=[],
+                declared_classes=declared_classes,
             )
         target_section = sections[-1]
         before_target = sections[:-1]
@@ -278,7 +288,13 @@ class ModuleCompiler:
         predicate_texts = split_terms("\n".join(predicate_sections))
         suppress_inferred_syms = suppress_inferred_syms or BRANCH_MODULE_MARKER in predicate_texts
         predicate_texts = [text for text in predicate_texts if text != BRANCH_MODULE_MARKER]
-        target_texts = [text for text in split_terms(target_section) if not is_ignored_plain_target(text)]
+        target_texts: list[str] = []
+        for text in split_terms(target_section):
+            class_name = class_declaration_from_plain_target(text)
+            if class_name is not None:
+                declared_classes.append(class_name)
+                continue
+            target_texts.append(text)
         if not syms and not suppress_inferred_syms:
             syms = infer_syms(predicate_texts)
         predicate_statements: list[Statement] = []
@@ -305,6 +321,7 @@ class ModuleCompiler:
             syms=syms,
             predicate_statements=predicate_statements,
             target_statements=target_statements,
+            declared_classes=dedupe(declared_classes),
             declaration_syms=dedupe([sym for sym in declaration_syms if sym in syms]),
             suppress_inferred_syms=suppress_inferred_syms,
             bound_sym_locs=[None for _ in syms],
@@ -568,6 +585,21 @@ def split_multiline_sections(body: str) -> list[str]:
     return sections
 
 
+def extract_class_declarations_from_body(body: str) -> tuple[str, list[str]]:
+    if "\n" not in body:
+        return body, []
+    lines: list[str] = []
+    declared: list[str] = []
+    for raw_line in logical_lines(body):
+        _, stripped = split_indent(raw_line)
+        class_name = class_declaration_from_plain_target(stripped)
+        if class_name is not None:
+            declared.append(class_name)
+            continue
+        lines.append(raw_line)
+    return "\n".join(lines), dedupe(declared)
+
+
 def collect_standalone_declaration_syms(body: str) -> list[str]:
     return []
 
@@ -736,8 +768,14 @@ def infer_syms(predicate_texts: list[str]) -> list[str]:
     return dedupe(syms)
 
 
-def is_ignored_plain_target(text: str) -> bool:
-    return is_plain_sym(text.strip())
+def class_declaration_from_plain_target(text: str) -> str | None:
+    stripped = text.strip()
+    if not is_plain_sym(stripped):
+        return None
+    class_name = explicit_class_header_sym(stripped)
+    if class_name is None:
+        raise CompileError(invalid_class_declaration_name_reason(stripped))
+    return class_name
 
 
 def class_header_sym(header: str) -> str | None:
@@ -772,11 +810,13 @@ def direct_class_header_names(lines: list[str]) -> set[str]:
 
 
 def class_block_prefix_lines(header: str, class_sym: str) -> list[str]:
-    return []
+    return [class_sym]
 
 
 def class_member_owner_name(text: str) -> str | None:
     stripped = text.strip()
+    if stripped.startswith("|") and not stripped.startswith("|-"):
+        return class_member_owner_name(stripped[1:].strip())
     if "::" not in stripped:
         return None
     assignment_index = top_level_assignment_index(stripped)
@@ -796,13 +836,16 @@ def class_member_owner_name(text: str) -> str | None:
 
 
 def validate_class_member_owner(text: str, visible_class_names: set[str]) -> None:
-    # Class::member uses the owner as a free source symbol; it does not require
-    # or create a local Class declaration.
+    class_name = class_member_owner_name(text)
+    if class_name is not None and class_name not in visible_class_names:
+        raise CompileError(undeclared_class_member_owner_reason(class_name))
     return None
 
 
 def erase_coloncolon_statement_head(text: str) -> str:
     stripped = text.strip()
+    if stripped.startswith("|") and not stripped.startswith("|-") and "::" in stripped:
+        return "| " + erase_coloncolon_statement_head(stripped[1:].strip())
     if "::" not in stripped:
         return stripped
     assignment_index = top_level_assignment_index(stripped)

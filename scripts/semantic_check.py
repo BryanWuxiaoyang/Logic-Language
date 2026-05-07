@@ -13,6 +13,7 @@ from typing import Any
 
 from compile_pipeline.errors import CompileError
 from compile_pipeline.module_sections import UNDECLARED_CLASS_MEMBER_OWNER_CODE, undeclared_class_member_owner_reason
+from inheritance_sources import selected_inheritance_source
 from syntax_check_common import (
     STDIN_FILE,
     Binder,
@@ -28,6 +29,8 @@ from syntax_check_common import (
 
 BARE_INDEX_OPERATOR_WARNING_CODE = "bare_index_operator_symbol"
 BARE_INDEX_OPERATOR_WARNING_REASON = "bare [] is the index operator symbol; use [,] for the empty tuple literal"
+IMPLICIT_INHERITANCE_FALLBACK_CODE = "implicit_inheritance_fallback_symbol"
+IMPLICIT_INHERITANCE_FALLBACK_REASON = "implicit inheritance did not find a declared class; symbol falls back to Symbol"
 
 
 @dataclass(frozen=True)
@@ -67,6 +70,7 @@ class VisibleDeclaration:
 class ScopeContext:
     scope_id: int
     ancestors: tuple[int, ...]
+    visible_class_names: frozenset[str]
 
 
 class SemanticChecker:
@@ -74,6 +78,7 @@ class SemanticChecker:
         self,
         import_declarations: list[Declaration],
         *,
+        import_class_declarations: list[Declaration] | None = None,
         source_text: str | None = None,
         source_file: str | None = None,
         class_member_owners: list[ClassMemberOwner] | None = None,
@@ -83,14 +88,18 @@ class SemanticChecker:
         self.next_scope_id = 0
         self.source_lines_by_file: dict[str, list[str]] = {}
         self.class_member_owners = class_member_owners or []
+        self.fallback_warning_keys: set[tuple[str, int, int, str]] = set()
+        self.import_class_names: set[str] = set()
         if source_text is not None and source_file is not None:
             self.source_lines_by_file[source_file] = source_text.splitlines()
         for declaration in import_declarations:
             self.add_visible(VisibleDeclaration(declaration.name, declaration.position, None))
+        for declaration in import_class_declarations or []:
+            self.import_class_names.add(declaration.name)
 
     def check(self, module: CheckModule) -> list[Diagnostic]:
         self.check_class_member_owners()
-        self.visit_module(module, ScopeContext(self.allocate_scope(), tuple()))
+        self.visit_module(module, ScopeContext(self.allocate_scope(), tuple(), frozenset(self.import_class_names)))
         return sorted(self.diagnostics, key=lambda diagnostic: (diagnostic.file, diagnostic.lineno, diagnostic.col_start_no, diagnostic.reason))
 
     def allocate_scope(self) -> int:
@@ -101,14 +110,22 @@ class SemanticChecker:
     def visit_module(self, module: CheckModule, context: ScopeContext) -> None:
         current_declarations: list[VisibleDeclaration] = []
         ancestor_set = set(context.ancestors)
+        current_class_names = set(context.visible_class_names)
+        for class_declaration in module.class_declarations:
+            current_class_names.add(class_declaration.name)
+            declaration = VisibleDeclaration(class_declaration.name, class_declaration.position, context.scope_id)
+            current_declarations.append(declaration)
+            self.add_visible(declaration)
+        inherited_rhs = module_inheritance_rhs_names(module)
         for binder in module.binders:
             self.check_binder(binder, ancestor_set)
             self.check_bare_index_operator_binder(binder)
+            self.check_implicit_inheritance_fallback(binder, current_class_names, inherited_rhs)
             declaration = VisibleDeclaration(binder.text, binder.position, context.scope_id)
             current_declarations.append(declaration)
             self.add_visible(declaration)
         self.check_bare_index_operator_statements(module)
-        child_context = ScopeContext(self.allocate_scope(), (*context.ancestors, context.scope_id))
+        child_context = ScopeContext(self.allocate_scope(), (*context.ancestors, context.scope_id), frozenset(current_class_names))
         for statement in [*module.premise_binding_statements, *module.predicate_statements, *module.target_statements]:
             for submodule in statement.sub_modules:
                 self.visit_module(submodule, child_context)
@@ -162,6 +179,33 @@ class SemanticChecker:
         if binder.text != "[]":
             return
         self.emit_bare_index_operator_warning(binder.position, 2)
+
+    def check_implicit_inheritance_fallback(self, binder: Binder, visible_class_names: set[str], inherited_rhs: set[str]) -> None:
+        if binder.text.startswith("^") or binder.text in {"[]", "[:]"}:
+            return
+        if is_bool_implicit_sym(binder.text):
+            return
+        if selected_inheritance_source(binder.text, visible_class_names) is not None:
+            return
+        if collection_inheritance_exists(binder.text, visible_class_names):
+            return
+        if binder.text in inherited_rhs:
+            return
+        key = (binder.position.file, binder.position.line, binder.position.column, binder.text)
+        if key in self.fallback_warning_keys:
+            return
+        self.fallback_warning_keys.add(key)
+        self.diagnostics.append(
+            Diagnostic(
+                file=binder.position.file,
+                lineno=max(binder.position.line - 1, 0),
+                col_start_no=max(binder.position.column - 1, 0),
+                col_end_no=max(binder.position.column - 1 + len(binder.text), 1),
+                type="warning",
+                code=IMPLICIT_INHERITANCE_FALLBACK_CODE,
+                reason=IMPLICIT_INHERITANCE_FALLBACK_REASON,
+            )
+        )
 
     def check_bare_index_operator_statements(self, module: CheckModule) -> None:
         skip_operator_definition_body = module.declaration is not None and module.declaration.name == "[]"
@@ -225,6 +269,31 @@ def dedupe_join(values: list[str]) -> str:
     return ", ".join(output)
 
 
+def module_inheritance_rhs_names(module: CheckModule) -> set[str]:
+    names: set[str] = set()
+    for statement in [*module.predicate_statements, *module.target_statements]:
+        match = re.match(r"^\s*(?P<source>.+?)\s*~\s*(?P<target>[^\s,{}()]+)\s*$", statement.text)
+        if match is not None:
+            names.add(match.group("target"))
+    return names
+
+
+def is_bool_implicit_sym(sym: str) -> bool:
+    if sym.startswith("^"):
+        return False
+    normalized = sym.lstrip("_").rstrip("'")
+    normalized = re.sub(r"\d+$", "", normalized)
+    return normalized.startswith("is_")
+
+
+def collection_inheritance_exists(sym: str, visible_class_names: set[str]) -> bool:
+    if sym.endswith("_list"):
+        return selected_inheritance_source(sym[: -len("_list")], visible_class_names) is not None
+    if sym.endswith("s") and len(sym) > 1:
+        return selected_inheritance_source(sym[:-1], visible_class_names) is not None
+    return False
+
+
 def find_symbol_occurrence(statement: Any, symbol: str) -> tuple[SourcePosition, int] | None:
     pattern = re.compile(rf"(?<![\w^']){re.escape(symbol)}(?![\w'])")
     match = pattern.search(statement.text)
@@ -272,6 +341,7 @@ def collect_semantic_diagnostics_from_text(
     result = analyze_module_text(text, file_path=file_path, base_dir=base_dir)
     diagnostics = SemanticChecker(
         result.import_declarations,
+        import_class_declarations=result.import_class_declarations,
         source_text=result.source_text,
         source_file=result.file,
         class_member_owners=result.class_member_owners,
@@ -283,6 +353,7 @@ def collect_semantic_diagnostics_from_file(file_path: Path) -> list[dict[str, ob
     result = analyze_module_file(file_path)
     diagnostics = SemanticChecker(
         result.import_declarations,
+        import_class_declarations=result.import_class_declarations,
         source_text=result.source_text,
         source_file=result.file,
         class_member_owners=result.class_member_owners,

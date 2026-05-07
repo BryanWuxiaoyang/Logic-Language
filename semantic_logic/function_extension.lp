@@ -1,5 +1,7 @@
 $import module_AST.lp
 
+List
+
 Quantified_stmt::get_func_decl_stmt: _quantified_stmt => _func_decl_stmt
     # Some _quantified_stmt can reduce to a function-decl, which is more helpful for program-implementation
 

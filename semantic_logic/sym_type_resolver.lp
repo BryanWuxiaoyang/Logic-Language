@@ -2,13 +2,9 @@ $import module_AST.lp
 $import module_AST_pred_stmts.lp
 
 Sym_type
-class_sym_type
 Sym_type ~ class_sym_type
-pure_sym_type
 Sym_type ~ pure_sym_type
-func_sym_type
 Sym_type ~ func_sym_type
-pred_sym_type
 Sym_type ~ pred_sym_type
 
 Stmt::is_inheriting_function: (_stmt, _sym) => _bool

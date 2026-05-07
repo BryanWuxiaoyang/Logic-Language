@@ -352,6 +352,8 @@ def code_for_reason(reason: str) -> str:
         return "unclosed_brace"
     if reason == "parse error":
         return "parse_error"
+    if reason.startswith("class declaration requires a capital-head symbol: "):
+        return "invalid_class_declaration_name"
     return "syntax_error"
 
 

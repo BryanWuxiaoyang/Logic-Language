@@ -1,6 +1,3 @@
-
-~
-
 ∀
     | ^sym
     ^sym ~ ^sym
@@ -18,9 +15,7 @@ Sym
 Sym = Symbol
 
 Bool
-true
 Bool ~ true
-false
 Bool ~ false
 
 Function
