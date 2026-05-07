@@ -37,6 +37,11 @@ function activate(context) {
     void vscode.window.showWarningMessage(message);
   }
 
+  function isBackendPathError(error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return message.includes("logic-language backend not found");
+  }
+
   function isLogicLanguageDocument(document) {
     return (
       document &&
@@ -285,8 +290,12 @@ function activate(context) {
     return nextGeneration;
   }
 
-  function isCurrentAnalysis(document, generation) {
+  function isCurrentDiagnosticAnalysis(document, generation) {
     return !document.isDirty && analysisGenerations.get(document.uri.toString()) === generation;
+  }
+
+  function isCurrentSymbolAnalysis(document, generation) {
+    return analysisGenerations.get(document.uri.toString()) === generation;
   }
 
   function applySymbolHighlights(document, payload) {
@@ -563,7 +572,51 @@ function activate(context) {
     return collect("");
   }
 
-  async function runDiagnostics(document) {
+  async function runModuleCheckAnalysis(document, generation) {
+    try {
+      const payload = await runModuleCheck(document);
+      if (!isCurrentDiagnosticAnalysis(document, generation)) {
+        return;
+      }
+      applyDiagnostics(document.uri, payload);
+    } catch (error) {
+      if (!isCurrentDiagnosticAnalysis(document, generation)) {
+        return;
+      }
+      if (isBackendPathError(error)) {
+        clearSymbolState(document);
+      }
+      diagnostics.delete(document.uri);
+      showWarningOnce(
+        `Logic Language diagnostics are unavailable: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+  }
+
+  async function runSymbolResolverAnalysis(document, generation, stateKey) {
+    try {
+      const key = document.uri.toString();
+      const cached = symbolPayloads.get(key);
+      const payload = cached && cached.stateKey === stateKey ? cached.payload : await runSymbolResolver(document);
+      if (!isCurrentSymbolAnalysis(document, generation)) {
+        return;
+      }
+      symbolPayloads.set(key, { stateKey, payload });
+      applySymbolHighlights(document, payload);
+    } catch (error) {
+      if (!isCurrentSymbolAnalysis(document, generation)) {
+        return;
+      }
+      if (isBackendPathError(error)) {
+        clearSymbolState(document);
+      }
+      showWarningOnce(
+        `Logic Language symbol highlighting is unavailable: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+  }
+
+  function runDiagnostics(document) {
     if (!isLogicLanguageDocument(document)) {
       return;
     }
@@ -579,42 +632,8 @@ function activate(context) {
     const generation = nextAnalysisGeneration(document);
     const stateKey = savedDocumentStateKey(document);
 
-    try {
-      const payload = await runModuleCheck(document);
-      if (!isCurrentAnalysis(document, generation)) {
-        return;
-      }
-      applyDiagnostics(document.uri, payload);
-    } catch (error) {
-      if (!isCurrentAnalysis(document, generation)) {
-        return;
-      }
-      diagnostics.delete(document.uri);
-      showWarningOnce(
-        `Logic Language diagnostics are unavailable: ${error instanceof Error ? error.message : String(error)}`
-      );
-    }
-
-    try {
-      if (!isCurrentAnalysis(document, generation)) {
-        return;
-      }
-      const key = document.uri.toString();
-      const cached = symbolPayloads.get(key);
-      const payload = cached && cached.stateKey === stateKey ? cached.payload : await runSymbolResolver(document);
-      if (!isCurrentAnalysis(document, generation)) {
-        return;
-      }
-      symbolPayloads.set(key, { stateKey, payload });
-      applySymbolHighlights(document, payload);
-    } catch (error) {
-      if (!isCurrentAnalysis(document, generation)) {
-        return;
-      }
-      showWarningOnce(
-        `Logic Language symbol highlighting is unavailable: ${error instanceof Error ? error.message : String(error)}`
-      );
-    }
+    void runModuleCheckAnalysis(document, generation);
+    void runSymbolResolverAnalysis(document, generation, stateKey);
   }
 
   function scheduleDiagnostics(document) {
@@ -676,6 +695,9 @@ function activate(context) {
     const cached = cachedSymbolPayload(document);
     if (cached) {
       return cached;
+    }
+    if (document.isDirty) {
+      return undefined;
     }
     const stateKey = savedDocumentStateKey(document);
     const payload = await runSymbolResolver(document);
@@ -784,9 +806,6 @@ function activate(context) {
           return undefined;
         }
 
-        if (document.isDirty) {
-          return undefined;
-        }
         try {
           const payload = await resolveSymbolPayload(document);
           const occurrence = findOccurrenceAt(payload, position);

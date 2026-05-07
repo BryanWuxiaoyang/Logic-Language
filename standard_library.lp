@@ -15,7 +15,7 @@ Symbol
 ∀{| ^sym | Symbol ~ ^sym}
 
 Sym
-Sym = symbol
+Sym = Symbol
 
 Bool
 true
