@@ -6,16 +6,8 @@ import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
 from compile_pipeline.errors import CompileError
-
-try:
-    from lark import Lark, UnexpectedInput
-except ModuleNotFoundError:  # pragma: no cover - exercised by CLI environments.
-    Lark = None  # type: ignore[assignment]
-    UnexpectedInput = Exception  # type: ignore[assignment]
-
 
 LATEX_CODE_RE = re.compile(r"\\[A-Za-z_][A-Za-z0-9_]*")
 IMPORT_RE = re.compile(r"^(?P<indent>[ \t]*)\$import\s+(?P<path>.+?)\s*$")
@@ -65,13 +57,6 @@ def resolve_import_path(raw_path: str, base_dir: Path) -> Path:
         if resolved.exists():
             return resolved
     return candidates[0].resolve()
-
-
-def load_lark_parser() -> Any:
-    if Lark is None:
-        raise CompileError("missing dependency: install skills/logic-language/requirements.txt")
-    grammar_path = skill_dir() / "grammar.ebnf"
-    return Lark(grammar_path.read_text(encoding="utf-8"), start="start", parser="earley")
 
 
 def load_tokens() -> dict[str, str]:
@@ -270,16 +255,6 @@ def parse_literal_text(text: str) -> LiteralValue | None:
     return LiteralValue(kind="string", value=value, raw=text)
 
 
-def is_literal_text(text: str) -> bool:
-    return parse_literal_text(text.strip()) is not None
-
-
-def encode_char_literal(value: str) -> str:
-    if len(value) != 1:
-        raise CompileError("char literal must contain exactly one character")
-    return "'" + ESCAPE_OUTPUTS.get(value, value) + "'"
-
-
 def is_literal_quote_start(text: str, index: int) -> bool:
     if index >= len(text):
         return False
@@ -320,11 +295,3 @@ def is_escaped_quote(text: str, quote_index: int) -> bool:
         backslash_count += 1
         index -= 1
     return backslash_count % 2 == 1
-
-
-def format_lark_error(error: Any) -> str:
-    line = getattr(error, "line", None)
-    column = getattr(error, "column", None)
-    if line is not None and column is not None:
-        return f"{line}:{column}: parse error"
-    return "parse error"

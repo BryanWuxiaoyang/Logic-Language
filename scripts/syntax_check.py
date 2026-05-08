@@ -12,19 +12,15 @@ from pathlib import Path
 from typing import Any
 
 from compile_pipeline.errors import CompileError
-from compile_pipeline.module_sections import ModuleCompiler, strip_outer_blank_lines
 from compile_pipeline.source_utils import (
     IMPORT_RE,
     LATEX_CODE_RE,
     find_quoted_literal_end,
     is_literal_quote_start,
-    load_lark_parser,
     load_tokens,
-    normalize_latex,
-    remove_comments,
     resolve_import_path,
 )
-from syntax_check_common import CheckError, analyze_module_text, token_for_compile_error
+from compile_pipeline.module_parser import CheckError, analyze_module_text, token_for_compile_error
 
 
 STDIN_FILE = "<stdin>"
@@ -57,7 +53,7 @@ def check_text(
     file_label: str,
     base_dir: Path,
     tokens: dict[str, str],
-    parser: Any,
+    parser: Any | None = None,
     seen: set[Path] | None = None,
     expanded: set[Path] | None = None,
 ) -> list[Diagnostic]:
@@ -80,11 +76,6 @@ def check_text(
     try:
         file_path = None if file_label == STDIN_FILE else Path(file_label)
         analyze_module_text(text, file_path=file_path, base_dir=base_dir, source_label=file_label)
-        normalized_body = normalize_latex(body_text, tokens)
-        cleaned_body = remove_comments(normalized_body)
-        body_line_offset = leading_blank_line_count(cleaned_body)
-        body = strip_outer_blank_lines(cleaned_body)
-        ModuleCompiler(parser, validate_class_member_owners=False).compile(body)
     except CompileError as error:
         diagnostics.append(compile_error_to_diagnostic(error, file_label, body_line_offset, source_text=text))
 
@@ -380,15 +371,6 @@ def first_non_space_column(line: str) -> int:
     return len(line) - len(line.lstrip(" \t"))
 
 
-def leading_blank_line_count(text: str) -> int:
-    count = 0
-    for line in text.splitlines():
-        if line.strip():
-            break
-        count += 1
-    return count
-
-
 def make_diagnostic(
     file_label: str,
     line: int,
@@ -433,8 +415,7 @@ def main() -> int:
     try:
         source, file_label, base_dir = split_input(args)
         tokens = load_tokens()
-        parser_instance = load_lark_parser()
-        entries = check_text(source, file_label, base_dir.resolve(), tokens, parser_instance)
+        entries = check_text(source, file_label, base_dir.resolve(), tokens)
     except ValueError as error:
         entries = [make_diagnostic(STDIN_FILE, 0, 0, 1, "error", "cli_usage_error", str(error))]
         payload = output_payload(entries)

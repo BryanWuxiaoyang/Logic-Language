@@ -773,20 +773,17 @@ The AST is intended as a precise intermediate logic form that can support human-
 
 - introduce `module_AST` as the compiler output form.
     - `compile_module` emits the root `module_stmt` JSON node by default.
-    - final output uses `module_AST` field names such as `bound_syms`, `premise_binding_stmts`, `premise_PSs`, and `target_PSs`.
+    - final output uses object-AST field names such as `bound_syms`, `premise_binding_stmts`, `premise_proposition_stmts`, and `target_proposition_stmts`.
     - output contains direct AST fields only; derived recursive fields are not emitted. Source positions are stored under `source_loc`, not `loc`.
 
-- `compile_module` is implemented as a staged AST compiler pipeline.
-    - `stage1_normalize_source`: expands imports, removes comments, normalizes latex codes, and builds a mutable syntax AST. The syntax AST preserves function declarations with bodies, class declarations, class-method declarations, class fields, class field assignments, and parsed expression nodes.
-    - `stage2_desugar_module_text`: receives the stage1 AST and mutates it in place for source-sugar rewrites. The legacy `.text` API remains as deterministic compatibility rendering.
-    - `stage3_parse_module_sections`: receives the stage2 AST and expands/desugars it toward the normal module structure used by canonical `module_AST` lowering.
-    - `stage4_parse_statements`: compatibility pass for parsed statement summaries.
-    - `stage5_lower_to_module_ast`: emits the final `module_AST`, ANF-lifts non-symbol call arguments, inserts generated bindings, and enforces AST shape.
+- `compile_module` is implemented as a two-stage AST compiler pipeline.
+    - `stage1_front_end`: parses source text once, expands imports with source-location provenance, normalizes latex codes, and performs source-sugar desugaring into frontend AST nodes.
+    - `stage2_back_end`: lowers the frontend AST into final object AST, ANF-lifts non-symbol call arguments, inserts generated bindings/classifier targets, and enforces object-AST shape.
     - All emitted symbol nodes use `source_loc`; generated symbols set `generated=true` and use the authored source symbol/expression location as their `source_loc`.
 
 - introduce `compile_module`
     - it inputs `module-text` or `module-file` and returns `module_AST` JSON.
-    - `--debug-stages` prints summaries for all compiler stages.
+    - `--debug-stages` prints compact JSON summaries for all compiler stages.
 
 - introduce `translate_AST_to_source`
     - it inputs `module_AST` JSON from stdin or file and returns canonical parseable `.lp` source text.
@@ -800,40 +797,14 @@ The AST is intended as a precise intermediate logic form that can support human-
     - output: root `module_AST` JSON by default.
     - useful flags: `--pretty`, `--debug-stages`.
 
-- `stage1_normalize_source`
-    - path: `scripts/compile_pipeline/stage1_normalize_source.py`
-    - input: source module text.
-    - output: normalized source summary plus a mutable syntax AST with imports, comments, latex normalization, and source identity handling.
-
-- `stage2_desugar_module_text`
-    - path: `scripts/compile_pipeline/stage2_desugar_module_text.py`
-    - input: normalized module text or stage1 syntax AST.
-    - output: in-place desugared syntax AST plus compatibility-rendered module-text summary for source-level rewrites.
-
-- `stage3_parse_module_sections`
-    - path: `scripts/compile_pipeline/stage3_parse_module_sections.py`
-    - input: stage2 syntax AST or compatibility-rendered desugared module text.
-    - output: parsed module/section summary attached to the syntax AST when available.
-
-- `stage4_parse_statements`
-    - path: `scripts/compile_pipeline/stage4_parse_statements.py`
-    - input: parsed or raw module text.
-    - output: parsed statement summary before AST lowering.
-
-- `stage5_lower_to_module_ast`
-    - path: `scripts/compile_pipeline/stage5_lower_to_module_ast.py`
-    - input: parsed statements or raw module text.
-    - output: final `module_AST` summary using `bound_syms`, `premise_binding_stmts`, `premise_PSs`, and `target_PSs`.
+- compiler stages are internal AST-only modules, not public CLI tools.
+    - `stage1_front_end` input: source module text; output: frontend `SourceFileAst`.
+    - `stage2_back_end` input: frontend `SourceFileAst`; output: final object AST.
 
 - `translate_AST_to_source`
     - path: `scripts/translate_AST_to_source.py`
     - input: `module_AST` JSON from stdin or file.
     - output: canonical parseable `.lp` source text.
-
-- `normalize_module_declarations`
-    - path: `scripts/normalize_module_declarations.py`
-    - input: `module-text` via stdin/`--text`, or a `module-file` path.
-    - output: normalized module text with declarations grouped into canonical ordering.
 
 - `syntax_check`
     - path: `scripts/syntax_check.py`

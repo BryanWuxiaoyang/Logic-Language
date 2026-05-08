@@ -1,5 +1,5 @@
 $import standard_library.lp
-$import module_AST.lp
+$import object_AST.lp
 
 Pred_stmt~Eq_stmt
 Eq_stmt

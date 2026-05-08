@@ -12,9 +12,9 @@ from pathlib import Path
 from typing import Any
 
 from compile_pipeline.errors import CompileError
-from compile_pipeline.module_sections import UNDECLARED_CLASS_MEMBER_OWNER_CODE, undeclared_class_member_owner_reason
+from AST import UNDECLARED_CLASS_MEMBER_OWNER_CODE, undeclared_class_member_owner_reason
 from inheritance_sources import selected_inheritance_source
-from syntax_check_common import (
+from compile_pipeline.module_parser import (
     STDIN_FILE,
     Binder,
     CheckError,
@@ -292,16 +292,6 @@ def collection_inheritance_exists(sym: str, visible_class_names: set[str]) -> bo
     if sym.endswith("s") and len(sym) > 1:
         return selected_inheritance_source(sym[:-1], visible_class_names) is not None
     return False
-
-
-def find_symbol_occurrence(statement: Any, symbol: str) -> tuple[SourcePosition, int] | None:
-    pattern = re.compile(rf"(?<![\w^']){re.escape(symbol)}(?![\w'])")
-    match = pattern.search(statement.text)
-    if match is None:
-        return None
-    if statement.located is not None and match.start() < len(statement.located.positions):
-        return statement.located.positions[match.start()], len(symbol)
-    return SourcePosition(STDIN_FILE, 1, 1), len(symbol)
 
 
 def find_bare_index_operator_symbol_occurrences(statement: Any) -> list[tuple[SourcePosition, int]]:

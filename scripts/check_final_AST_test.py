@@ -19,7 +19,7 @@ CHECKER = SCRIPTS / "check_final_AST.py"
 
 def loc(source: str = "<ast>", line: int = 1, column: int = 1, end_column: int = 2) -> dict:
     return {
-        "source": source,
+        "file_path": source,
         "line": line,
         "column": column,
         "end_line": line,
@@ -28,7 +28,7 @@ def loc(source: str = "<ast>", line: int = 1, column: int = 1, end_column: int =
 
 
 def sym(name: str | None, **extra: object) -> dict:
-    node = {"kind": "sym", "source_loc": loc()}
+    node = {"kind": "Sym", "source_loc": loc()}
     if name is not None:
         node["name"] = name
     node.update(extra)
@@ -37,7 +37,7 @@ def sym(name: str | None, **extra: object) -> dict:
 
 def func(name: str, *args: dict) -> dict:
     return {
-        "kind": "func_stmt",
+        "kind": "Func_stmt",
         "source_loc": loc(),
         "call_sym": sym(name),
         "arg_sym_list": list(args),
@@ -46,7 +46,7 @@ def func(name: str, *args: dict) -> dict:
 
 def binding(dst: str = "y", src: dict | None = None) -> dict:
     return {
-        "kind": "binding_stmt",
+        "kind": "Binding_stmt",
         "source_loc": loc(),
         "dst_sym": sym(dst),
         "src_stmt": src or func("F", sym("x")),
@@ -55,12 +55,12 @@ def binding(dst: str = "y", src: dict | None = None) -> dict:
 
 def module(bound_syms: list[dict], *, premise_bindings: list[dict] | None = None, premise_pss: list[dict] | None = None, target_pss: list[dict] | None = None) -> dict:
     return {
-        "kind": "quantified_stmt",
+        "kind": "Quantified_stmt",
         "source_loc": loc(),
         "bound_syms": bound_syms,
         "premise_binding_stmts": premise_bindings or [],
-        "premise_PSs": premise_pss or [],
-        "target_PSs": target_pss or [func("=", sym("x"), sym("x"))],
+        "premise_proposition_stmts": premise_pss or [],
+        "target_proposition_stmts": target_pss or [func("=", sym("x"), sym("x"))],
         "quantifier_sym": sym("∀"),
     }
 
@@ -196,7 +196,7 @@ def test_cli_malformed_json_and_shape_fail() -> None:
 
     bad_shape = run_cli([], stdin=json.dumps({"kind": "quantified_stmt"}))
     assert bad_shape.returncode == 1
-    assert "bound_syms" in bad_shape.stderr
+    assert "legacy AST JSON kind" in bad_shape.stderr
 
 
 def main() -> int:

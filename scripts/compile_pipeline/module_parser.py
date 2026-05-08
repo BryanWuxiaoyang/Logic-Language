@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Shared syntax analysis helpers for logic-language checkers."""
+"""Stage1-owned located parser for logic-language module text."""
 
 from __future__ import annotations
 
@@ -8,14 +8,34 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Iterable
 
-from compile_pipeline.errors import CompileError
-from compile_pipeline.module_sections import (
+from AST import (
     BRANCH_MODULE_MARKER,
+    DECL_BODY_OUTPUT_MARKER,
     DECL_OUTPUT_MARKER,
     FRESH_PREFIX,
+    GENERATED_SYM_PREFIX,
     INDENT_WIDTH,
     INDENTATION_BODY_OWNER_ERROR,
     INDENTATION_LEVEL_ERROR,
+    Call_expr,
+    Char_literal_expr,
+    Empty_expr,
+    ExprNode,
+    Module,
+    Module_ref_expr,
+    Raw_expr,
+    SourceLoc,
+    Statement,
+    Set_expr,
+    String_literal_expr,
+    SymNode,
+    Sym_expr,
+    Tuple_expr,
+    Value_literal_expr,
+    dedupe,
+)
+from compile_pipeline.errors import CompileError
+from compile_pipeline.source_syntax import (
     brace_delta,
     call_text,
     class_declaration_marker,
@@ -23,16 +43,16 @@ from compile_pipeline.module_sections import (
     class_block_prefix_lines,
     class_header_sym,
     class_member_owner_name,
-    collect_indented_block,
     coloncolon_field_declaration,
-    dedupe,
     erase_coloncolon_statement_head,
     explicit_class_header_sym,
     find_matching,
     has_top_level,
-    invalid_class_declaration_name_reason,
+    infer_syms,
+    is_generated_sym_name,
     is_bare_coloncolon_field_shorthand,
     is_plain_sym,
+    lower_member_calls,
     lower_head,
     declaration_kind_fact,
     parse_class_field_assignment,
@@ -40,7 +60,6 @@ from compile_pipeline.module_sections import (
     parse_declaration,
     parse_premise_declaration,
     reject_unsupported_coloncolon,
-    split_indent,
     split_top_level,
     strip_outer_blank_lines,
     top_level_assignment_index,
@@ -50,11 +69,13 @@ from compile_pipeline.source_utils import (
     BASIC_ESCAPES,
     IMPORT_RE,
     LATEX_CODE_RE,
+    LiteralValue,
     find_quoted_literal_end,
     is_literal_quote_start,
     is_raw_string_literal_start,
     literal_quote_index,
     load_tokens,
+    parse_literal_text,
     remove_comments,
     resolve_import_path,
 )
@@ -403,10 +424,6 @@ def normalize_literal_latex_located(located: LocatedText, tokens: dict[str, str]
     return concat_located(output)
 
 
-def has_import(text: str) -> bool:
-    return any(IMPORT_RE.match(line) for line in text.splitlines())
-
-
 def expand_for_checking(
     located: LocatedText,
     *,
@@ -738,12 +755,13 @@ class LocatedModuleParser:
             return [concat_located([synthetic_text("∀{\n", header.positions[0]), block, synthetic_text("\n}", header.positions[0])])]
         if header.text.startswith("|-"):
             branch_ps = header.slice(2).strip()
+            branch_premise_parts = [] if branch_ps.text == "else" else [synthetic_text("\n| ", header.positions[0]), branch_ps]
             return [
                 concat_located(
                     [
                         synthetic_text("∀{\n| ", header.positions[0]),
-                        synthetic_text(BRANCH_MODULE_MARKER + "\n| ", header.positions[0]),
-                        branch_ps,
+                        synthetic_text(BRANCH_MODULE_MARKER, header.positions[0]),
+                        *branch_premise_parts,
                         synthetic_text("\n", header.positions[0]),
                         self.lower_nested_block(block, visible_classes),
                         synthetic_text("\n}", header.positions[0]),
@@ -778,8 +796,14 @@ class LocatedModuleParser:
             outputs=tuple(outputs),
         )
         self.declarations_by_module[located_key(module_text)] = declaration_info
+        classifier = "Predicate" if outputs == ["bool"] else "Function"
         output = [
-            synthetic_text(declaration_kind_fact(name, outputs), origin),
+            concat_located(
+                [
+                    synthetic_text(classifier + " ~ ", origin),
+                    located_name_from_header(header, name),
+                ]
+            ),
             module_text,
         ]
         if block is not None:
@@ -1393,3 +1417,459 @@ def located_name_from_header(header: LocatedText, name: str) -> LocatedText:
     if match is None:
         return synthetic_text(name, header.positions[0])
     return header.slice(match.start(), match.end())
+@dataclass(frozen=True)
+class TypedParseResult:
+    module: Module
+    source_loc: SourceLoc
+
+
+def parse_located_module_text(
+    located: LocatedText,
+    *,
+    visible_class_names: Iterable[str] = (),
+) -> TypedParseResult:
+    if not located.text:
+        raise CompileError("empty module text")
+    parser = LocatedModuleParser(visible_class_names=visible_class_names)
+    check_module = parser.parse_module(located, default_quantifier="∀")
+    return TypedParseResult(module=check_module_to_module(check_module), source_loc=source_loc_from_located(located))
+
+
+def check_module_to_module(check_module: CheckModule) -> Module:
+    syms = dedupe([binder.text for binder in check_module.binders])
+    binder_locs_by_name: dict[str, dict[str, object]] = {}
+    for binder in check_module.binders:
+        binder_locs_by_name.setdefault(binder.text, loc_from_position(binder.position, len(binder.text)))
+    predicate_statements = [check_statement_to_statement(statement) for statement in check_module.premise_binding_statements]
+    predicate_statements.extend(check_statement_to_statement(statement) for statement in check_module.predicate_statements)
+    target_statements = [check_statement_to_statement(statement) for statement in check_module.target_statements]
+    declaration_syms: list[str] = []
+    if check_module.declaration is not None:
+        declaration_syms = [sym for sym in check_module.declaration.outputs if sym in syms]
+        marker_name = DECL_BODY_OUTPUT_MARKER if target_statements else DECL_OUTPUT_MARKER
+        predicate_statements.insert(0, synthetic_marker_statement(marker_name, list(check_module.declaration.outputs)))
+    return Module(
+        type=check_module.type,
+        syms=syms,
+        predicate_statements=predicate_statements,
+        target_statements=target_statements,
+        quantifier=check_module.quantifier,
+        declared_classes=dedupe([declaration.name for declaration in check_module.class_declarations]),
+        declaration_syms=dedupe(declaration_syms),
+        suppress_inferred_syms=check_module.suppress_inferred_syms,
+        bound_sym_locs=[binder_locs_by_name.get(sym) for sym in syms],
+        bound_sym_source_names=[source_name_for_bound_sym(sym) for sym in syms],
+        declared_class_locs={
+            declaration.name: loc_from_position(declaration.position, len(declaration.name))
+            for declaration in check_module.class_declarations
+        },
+    )
+
+
+def check_statement_to_statement(check_statement: CheckStatement) -> Statement:
+    located = check_statement.located
+    source_loc = loc_from_located(located) if located is not None else None
+    submodules = [check_module_to_module(module) for module in check_statement.sub_modules]
+    if located is not None and check_statement.text.strip():
+        expr = parse_expr_located(located)
+    elif check_statement.text.startswith("$module") and submodules:
+        expr = Module_ref_expr(source_loc, value="0")
+    else:
+        expr = None
+    return Statement(
+        sub_modules=submodules,
+        source_loc=source_loc,
+        sym_locs=sym_locs_from_expr(expr),
+        source_name=None,
+        expr=expr,
+    )
+
+
+def synthetic_marker_statement(marker: str, syms: list[str]) -> Statement:
+    return Statement(
+        source_loc={"source": "__generated__", "line": 1, "column": 1, "end_line": 1, "end_column": 1},
+        marker=marker,
+        marker_syms=syms,
+    )
+
+
+def source_name_for_bound_sym(sym: str) -> str | None:
+    if is_generated_sym_name(sym):
+        return sym[len(GENERATED_SYM_PREFIX) :]
+    return None
+
+
+def parse_expr_located(located: LocatedText) -> ExprNode:
+    located = located.strip()
+    text = located.text
+    if not text:
+        return Empty_expr(loc_from_located(located))
+    module_ref = re.fullmatch(r"\$module(?P<index>\d+)", text)
+    if module_ref is not None:
+        return Module_ref_expr(loc_from_located(located), value=module_ref.group("index"))
+    assignment_index = top_level_assignment_index(text)
+    if assignment_index is not None:
+        call_loc = loc_from_position(located.positions[assignment_index], 1)
+        return Call_expr(
+            loc_from_located(located),
+            call_sym=SymNode("=", call_loc),
+            args=[
+                parse_expr_located(located.slice(0, assignment_index).strip()),
+                parse_expr_located(located.slice(assignment_index + 1).strip()),
+            ],
+        )
+    literal = literal_from_text(text)
+    if literal is not None:
+        if literal.kind == "char":
+            return Char_literal_expr(loc_from_located(located), value=literal.value)
+        if literal.kind == "string":
+            return String_literal_expr(loc_from_located(located), value=literal.value)
+        return Value_literal_expr(loc_from_located(located), value=literal.value)
+    range_terms = parse_range_literal_located(located)
+    if range_terms is not None:
+        start, end, op_loc = range_terms
+        return Call_expr(loc_from_located(located), call_sym=SymNode("[:]", op_loc), args=[parse_expr_located(start), parse_expr_located(end)])
+    tuple_items = parse_tuple_or_list_items_located(located)
+    if tuple_items is not None:
+        return Tuple_expr(
+            loc_from_located(located),
+            items=[parse_expr_located(item) for item in tuple_items],
+        )
+    set_items = parse_set_literal_items_located(located)
+    if set_items is not None:
+        return Set_expr(
+            loc_from_located(located),
+            items=[parse_expr_located(item) for item in set_items],
+        )
+    grouped = strip_outer_grouping_parens_located(located)
+    if grouped is not None:
+        return parse_expr_located(grouped)
+    member = parse_member_call_located(located)
+    if member is not None:
+        name, call_loc, args = member
+        return Call_expr(loc_from_located(located), call_sym=SymNode(name, call_loc), args=[parse_expr_located(arg) for arg in args])
+    infix = parse_infix_located(located)
+    if infix is not None:
+        op, op_loc, lhs, rhs = infix
+        return Call_expr(loc_from_located(located), call_sym=SymNode(op, op_loc), args=[parse_expr_located(lhs), parse_expr_located(rhs)])
+    prefix = parse_prefix_unary_located(located)
+    if prefix is not None:
+        op, op_loc, operand = prefix
+        return Call_expr(loc_from_located(located), call_sym=SymNode(op, op_loc), args=[parse_expr_located(operand)])
+    index = parse_index_call_located(located)
+    if index is not None:
+        receiver, index_expr, op_loc = index
+        range_index = parse_range_terms_located(index_expr)
+        if range_index is not None:
+            start, end = range_index
+            return Call_expr(loc_from_located(located), call_sym=SymNode("[:]", op_loc), args=[parse_expr_located(receiver), parse_expr_located(start), parse_expr_located(end)])
+        return Call_expr(loc_from_located(located), call_sym=SymNode("[]", op_loc), args=[parse_expr_located(receiver), parse_expr_located(index_expr)])
+    call = parse_call_located(located)
+    if call is not None:
+        name, name_loc, args = call
+        return Call_expr(loc_from_located(located), call_sym=SymNode(name, name_loc), args=[parse_expr_located(arg) for arg in args])
+    if is_sym_like(text):
+        return Sym_expr(loc_from_located(located), sym=SymNode(text, loc_from_located(located), generated=is_generated_sym_name(text), source_name=source_name_for_bound_sym(text)))
+    return Raw_expr(loc_from_located(located), value=text)
+
+
+def literal_from_text(text: str) -> LiteralValue | None:
+    literal = parse_literal_text(text)
+    if literal is not None:
+        return literal
+    if re.fullmatch(r"\d+(?:\.\d+)?", text):
+        return LiteralValue("value", text, text)
+    return None
+
+
+def parse_tuple_or_list_items_located(located: LocatedText) -> list[LocatedText] | None:
+    text = located.text.strip()
+    if len(text) < 2:
+        return None
+    pairs = {"(": ")", "[": "]"}
+    if text[0] not in pairs or text[-1] != pairs[text[0]]:
+        return None
+    if find_matching(text, 0, text[0], text[-1]) != len(text) - 1:
+        return None
+    inner = located.strip().slice(1, -1).strip()
+    if not inner.text:
+        return [] if text[0] == "(" else None
+    items = [part.strip() for part in split_top_level_located(inner, ",") if part.text.strip()]
+    if len(items) <= 1 and "," not in inner.text:
+        return None
+    return items
+
+
+def parse_set_literal_items_located(located: LocatedText) -> list[LocatedText] | None:
+    text = located.text.strip()
+    if not (text.startswith("{") and text.endswith("}")):
+        return None
+    if find_matching(text, 0, "{", "}") != len(text) - 1:
+        return None
+    inner = located.strip().slice(1, -1).strip()
+    if "|" in inner.text or "=>" in inner.text:
+        return None
+    if not inner.text:
+        return []
+    return [part.strip() for part in split_top_level_located(inner, ",") if part.text.strip()]
+
+
+def parse_range_literal_located(located: LocatedText) -> tuple[LocatedText, LocatedText, dict[str, object]] | None:
+    stripped = located.strip()
+    if not (stripped.text.startswith("[") and stripped.text.endswith("]")):
+        return None
+    if find_matching(stripped.text, 0, "[", "]") != len(stripped.text) - 1:
+        return None
+    terms = parse_range_terms_located(stripped.slice(1, -1).strip())
+    if terms is None:
+        return None
+    return terms[0], terms[1], loc_from_position(stripped.positions[0], 3)
+
+
+def parse_range_terms_located(located: LocatedText) -> tuple[LocatedText, LocatedText] | None:
+    parts = [part.strip() for part in split_top_level_located(located, ":")]
+    if len(parts) != 2 or not parts[0].text or not parts[1].text:
+        return None
+    return parts[0], parts[1]
+
+
+def strip_outer_grouping_parens_located(located: LocatedText) -> LocatedText | None:
+    text = located.text.strip()
+    if len(text) < 2 or not text.startswith("(") or not text.endswith(")"):
+        return None
+    if find_matching(text, 0, "(", ")") != len(text) - 1:
+        return None
+    inner = located.strip().slice(1, -1).strip()
+    if not inner.text or len(split_top_level(inner.text, ",")) > 1:
+        return None
+    return inner
+
+
+INFIX_OPERATORS: tuple[tuple[str, str], ...] = (
+    ("||", "||"), ("∨", "∨"), ("&&", "&&"), ("∧", "∧"), ("!=", "!="), ("≠", "!="),
+    (">=", ">="), ("≥", ">="), ("<=", "<="), ("≤", "<="), ("∉", "∉"), ("∈", "∈"),
+    ("⊄", "⊄"), ("⊂", "⊂"), ("⊈", "⊈"), ("⊆", "⊆"), ("=", "="), (">", ">"),
+    ("<", "<"), ("~", "~"), ("∪", "∪"), ("+", "+"), ("-", "-"), ("∩", "∩"),
+    ("*", "*"), ("/", "/"),
+)
+
+
+def parse_infix_located(located: LocatedText) -> tuple[str, dict[str, object], LocatedText, LocatedText] | None:
+    matches = find_top_level_operator_matches(located.text, INFIX_OPERATORS)
+    if not matches:
+        return None
+    for index, raw, canonical in reversed(matches):
+        lhs = located.slice(0, index).strip()
+        rhs = located.slice(index + len(raw)).strip()
+        if lhs.text and rhs.text:
+            return canonical, loc_from_position(located.positions[index], len(raw)), lhs, rhs
+    return None
+
+
+def parse_prefix_unary_located(located: LocatedText) -> tuple[str, dict[str, object], LocatedText] | None:
+    text = located.text.strip()
+    for op in ("!", "-", "*"):
+        if not text.startswith(op):
+            continue
+        if text[len(op) :].startswith("("):
+            return None
+        operand = located.strip().slice(len(op)).strip()
+        if operand.text and not (op == "!" and operand.text.startswith("=")):
+            return op, loc_from_position(located.strip().positions[0], len(op)), operand
+    return None
+
+
+def parse_call_located(located: LocatedText) -> tuple[str, dict[str, object], list[LocatedText]] | None:
+    text = located.text.strip()
+    if not text.endswith(")"):
+        return None
+    open_index = text.find("(")
+    if open_index <= 0 or find_matching(text, open_index, "(", ")") != len(text) - 1:
+        return None
+    stripped = located.strip()
+    name = stripped.slice(0, open_index).strip()
+    if not is_sym_like(name.text):
+        return None
+    inner = stripped.slice(open_index + 1, -1).strip()
+    args = [] if not inner.text else [arg.strip() for arg in split_top_level_located(inner, ",")]
+    return name.text, loc_from_located(name), args
+
+
+def parse_index_call_located(located: LocatedText) -> tuple[LocatedText, LocatedText, dict[str, object]] | None:
+    text = located.text.strip()
+    if not text.endswith("]"):
+        return None
+    open_index = text.rfind("[")
+    if open_index <= 0 or find_matching(text, open_index, "[", "]") != len(text) - 1:
+        return None
+    stripped = located.strip()
+    index_expr = stripped.slice(open_index + 1, -1).strip()
+    if not index_expr.text:
+        return None
+    return stripped.slice(0, open_index).strip(), index_expr, loc_from_position(stripped.positions[open_index], 2)
+
+
+def parse_member_call_located(located: LocatedText) -> tuple[str, dict[str, object], list[LocatedText]] | None:
+    text = located.text.strip()
+    dot_index = top_level_dot_index(text)
+    if dot_index is None:
+        return None
+    stripped = located.strip()
+    receiver = stripped.slice(0, dot_index).strip()
+    rest = stripped.slice(dot_index + 1).strip()
+    match = re.match(r"(?P<name>[^\s.()[\]{}:,]+)(?P<tail>\(.*\))?$", rest.text)
+    if match is None:
+        return None
+    name = match.group("name")
+    name_loc = loc_from_position(rest.positions[0], len(name))
+    if match.group("tail"):
+        tail_start = len(name)
+        tail = rest.slice(tail_start).strip()
+        if not tail.text.startswith("(") or find_matching(tail.text, 0, "(", ")") != len(tail.text) - 1:
+            return None
+        inner = tail.slice(1, -1).strip()
+        args = [] if not inner.text else [arg.strip() for arg in split_top_level_located(inner, ",")]
+    else:
+        args = []
+    return name, name_loc, [receiver, *args]
+
+
+def top_level_dot_index(text: str) -> int | None:
+    stack: list[str] = []
+    found: int | None = None
+    index = 0
+    while index < len(text):
+        char = text[index]
+        if char in "({[":
+            stack.append({"(": ")", "{": "}", "[": "]"}[char])
+        elif stack and char == stack[-1]:
+            stack.pop()
+        elif not stack and char == ".":
+            found = index
+        index += 1
+    return found
+
+
+def find_top_level_operator_matches(text: str, operators: tuple[tuple[str, str], ...]) -> list[tuple[int, str, str]]:
+    matches: list[tuple[int, str, str]] = []
+    stack: list[str] = []
+    index = 0
+    for raw, canonical in sorted(operators, key=lambda item: len(item[0]), reverse=True):
+        pass
+    index = 0
+    ordered = sorted(operators, key=lambda item: len(item[0]), reverse=True)
+    while index < len(text):
+        char = text[index]
+        if char in "({[":
+            stack.append({"(": ")", "{": "}", "[": "]"}[char])
+            index += 1
+            continue
+        if stack and char == stack[-1]:
+            stack.pop()
+            index += 1
+            continue
+        if stack:
+            index += 1
+            continue
+        matched = False
+        for raw, canonical in ordered:
+            if text.startswith(raw, index) and is_operator_match(text, index, raw):
+                matches.append((index, raw, canonical))
+                index += len(raw)
+                matched = True
+                break
+        if not matched:
+            index += 1
+    return matches
+
+
+def is_operator_match(text: str, index: int, raw: str) -> bool:
+    previous = text[index - 1] if index > 0 else ""
+    next_index = index + len(raw)
+    nxt = text[next_index] if next_index < len(text) else ""
+    if raw in {"+", "-", "*"}:
+        previous_token = previous_nonspace_char(text, index)
+        next_token = next_nonspace_char(text, next_index)
+        return bool(previous_token and next_token) and previous_token not in "([{!+-*/=<>&|∧∨∪∩~"
+    if raw == "=":
+        return previous not in {"<", ">", "!", "="} and nxt not in {">", "="}
+    if raw in {"<", ">"}:
+        return previous != "=" and nxt != "="
+    return True
+
+
+def previous_nonspace_char(text: str, index: int) -> str:
+    cursor = index - 1
+    while cursor >= 0 and text[cursor].isspace():
+        cursor -= 1
+    return text[cursor] if cursor >= 0 else ""
+
+
+def next_nonspace_char(text: str, index: int) -> str:
+    cursor = index
+    while cursor < len(text) and text[cursor].isspace():
+        cursor += 1
+    return text[cursor] if cursor < len(text) else ""
+
+
+def split_top_level_located(located: LocatedText, separator: str) -> list[LocatedText]:
+    parts: list[LocatedText] = []
+    start = 0
+    for part in split_top_level(located.text, separator):
+        end = start + len(part)
+        parts.append(located.slice(start, end))
+        start = end + len(separator)
+    return parts
+
+
+def is_sym_like(text: str) -> bool:
+    return is_plain_sym(text) or ("^" not in text and re.fullmatch(r"[^\s()\[\]{},]+", text) is not None)
+
+
+def sym_locs_from_expr(expr: ExprNode | None) -> dict[str, dict[str, object]]:
+    locs: dict[str, dict[str, object]] = {}
+    if expr is None:
+        return locs
+    if expr.sym is not None and expr.sym.source_loc is not None:
+        locs.setdefault(expr.sym.name, loc_to_json(expr.sym.source_loc))
+    if expr.call_sym is not None and expr.call_sym.source_loc is not None:
+        locs.setdefault(expr.call_sym.name, loc_to_json(expr.call_sym.source_loc))
+    for child in [*expr.args, *expr.items]:
+        locs.update(sym_locs_from_expr(child))
+    return locs
+
+
+def loc_from_position(position: SourcePosition, width: int = 1) -> dict[str, object]:
+    return {
+        "source": position.file,
+        "line": position.line,
+        "column": position.column,
+        "end_line": position.line,
+        "end_column": position.column + max(width, 1),
+    }
+
+
+def loc_from_located(located: LocatedText) -> dict[str, object]:
+    stripped = located.strip()
+    if not stripped.positions:
+        return {"source": "__stdin__", "line": 1, "column": 1, "end_line": 1, "end_column": 1}
+    first = stripped.positions[0]
+    last = stripped.positions[-1]
+    return {
+        "source": first.file,
+        "line": first.line,
+        "column": first.column,
+        "end_line": last.line,
+        "end_column": last.column + 1,
+    }
+
+
+def source_loc_from_located(located: LocatedText) -> SourceLoc:
+    loc = loc_from_located(located)
+    return SourceLoc(str(loc["source"]), int(loc["line"]), int(loc["column"]), int(loc["end_line"]), int(loc["end_column"]))
+
+
+def loc_to_json(loc: object) -> dict[str, object]:
+    if hasattr(loc, "to_json"):
+        return loc.to_json()  # type: ignore[no-any-return]
+    return dict(loc)  # type: ignore[arg-type]

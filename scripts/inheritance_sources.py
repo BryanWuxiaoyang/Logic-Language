@@ -6,13 +6,6 @@ import re
 
 
 SYMBOL_SOURCE = "Symbol"
-LITERAL_CLASSIFIERS = {
-    "tuple_literal_stmt": "Tuple",
-    "set_literal_stmt": "Set",
-    "value_literal_stmt": "Value",
-    "char_literal_stmt": "Char",
-    "str_literal_stmt": "String",
-}
 CAPITAL_INTRINSIC_SYMS = {
     SYMBOL_SOURCE,
     "Value",

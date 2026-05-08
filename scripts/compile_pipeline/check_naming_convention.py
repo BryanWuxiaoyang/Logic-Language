@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Stage-2 naming-convention diagnostics for logic-language source ASTs."""
+"""Naming-convention diagnostics for logic-language source ASTs."""
 
 from __future__ import annotations
 
@@ -15,8 +15,8 @@ SCRIPTS_DIR = Path(__file__).resolve().parents[1]
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
-from compile_pipeline.ast_nodes import SourceFileAst, SourceLoc
-from compile_pipeline.module_sections import Module, Statement, is_generated_sym_name, is_plain_sym
+from AST import Call_expr, Module, SourceFileAst, SourceLoc, Statement, Sym_expr
+from compile_pipeline.source_syntax import is_generated_sym_name, is_plain_sym
 
 
 SPECIAL_CALLABLE_NAMES = {"-", "+", "*", "/", "=", "~", "!=", "?", "<=", "?", ">=", "?", "<", ">", "?", "?", "?", "?", "?", "?", "?", "?", "[]", "[:]"}
@@ -52,7 +52,6 @@ class NamingConventionChecker:
         self.diagnostic_keys: set[tuple[str, int, int, str, str]] = set()
         self.roles: dict[str, set[str]] = {}
         self.role_locs: dict[tuple[str, str], tuple[int, int]] = {}
-        self.lines = ast.text.splitlines()
 
     def check(self) -> list[dict[str, object]]:
         for module in self.ast.modules:
@@ -78,7 +77,7 @@ class NamingConventionChecker:
             self.check_statement(statement, set(module.declared_classes), local_bound)
 
     def check_statement(self, statement: Statement, declared_classes: set[str], local_bound: set[str]) -> None:
-        for classifier, name, premise in classifier_facts(statement.text):
+        for classifier, name, premise in classifier_facts(statement):
             if premise or name in declared_classes or name in local_bound:
                 continue
             if classifier in {"Function", "Predicate"}:
@@ -131,11 +130,12 @@ class NamingConventionChecker:
         )
 
     def find_name_position(self, name: str) -> tuple[int, int]:
-        pattern = re.compile(rf"(?<![\w^']){re.escape(name)}(?![\w'])")
-        for line_no, line in enumerate(self.lines):
-            match = pattern.search(line)
-            if match is not None:
-                return line_no, match.start()
+        for module in self.ast.modules:
+            lowered = getattr(module, "lowered_module", None)
+            if isinstance(lowered, Module):
+                loc = find_sym_loc_in_module(lowered, name)
+                if loc is not None:
+                    return loc_position(loc)
         loc = self.ast.source_loc
         return loc_position(loc)
 
@@ -144,16 +144,28 @@ def check_naming_convention(ast: SourceFileAst) -> list[dict[str, object]]:
     return NamingConventionChecker(ast).check()
 
 
-def classifier_facts(text: str) -> Iterable[tuple[str, str, bool]]:
-    stripped = text.strip()
-    premise = False
-    if stripped.startswith("|") and not stripped.startswith("|-"):
-        premise = True
-        stripped = stripped[1:].strip()
-    match = re.fullmatch(r"(?P<classifier>[^\s]+)\s*~\s*(?P<name>[^\s,{}()]+)", stripped)
-    if match is None:
+def classifier_facts(statement: Statement) -> Iterable[tuple[str, str, bool]]:
+    expr = statement.expr
+    if not isinstance(expr, Call_expr) or expr.call_sym is None or expr.call_sym.name != "~" or len(expr.args) != 2:
         return []
-    return [(match.group("classifier"), match.group("name"), premise)]
+    lhs, rhs = expr.args
+    if isinstance(lhs, Sym_expr) and lhs.sym is not None and isinstance(rhs, Sym_expr) and rhs.sym is not None:
+        return [(lhs.sym.name, rhs.sym.name, False)]
+    return []
+
+
+def find_sym_loc_in_module(module: Module, name: str) -> SourceLoc | dict[str, Any] | None:
+    for index, sym in enumerate(module.syms):
+        if sym == name and index < len(module.bound_sym_locs):
+            return module.bound_sym_locs[index]
+    for statement in [*module.predicate_statements, *module.target_statements]:
+        if name in statement.sym_locs:
+            return statement.sym_locs[name]
+        for submodule in statement.sub_modules:
+            loc = find_sym_loc_in_module(submodule, name)
+            if loc is not None:
+                return loc
+    return None
 
 
 def is_class_name(name: str) -> bool:
@@ -203,15 +215,15 @@ def output_payload(entries: list[dict[str, object]]) -> dict[str, object]:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Check stage-2 logic-language naming conventions.")
+    parser = argparse.ArgumentParser(description="Check logic-language naming conventions.")
     parser.add_argument("file", nargs="?", type=Path, help="module file; defaults to stdin")
     parser.add_argument("--text", help="module text; overrides file/stdin")
     parser.add_argument("--base-dir", type=Path, default=Path.cwd(), help="base directory for $import")
     parser.add_argument("--pretty", action="store_true", help="pretty-print JSON output")
     args = parser.parse_args()
 
-    from compile_pipeline.stage1_normalize_source import run as normalize_source
-    from compile_pipeline.stage2_desugar_module_text import run as desugar_source
+    from compile_pipeline.front_end_source_loader import run as normalize_source
+    from compile_pipeline.front_end_desugar import run as desugar_source
 
     if args.text is not None:
         source = args.text
@@ -225,8 +237,8 @@ def main() -> int:
         source = sys.stdin.read()
         source_name = "__stdin__"
         allow_imports = False
-    normalized = normalize_source(source, args.base_dir, source=source_name, allow_imports=allow_imports)
-    desugared = desugar_source(normalized, args.base_dir)
+    source_ast = normalize_source(source, args.base_dir, source=source_name, allow_imports=allow_imports)
+    desugared = desugar_source(source_ast, args.base_dir)
     payload = output_payload(desugared.diagnostics)
     json.dump(payload, sys.stdout, ensure_ascii=False, indent=2 if args.pretty else None)
     sys.stdout.write("\n")

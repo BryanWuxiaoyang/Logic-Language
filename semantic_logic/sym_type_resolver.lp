@@ -1,11 +1,11 @@
-$import module_AST.lp
-$import module_AST_pred_stmts.lp
+$import object_AST.lp
+$import object_AST_pred_stmts.lp
 
 Sym_type
-Sym_type ~ class_sym_type
-Sym_type ~ pure_sym_type
-Sym_type ~ func_sym_type
-Sym_type ~ pred_sym_type
+Sym_type ~ Class_sym_type
+Sym_type ~ Pure_sym_type
+Sym_type ~ Func_sym_type
+Sym_type ~ Pred_sym_type
 
 Stmt::is_inheriting_function: (_stmt, _sym) => _bool
 
@@ -29,12 +29,12 @@ Stmt::is_pure_sym: (_stmt, _sym) => _bool
 
 Stmt::get_sym_type: (_stmt, _sym) => _sym_type
     |- _stmt.is_class_sym(_sym)
-        _sym_type = class_sym_type
+        _sym_type = Class_sym_type
     |- !(_stmt.is_class_sym(_sym))
         |- _stmt.is_func_sym(_sym)
             |- _stmt.is_pred_sym(_sym)
-                _sym_type = pred_sym_type
+                _sym_type = Pred_sym_type
             |- !(_stmt.is_pred_sym(_sym))
-                _sym_type = func_sym_type
+                _sym_type = Func_sym_type
         |- !(_stmt.is_func_sym(_sym))
-            _sym_type = pure_sym_type
+            _sym_type = Pure_sym_type

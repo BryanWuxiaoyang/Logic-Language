@@ -70,10 +70,6 @@ def format_stage2_diagnostics_error(diagnostics: list[dict[str, object]]) -> str
     return "\n".join(lines)
 
 
-def has_error_diagnostics(diagnostics: list[dict[str, object]]) -> bool:
-    return any(entry.get("type") == "error" for entry in diagnostics)
-
-
 def run_compile_pipeline(
     text: str,
     base_dir: Path | str = ".",
@@ -81,36 +77,24 @@ def run_compile_pipeline(
     source: str = "__stdin__",
     allow_imports: bool = True,
 ) -> CompilePipelineResult:
-    from compile_pipeline.stage1_normalize_source import run as normalize_source
-    from compile_pipeline.stage2_desugar_module_text import run as desugar_source
-    from compile_pipeline.stage3_parse_module_sections import run as parse_sections
-    from compile_pipeline.stage4_parse_statements import run as parse_statements
-    from compile_pipeline.stage5_lower_to_module_ast import run as lower_to_ast
-    from compile_pipeline.declaration_locations import annotate_declaration_bound_locs
+    from compile_pipeline.stage1_front_end import run as run_front_end
+    from compile_pipeline.stage2_back_end import run as run_back_end
 
-    normalized = normalize_source(text, base_dir, source=source, allow_imports=allow_imports)
-    desugared = desugar_source(normalized, Path(base_dir).resolve())
-    if has_error_diagnostics(desugared.diagnostics):
-        raise Stage2DiagnosticsCompileError(desugared.diagnostics, [normalized.summary(), desugared.summary()])
-    sections = parse_sections(desugared.ast)
-    annotate_declaration_bound_locs(sections.module, normalized.text, normalized.source)
-    statements = parse_statements(sections)
-    lowered = lower_to_ast(statements, normalized.loc)
+    front_end = run_front_end(text, base_dir, source=source, allow_imports=allow_imports)
+    back_end = run_back_end(front_end)
+    ast_json = back_end.to_json()
     stage_summaries = [
-        normalized.summary(),
-        desugared.summary(),
-        sections.summary(),
-        statements.summary(),
-        lowered.summary(),
+        front_end.summary(),
+        back_end.summary(),
     ]
-    diagnostics = FinalAstChecker().check(lowered.ast)
+    diagnostics = FinalAstChecker().check(ast_json)
     if diagnostics:
         raise FinalAstValidationCompileError(
             format_final_ast_validation_error(diagnostics),
             stage_summaries,
             diagnostics,
         )
-    return CompilePipelineResult(ast=lowered.ast, stage_summaries=stage_summaries)
+    return CompilePipelineResult(ast=ast_json, stage_summaries=stage_summaries)
 
 
 def compile_module(text: str, base_dir: Path | str = ".") -> dict[str, Any]:

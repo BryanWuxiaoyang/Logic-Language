@@ -18,10 +18,7 @@ from compile_module import CompileError, run_compile_pipeline
 from translate_AST_to_source import translate_ast_to_source
 
 
-PAIR_RE = re.compile(
-    r"^##\s+(?P<name>[^\n]+)\n\s*\"(?P<source>.*?)\"\s*=\s*\"(?P<expected>.*?)\"",
-    flags=re.MULTILINE | re.DOTALL,
-)
+HEADING_RE = re.compile(r"^##\s+(?P<name>.+?)\s*$")
 
 
 @dataclass(frozen=True)
@@ -32,14 +29,47 @@ class GoldenPair:
 
 
 def parse_pairs(text: str) -> list[GoldenPair]:
-    return [
-        GoldenPair(
-            match.group("name").strip(),
-            trim_snippet(match.group("source")),
-            trim_snippet(match.group("expected")),
-        )
-        for match in PAIR_RE.finditer(text)
-    ]
+    lines = text.splitlines()
+    pairs: list[GoldenPair] = []
+    index = 0
+    while index < len(lines):
+        match = HEADING_RE.match(lines[index])
+        if match is None:
+            index += 1
+            continue
+        name = match.group("name").strip()
+        index += 1
+        while index < len(lines) and not lines[index].strip():
+            index += 1
+        if index >= len(lines) or lines[index].strip() != '"':
+            index += 1
+            continue
+        source, index = read_quoted_block(lines, index)
+        while index < len(lines) and not lines[index].strip():
+            index += 1
+        if index >= len(lines) or lines[index].strip() != "=":
+            continue
+        index += 1
+        while index < len(lines) and not lines[index].strip():
+            index += 1
+        if index >= len(lines) or lines[index].strip() != '"':
+            continue
+        expected, index = read_quoted_block(lines, index)
+        pairs.append(GoldenPair(name, trim_snippet(source), trim_snippet(expected)))
+    return pairs
+
+
+def read_quoted_block(lines: list[str], start: int) -> tuple[str, int]:
+    if lines[start].strip() != '"':
+        raise ValueError("expected quoted block")
+    index = start + 1
+    block: list[str] = []
+    while index < len(lines):
+        if lines[index].strip() == '"':
+            return "\n".join(block), index + 1
+        block.append(lines[index])
+        index += 1
+    raise ValueError("unterminated quoted block")
 
 
 def trim_snippet(text: str) -> str:

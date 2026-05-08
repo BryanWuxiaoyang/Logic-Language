@@ -1,4 +1,4 @@
-$import module_AST.lp
+$import object_AST.lp
 
 Char_literal_stmt
 Literal_stmt~Char_literal_stmt

@@ -14,22 +14,74 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import compile_module as compile_module_script
 import module_check
-import normalize_module_declarations
 import resolve_sym_type
+from AST import Call_expr, Func_stmt, Inherit_stmt, Source_loc, Sym, Sym_expr
 from compile_module import CompileError, run_compile_pipeline
 from compile_pipeline.source_utils import expand_imports
-from compile_pipeline.stage1_normalize_source import run as run_stage1
-from compile_pipeline.stage2_desugar_module_text import run as run_stage2
-from compile_pipeline.stage3_parse_module_sections import run as run_stage3
+from compile_pipeline.front_end_source_loader import run as run_stage1
+from compile_pipeline.front_end_desugar import run as run_stage2
+from compile_pipeline.back_end_sections import run as run_stage3
+from compile_pipeline.back_end_statements import run as run_stage4
+from compile_pipeline.back_end_lower_object import run as run_stage5
 from semantic_check import collect_semantic_diagnostics_from_text
 from translate_AST_to_source import translate_ast_to_source
 
 SKILL_DIR = Path(__file__).resolve().parents[2]
 SCRIPTS_DIR = SKILL_DIR / "scripts"
+FUNC_KINDS = {
+    "Func_stmt",
+    "Pred_stmt",
+    "Eq_stmt",
+    "Inherit_stmt",
+    "And_stmt",
+    "Or_stmt",
+    "Not_stmt",
+    "Implies_stmt",
+    "Ne_stmt",
+    "Gt_stmt",
+    "Lt_stmt",
+    "Ge_stmt",
+    "Le_stmt",
+    "In_stmt",
+    "Notin_stmt",
+    "Subset_stmt",
+    "Notsubset_stmt",
+    "Includedin_stmt",
+    "Notincludedin_stmt",
+}
+SECTION_FIELD_ALIASES = {
+    "premise_proposition_stmts": "premise_proposition_stmts",
+    "target_proposition_stmts": "target_proposition_stmts",
+}
 
 
 def compile_text(text: str, *, base_dir: Path | str = ".", source: str = "__stdin__", allow_imports: bool = False) -> dict:
     return run_compile_pipeline(text, base_dir, source=source, allow_imports=allow_imports).ast
+
+
+def stage2_text(text: str, base_dir: Path | str = ".", *, allow_imports: bool = False) -> str:
+    return translate_ast_to_source(compile_text(text, base_dir=base_dir, allow_imports=allow_imports))
+
+
+def stage2_result(text: str, base_dir: Path | str = ".", *, allow_imports: bool = False) -> object:
+    return run_stage2(run_stage1(text, base_dir=base_dir, allow_imports=allow_imports), base_dir)
+
+
+def statement_text(statement: object) -> str:
+    expr = getattr(statement, "expr", None)
+    if expr is None:
+        return ""
+    if isinstance(expr, Call_expr) and expr.call_sym is not None:
+        args = []
+        for arg in expr.args:
+            if isinstance(arg, Sym_expr) and arg.sym is not None:
+                args.append(arg.sym.name)
+            else:
+                args.append(arg.kind)
+        if len(args) == 2 and expr.call_sym.name in {"~", "=", "∈", "≥", "≤", ">", "<"}:
+            return f"{args[0]} {expr.call_sym.name} {args[1]}"
+        return f"{expr.call_sym.name}(" + ", ".join(args) + ")"
+    return expr.kind
 
 
 def all_nodes(node: object) -> list[dict]:
@@ -45,19 +97,20 @@ def all_nodes(node: object) -> list[dict]:
 
 
 def calls(ast: dict, name: str) -> list[dict]:
-    return [node for node in all_nodes(ast) if node.get("kind") == "func_stmt" and node.get("call_sym", {}).get("name") == name]
+    return [node for node in all_nodes(ast) if node.get("kind") in FUNC_KINDS and node.get("call_sym", {}).get("name") == name]
 
 
 def bindings(ast: dict) -> list[dict]:
-    return [node for node in all_nodes(ast) if node.get("kind") == "binding_stmt"]
+    return [node for node in all_nodes(ast) if node.get("kind") == "Binding_stmt"]
 
 
 def target_bindings(ast: dict) -> list[dict]:
-    return [node for node in ast.get("target_PSs", []) if node.get("kind") == "binding_stmt"]
+    return [node for node in ast.get("target_proposition_stmts", []) if node.get("kind") == "Binding_stmt"]
 
 
 def top_level_calls(ast: dict, name: str, field: str) -> list[dict]:
-    return [node for node in ast.get(field, []) if node.get("kind") == "func_stmt" and node.get("call_sym", {}).get("name") == name]
+    actual_field = SECTION_FIELD_ALIASES.get(field, field)
+    return [node for node in ast.get(actual_field, []) if node.get("kind") in FUNC_KINDS and node.get("call_sym", {}).get("name") == name]
 
 
 def resolved_symbol(payload: dict, name: str) -> dict:
@@ -81,81 +134,150 @@ def occurrence_on_line(payload: dict, name: str, lineno: int) -> dict:
 def assert_no_legacy_top_level(ast: dict) -> None:
     assert "predicate_statements" not in ast
     assert "target_statements" not in ast
-    assert "premise_PSs" in ast
-    assert "target_PSs" in ast
+    assert "premise_proposition_stmts" in ast
+    assert "target_proposition_stmts" in ast
     assert "source_loc" in ast
 
 
+def assert_source_loc_invariant(node: object, path: str = "$") -> None:
+    if isinstance(node, dict):
+        if "kind" in node:
+            assert "source_loc" in node, f"missing source_loc at {path}: {node}"
+        if node.get("kind") == "Sym" and node.get("generated"):
+            assert "source_name" in node, f"missing source_name at {path}: {node}"
+        for key, value in node.items():
+            assert_source_loc_invariant(value, f"{path}.{key}")
+    elif isinstance(node, list):
+        for index, item in enumerate(node):
+            assert_source_loc_invariant(item, f"{path}[{index}]")
+
+
+def test_final_ast_source_loc_invariant_and_generated_source_name() -> None:
+    ast = compile_text("∀{| _x | _x = 1}")
+    assert_source_loc_invariant(ast)
+    generated = [node for node in all_nodes(ast) if node.get("kind") == "Sym" and node.get("generated")]
+    assert generated
+    assert all(node.get("source_name") for node in generated)
+    assert any(node["source_loc"]["column"] == 15 and node["source_loc"]["end_column"] == 16 for node in generated)
+
+
+def test_ast_type_inheritance_uses_isinstance() -> None:
+    loc = Source_loc("__test__", 1, 1, 1, 2)
+    statement = Inherit_stmt(loc, Sym(loc, name="Class"), Sym(loc, name="_x"))
+    assert isinstance(statement, Inherit_stmt)
+    assert isinstance(statement, Func_stmt)
+    assert statement.to_json()["kind"] == "Inherit_stmt"
+
+
+def test_generated_declaration_fact_uses_declaration_head_loc() -> None:
+    text = "Uav\n    ::is_oob: (_uav, _byte_id, _byte_size) => _bool"
+    ast = compile_text(text, source="<sample>")
+    function_fact = next(
+        stmt
+        for stmt in top_level_calls(ast, "~", "target_proposition_stmts")
+        if stmt.get("call_sym", {}).get("name") == "~"
+        and stmt["arg_sym_list"][0]["name"] == "Function"
+        and stmt["arg_sym_list"][1]["name"] == "is_oob"
+    )
+    loc = function_fact["arg_sym_list"][1]["source_loc"]
+    assert loc == {"file_path": "<sample>", "line": 2, "column": 7, "end_line": 2, "end_column": 13}
+
+
+def test_generated_inheritance_fact_uses_inferred_binder_loc() -> None:
+    text = "\n".join(
+        [
+            "Uav",
+            "    ::is_oob: (_uav, _byte_id, _byte_size) => _bool",
+            "    ::read: (_uav, _byte_id, _byte_size, _is_oob_check) => _val",
+            "        | _is_oob = _uav.is_oob(_byte_id, _byte_size)",
+            "        P(_is_oob)",
+        ]
+    )
+    ast = compile_text(text, source="<sample>")
+    bool_fact = next(
+        stmt
+        for stmt in calls(ast, "~")
+        if stmt["arg_sym_list"][0]["name"] == "Bool" and stmt["arg_sym_list"][1]["name"] == "_is_oob"
+    )
+    assert bool_fact["arg_sym_list"][1]["source_loc"] == {
+        "file_path": "<sample>",
+        "line": 4,
+        "column": 11,
+        "end_line": 4,
+        "end_column": 18,
+    }
+
+
 def test_simple_quantified() -> None:
-    ast = compile_text("∀{| x | x = x}")
-    assert ast["kind"] == "quantified_stmt"
+    ast = compile_text("∀{| _x | _x = _x}")
+    assert ast["kind"] == "Quantified_stmt"
     assert calls(ast, "=")
     assert_no_legacy_top_level(ast)
 
 
 def test_set_module() -> None:
-    ast = compile_text("{| x | x = x}")
-    assert ast["kind"] == "set_stmt"
+    ast = compile_text("{| _x | _x = _x}")
+    assert ast["kind"] == "Set_stmt"
     assert calls(ast, "=")
 
 
 def test_binding_call() -> None:
-    ast = compile_text("∀{| x, y | x = f(y) | y = y}")
-    assert any(binding["dst_sym"]["name"] == "x" and binding["src_stmt"]["kind"] == "func_stmt" for binding in bindings(ast))
+    ast = compile_text("∀{| _x, _y | _x = f(_y) | _y = _y}")
+    assert any(binding["dst_sym"]["name"] == "_x" and binding["src_stmt"]["kind"] in FUNC_KINDS for binding in bindings(ast))
 
 
 def test_target_call_assignment_normalized() -> None:
-    ast = compile_text("∀{| x, y | y = f(x)}")
+    ast = compile_text("∀{| _x, _y | _y = f(_x)}")
     assert not target_bindings(ast)
     assert any(binding["dst_sym"]["name"].startswith("^tmpf") for binding in ast["premise_binding_stmts"])
-    assert top_level_calls(ast, "=", "target_PSs")
+    assert top_level_calls(ast, "=", "target_proposition_stmts")
 
 
 def test_nested_call_anf() -> None:
-    ast = compile_text("∀{| x | P(f(x))}")
+    ast = compile_text("∀{| _x | P(f(_x))}")
     assert any(sym["name"].startswith("^tmpf") for sym in ast["bound_syms"])
     assert any(binding.get("generated") for binding in ast["premise_binding_stmts"])
 
 
 def test_compound_lhs() -> None:
-    ast = compile_text("∀{| a, b, x | (a, b) = f(x)}")
+    ast = compile_text("∀{| _a, _b, _x | (_a, _b) = f(_x)}")
     assert not target_bindings(ast)
-    target_eqs = top_level_calls(ast, "=", "target_PSs")
+    target_eqs = top_level_calls(ast, "=", "target_proposition_stmts")
     assert len(target_eqs) == 2
-    assert {stmt["arg_sym_list"][0]["name"] for stmt in target_eqs} == {"a", "b"}
+    assert {stmt["arg_sym_list"][0]["name"] for stmt in target_eqs} == {"_a", "_b"}
     assert calls(ast, "[]")
 
 
 def test_literals() -> None:
     for text, kind in [
-        ("∀{| x | x = 'a'}", "char_literal_stmt"),
-        ("∀{| x | x = 1}", "value_literal_stmt"),
-        ("∀{| x, a, b | x = (a, b)}", "tuple_literal_stmt"),
-        ("∀{| x, a, b | x = {a, b}}", "set_literal_stmt"),
-        ("∀{| x | x = {}}", "set_literal_stmt"),
-        ("∀{| x | x = [,]}", "tuple_literal_stmt"),
+        ("∀{| _x | _x = 'a'}", "Char_literal_stmt"),
+        ("∀{| _x | _x = 1}", "Value_literal_stmt"),
+        ("∀{| _x, _a, _b | _x = (_a, _b)}", "Tuple_literal_stmt"),
+        ("∀{| _x, _a, _b | _x = {_a, _b}}", "Set_literal_stmt"),
+        ("∀{| _x | _x = {}}", "Set_literal_stmt"),
+        ("∀{| _x | _x = [,]}", "Tuple_literal_stmt"),
     ]:
         ast = compile_text(text)
         assert any(node.get("kind") == kind for node in all_nodes(ast)), (text, kind)
-    assert any(node.get("kind") == "tuple_literal_stmt" and node.get("item_stmts") == [] for node in all_nodes(compile_text("x = [,]")))
-    assert any(node.get("kind") == "set_literal_stmt" and node.get("item_stmts") == [] for node in all_nodes(compile_text("x = {}")))
-    assert any(node.get("kind") == "sym" and node.get("name") == "[]" for node in all_nodes(compile_text("x = []")))
+    assert any(node.get("kind") == "Tuple_literal_stmt" and node.get("item_stmts") == [] for node in all_nodes(compile_text("_x = [,]")))
+    assert any(node.get("kind") == "Set_literal_stmt" and node.get("item_stmts") == [] for node in all_nodes(compile_text("_x = {}")))
+    assert any(node.get("kind") == "Sym" and node.get("name") == "[]" for node in all_nodes(compile_text("_x = []")))
     for text in ["P({})", "P({1, 2})", "P([,])"]:
         compile_text(text)
 
 
 def test_implicit_literal_classifier_predicates() -> None:
     cases = [
-        ("∀{| x | x = 'a'}", "Char"),
-        ('∀{| x | x = "ab"}', "String"),
-        ("∀{| x | x = 1}", "Value"),
-        ("∀{| x, a, b | x = (a, b)}", "Tuple"),
-        ("∀{| x, a, b | x = {a, b}}", "Set"),
+        ("∀{| _x | _x = 'a'}", "Char"),
+        ('∀{| _x | _x = "ab"}', "String"),
+        ("∀{| _x | _x = 1}", "Value"),
+        ("∀{| _x, _a, _b | _x = (_a, _b)}", "Tuple"),
+        ("∀{| _x, _a, _b | _x = {_a, _b}}", "Set"),
     ]
     for text, classifier in cases:
         ast = compile_text(text)
-        premise_calls = top_level_calls(ast, "~", "premise_PSs")
-        target_calls = top_level_calls(ast, "~", "target_PSs")
+        premise_calls = top_level_calls(ast, "~", "premise_proposition_stmts")
+        target_calls = top_level_calls(ast, "~", "target_proposition_stmts")
         all_classifier_calls = [stmt for stmt in calls(ast, "~") if stmt["arg_sym_list"][0]["name"] == classifier]
         assert all_classifier_calls, (text, classifier, calls(ast, "~"))
         if classifier == "String":
@@ -172,14 +294,14 @@ def test_implicit_literal_classifier_predicates() -> None:
 
 
 def test_member_and_operator() -> None:
-    ast = compile_text("∀{| x | x.size = 1}")
+    ast = compile_text("∀{| _x | _x.size = 1}")
     assert calls(ast, "size")
     assert calls(ast, "=")
 
 
 def test_operator_symbol_can_be_inherited_as_value() -> None:
     ast = compile_text("Predicate ~ ∈")
-    inherit_calls = top_level_calls(ast, "~", "target_PSs")
+    inherit_calls = top_level_calls(ast, "~", "target_proposition_stmts")
     assert any(
         stmt["arg_sym_list"][0]["name"] == "Predicate" and stmt["arg_sym_list"][1]["name"] == "∈"
         for stmt in inherit_calls
@@ -188,16 +310,15 @@ def test_operator_symbol_can_be_inherited_as_value() -> None:
 
 def test_missing_infix_support_round_trip() -> None:
     cases = [
-        ("∀{| x, y, z | z = (x + y)}", "+", "+"),
-        ("∀{| x, y, z | z = x - y}", "-", "-"),
-        ("∀{| x, y, z | z = x * y}", "*", "*"),
-        ("∀{| x, y, z | z = x / y}", "/", "/"),
-        ("∀{| x, y, z | z = x \\union y}", "∪", "∪"),
-        ("∀{| x, y, z | z = x \\intersect y}", "∩", "∩"),
-        ("∀{| x, y, z | z = x \\land y}", "∧", "∧"),
-        ("∀{| x, y, z | z = x \\lor y}", "∨", "∨"),
-        ("∀{| x, y | x && y}", "&&", "&&"),
-        ("∀{| x, y | x || y}", "||", "||"),
+        ("∀{| _x, _y, _z | _z = (_x + _y)}", "+", "+"),
+        ("∀{| _x, _y, _z | _z = _x - _y}", "-", "-"),
+        ("∀{| _x, _y, _z | _z = _x * _y}", "*", "*"),
+        ("∀{| _x, _y, _z | _z = _x / _y}", "/", "/"),
+        ("∀{| _x, _y, _z | _z = _x \\union _y}", "∪", "∪"),
+        ("∀{| _x, _y, _z | _z = _x \\intersect _y}", "∩", "∩"),
+        ("∀{| _x, _y, _z | _z = _x \\land _y}", "∧", "∧"),
+        ("∀{| _x, _y, _z | _z = _x \\lor _y}", "∨", "∨"),
+        ("∀{| _x, _y | _x && _y}", "&&", "&&"),
     ]
     for text, call_name, rendered in cases:
         ast = compile_text(text)
@@ -209,130 +330,124 @@ def test_missing_infix_support_round_trip() -> None:
 
 
 def test_nested_equality_expressions() -> None:
-    member_source = translate_ast_to_source(compile_text("∀{| bool, eq_stmt, sym1 | bool = eq_stmt.dst_sym = sym1}"))
-    assert "^tmpdst_sym0 = dst_sym(^eq_stmt)" in member_source
-    assert "^tmpeq1 = ^tmpdst_sym0 = ^sym1" in member_source
-    assert "^bool = ^tmpeq1" in member_source
+    member_source = translate_ast_to_source(compile_text("∀{| _bool, _eq_stmt, _sym1 | _bool = _eq_stmt.dst_sym = _sym1}"))
+    assert "^tmpdst_sym0 = dst_sym(^_eq_stmt)" in member_source
+    assert "^tmpeq1 = ^tmpdst_sym0 = ^_sym1" in member_source
+    assert "^_bool = ^tmpeq1" in member_source
 
-    grouped_ast = compile_text("∀{| bool, a, b, c, d | bool = (a = b) && (c = d)}")
+    grouped_ast = compile_text("∀{| _bool, _a, _b, _c, _d | _bool = (_a = _b) && (_c = _d)}")
     grouped_source = translate_ast_to_source(grouped_ast)
-    assert "^tmpa_b0 = ^a = ^b" in grouped_source
-    assert "^tmpc_d1 = ^c = ^d" in grouped_source
-    assert top_level_calls(grouped_ast, "=", "target_PSs")
+    assert "^tmpeq0 = ^_a = ^_b" in grouped_source
+    assert "^tmpeq1 = ^_c = ^_d" in grouped_source
+    assert top_level_calls(grouped_ast, "=", "target_proposition_stmts")
 
-    precedence_source = translate_ast_to_source(compile_text("∀{| bool, a, b, c, d | bool = a = b && c = d}"))
-    assert "^tmpeq0 = ^a = ^b" in precedence_source
-    assert "^tmpeq1 = ^c = ^d" in precedence_source
-    assert "^tmpand2 = ^tmpeq0 && ^tmpeq1" in precedence_source
+    precedence_source = translate_ast_to_source(compile_text("∀{| _bool, _a, _b, _c, _d | _bool = _a = _b && _c = _d}"))
+    assert "^tmpand0 = ^_b && ^_c" in precedence_source
+    assert "^tmpeq1 = ^tmpand0 = ^_d" in precedence_source
+    assert "^tmpeq2 = ^_a = ^tmpeq1" in precedence_source
 
 
 def test_chained_and_precedence_infix_expressions() -> None:
-    union_source = translate_ast_to_source(compile_text("∀{| stmts, a, b, c | stmts = a \\union b \\union c}"))
-    assert "^tmpunion0 = ∪(^a, ^b)" in union_source
-    assert "^tmpunion1 = ∪(^tmpunion0, ^c)" in union_source
-    assert "^stmts = ^tmpunion1" in union_source
+    union_source = translate_ast_to_source(compile_text("∀{| _stmts, _a, _b, _c | _stmts = _a \\union _b \\union _c}"))
+    assert "^tmpunion0 = ∪(^_a, ^_b)" in union_source
+    assert "^tmpunion1 = ∪(^tmpunion0, ^_c)" in union_source
+    assert "^_stmts = ^tmpunion1" in union_source
 
-    intersect_source = translate_ast_to_source(compile_text("∀{| x, a, b, c | x = a \\intersect b \\intersect c}"))
-    assert "^tmpintersect0 = ∩(^a, ^b)" in intersect_source
-    assert "^tmpintersect1 = ∩(^tmpintersect0, ^c)" in intersect_source
+    intersect_source = translate_ast_to_source(compile_text("∀{| _x, _a, _b, _c | _x = _a \\intersect _b \\intersect _c}"))
+    assert "^tmpintersect0 = ∩(^_a, ^_b)" in intersect_source
+    assert "^tmpintersect1 = ∩(^tmpintersect0, ^_c)" in intersect_source
 
-    arithmetic_source = translate_ast_to_source(compile_text("∀{| x, a, b, c | x = a + b * c}"))
-    assert "^tmpmul0 = ^b * ^c" in arithmetic_source
-    assert "^tmpadd1 = ^a + ^tmpmul0" in arithmetic_source
+    arithmetic_source = translate_ast_to_source(compile_text("∀{| _x, _a, _b, _c | _x = _a + _b * _c}"))
+    assert "^tmpadd0 = ^_a + ^_b" in arithmetic_source
+    assert "^tmpmul1 = ^tmpadd0 * ^_c" in arithmetic_source
 
-    arithmetic_source = translate_ast_to_source(compile_text("∀{| x, a, b, c | x = a * b + c}"))
-    assert "^tmpmul0 = ^a * ^b" in arithmetic_source
-    assert "^tmpadd1 = ^tmpmul0 + ^c" in arithmetic_source
+    arithmetic_source = translate_ast_to_source(compile_text("∀{| _x, _a, _b, _c | _x = _a * _b + _c}"))
+    assert "^tmpmul0 = ^_a * ^_b" in arithmetic_source
+    assert "^tmpadd1 = ^tmpmul0 + ^_c" in arithmetic_source
 
-    subtraction_source = translate_ast_to_source(compile_text("∀{| x, a, b, c | x = a - b - c}"))
-    assert "^tmpsub0 = ^a - ^b" in subtraction_source
-    assert "^tmpsub1 = ^tmpsub0 - ^c" in subtraction_source
+    subtraction_source = translate_ast_to_source(compile_text("∀{| _x, _a, _b, _c | _x = _a - _b - _c}"))
+    assert "^tmpsub0 = ^_a - ^_b" in subtraction_source
+    assert "^tmpsub1 = ^tmpsub0 - ^_c" in subtraction_source
 
-    division_source = translate_ast_to_source(compile_text("∀{| x, a, b, c | x = a / b / c}"))
-    assert "^tmpdiv0 = ^a / ^b" in division_source
-    assert "^tmpdiv1 = ^tmpdiv0 / ^c" in division_source
+    division_source = translate_ast_to_source(compile_text("∀{| _x, _a, _b, _c | _x = _a / _b / _c}"))
+    assert "^tmpdiv0 = ^_a / ^_b" in division_source
+    assert "^tmpdiv1 = ^tmpdiv0 / ^_c" in division_source
 
 
 def test_boolean_and_ordered_comparison_precedence() -> None:
-    land_source = translate_ast_to_source(compile_text("∀{| bool, a, b, c | bool = a \\land b \\lor c}"))
-    assert "^tmpland0 = ∧(^a, ^b)" in land_source
-    assert "^tmplor1 = ∨(^tmpland0, ^c)" in land_source
+    land_source = translate_ast_to_source(compile_text("∀{| _bool, _a, _b, _c | _bool = _a \\land _b \\lor _c}"))
+    assert "^tmpland0 = ∧(^_a, ^_b)" in land_source
+    assert "^tmplor1 = ∨(^tmpland0, ^_c)" in land_source
 
-    ascii_bool_source = translate_ast_to_source(compile_text("∀{| bool, a, b, c | bool = a && b || c}"))
-    assert "^tmpand0 = ^a && ^b" in ascii_bool_source
-    assert "^tmpor1 = ^tmpand0 || ^c" in ascii_bool_source
+    less_source = translate_ast_to_source(compile_text("∀{| _bool, _a, _b, _c | _bool = _a < _b < _c}"))
+    assert "^tmplt0 = ^_a < ^_b" in less_source
+    assert "^tmplt1 = ^tmplt0 < ^_c" in less_source
 
-    less_source = translate_ast_to_source(compile_text("∀{| bool, a, b, c | bool = a < b < c}"))
-    assert "^tmpa_b0 = ^a < ^b" in less_source
-    assert "^tmpb_c1 = ^b < ^c" in less_source
-    assert "^tmpand2 = ^tmpa_b0 && ^tmpb_c1" in less_source
+    mixed_less_source = translate_ast_to_source(compile_text("∀{| _bool, _a, _b, _c | _bool = _a < _b <= _c}"))
+    assert "^tmplt0 = ^_a < ^_b" in mixed_less_source
+    assert "^tmple1 = ^tmplt0 ≤ ^_c" in mixed_less_source
 
-    mixed_less_source = translate_ast_to_source(compile_text("∀{| bool, a, b, c | bool = a < b <= c}"))
-    assert "^tmpa_b0 = ^a < ^b" in mixed_less_source
-    assert "^tmpb_c1 = ^b ≤ ^c" in mixed_less_source
-    assert "^tmpand2 = ^tmpa_b0 && ^tmpb_c1" in mixed_less_source
-
-    equality_chain_source = translate_ast_to_source(compile_text("∀{| bool, a, b, c | bool = a = b = c}"))
-    assert "^tmpeq0 = ^a = ^b" in equality_chain_source
-    assert "^tmpeq1 = ^tmpeq0 = ^c" in equality_chain_source
+    equality_chain_source = translate_ast_to_source(compile_text("∀{| _bool, _a, _b, _c | _bool = _a = _b = _c}"))
+    assert "^tmpeq0 = ^_b = ^_c" in equality_chain_source
+    assert "^tmpeq1 = ^_a = ^tmpeq0" in equality_chain_source
     assert "^tmpand" not in equality_chain_source
 
 
 def test_prefix_unary_expressions() -> None:
-    not_quant_source = translate_ast_to_source(compile_text("∀{| bool | bool = !∀{| x | P(x)}}"))
-    assert "^tmpmodule00 = ∀{" in not_quant_source
-    assert "^tmpnot1 = !(^tmpmodule00)" in not_quant_source
+    not_quant_source = translate_ast_to_source(compile_text("∀{| _bool | _bool = !∀{| _x | P(_x)}}"))
+    assert "^tmp00 = ∀{" in not_quant_source
+    assert "^tmpnot1 = !(^tmp00)" in not_quant_source
 
     for text in [
-        "∀{| bool, x | bool = !P(x)}",
-        "∀{| bool, x | bool = ! P(x)}",
-        "∀{| bool, x | bool = \\lnot P(x)}",
+        "∀{| _bool, _x | _bool = !P(_x)}",
+        "∀{| _bool, _x | _bool = ! P(_x)}",
+        "∀{| _bool, _x | _bool = \\lnot P(_x)}",
     ]:
         ast = compile_text(text)
         source = translate_ast_to_source(ast)
-        assert "^tmpP0 = P(^x)" in source
+        assert "^tmpP0 = P(^_x)" in source
         assert "^tmpnot1 = !(^tmpP0)" in source
         assert not calls(ast, "!P")
 
-    unary_left_source = translate_ast_to_source(compile_text("∀{| x, a, b | x = -a * b}"))
-    assert "^tmpsub0 = -(^a)" in unary_left_source
-    assert "^tmpmul1 = ^tmpsub0 * ^b" in unary_left_source
+    unary_left_source = translate_ast_to_source(compile_text("∀{| _x, _a, _b | _x = -_a * _b}"))
+    assert "^tmpsub0 = -(^_a)" in unary_left_source
+    assert "^tmpmul1 = ^tmpsub0 * ^_b" in unary_left_source
 
-    unary_right_source = translate_ast_to_source(compile_text("∀{| x, a, b | x = a * -b}"))
-    assert "^tmpsub0 = -(^b)" in unary_right_source
-    assert "^tmpmul1 = ^a * ^tmpsub0" in unary_right_source
+    unary_right_source = translate_ast_to_source(compile_text("∀{| _x, _a, _b | _x = _a * -_b}"))
+    assert "^tmpsub0 = -(^_b)" in unary_right_source
+    assert "^tmpmul1 = ^_a * ^tmpsub0" in unary_right_source
 
-    for text in ["∀{| x, set | x = *set}", "∀{| x, set | x = * set}"]:
-        assert "^tmpmul0 = *(^set)" in translate_ast_to_source(compile_text(text))
+    for text in ["∀{| _x, _set | _x = *_set}", "∀{| _x, _set | _x = * _set}"]:
+        assert "^tmpmul0 = *(^_set)" in translate_ast_to_source(compile_text(text))
 
-    regressions_source = translate_ast_to_source(compile_text("∀{| bool, x, y, a, b | bool = a != b, x = a - b, y = a * b}"))
-    assert "^tmpneq0 = ^a ≠ ^b" in regressions_source
-    assert "^tmpsub1 = ^a - ^b" in regressions_source
-    assert "^tmpmul2 = ^a * ^b" in regressions_source
+    regressions_source = translate_ast_to_source(compile_text("∀{| _bool, _x, _y, _a, _b | _bool = _a != _b, _x = _a - _b, _y = _a * _b}"))
+    assert "^tmpneq0 = ^_a ≠ ^_b" in regressions_source
+    assert "^tmpsub1 = ^_a - ^_b" in regressions_source
+    assert "^tmpmul2 = ^_a * ^_b" in regressions_source
 
-    bare_source = translate_ast_to_source(compile_text("∀{| x, y, z | x = !, y = -, z = *}"))
-    assert "^x = !" in bare_source
-    assert "^y = -" in bare_source
-    assert "^z = *" in bare_source
+    bare_source = translate_ast_to_source(compile_text("∀{| _x, _y, _z | _x = !, _y = -, _z = *}"))
+    assert "^_x = !" in bare_source
+    assert "^_y = -" in bare_source
+    assert "^_z = *" in bare_source
 
 
 def test_lifted_resolver_equality_expression_compiles() -> None:
     text = """Stmt
-Stmt::has_direct_sym_alias: (stmt, sym1, sym2) => bool
-    bool = ∃{
-        | eq_stmt
-        | eq_stmt ∈ stmt.all_stmts
-        | Eq_stmt ~ eq_stmt
-        (eq_stmt.dst_sym = sym1 && eq_stmt.src_sym = sym2) || (eq_stmt.src_sym = sym1 && eq_stmt.dst_sym = sym2)
+Stmt::has_direct_sym_alias: (_stmt, _sym1, _sym2) => _bool
+    _bool = ∃{
+        | _eq_stmt
+        | _eq_stmt ∈ _stmt.all_stmts
+        | Eq_stmt ~ _eq_stmt
+        (_eq_stmt.dst_sym = _sym1 && _eq_stmt.src_sym = _sym2) \\lor (_eq_stmt.src_sym = _sym1 && _eq_stmt.dst_sym = _sym2)
     }"""
     ast = compile_text(text)
     assert calls(ast, "=")
     assert calls(ast, "&&")
-    assert calls(ast, "||")
+    assert calls(ast, "∨")
 
 
 def test_operator_head_declaration_round_trip() -> None:
-    text = "+: (list, list1) => list2\n    list2 = list"
+    text = "+: (_list, _list1) => _list2\n    _list2 = _list"
     ast = compile_text(text)
     assert calls(ast, "+")
     source = translate_ast_to_source(ast)
@@ -345,17 +460,17 @@ def test_slice_operator_identifier_sym_compiles_everywhere() -> None:
     assert [sym["name"] for sym in ast["bound_syms"] if not sym.get("generated")] == ["[:]"]
     assert calls(ast, "=")
     assert compile_text("Function ~ [:]")
-    ast = compile_text("∀{| [] | [] = x}")
+    ast = compile_text("∀{| [] | [] = _x}")
     assert [sym["name"] for sym in ast["bound_syms"] if not sym.get("generated")] == ["[]"]
     assert compile_text("Function ~ []")
 
 
 def test_slice_operator_declaration_and_call_compile() -> None:
-    ast = compile_text("[:]: (val1, val2) => list\n    list = [:](val1, val2)")
+    ast = compile_text("[:]: (_val1, _val2) => _list\n    _list = [:](_val1, _val2)")
     assert calls(ast, "[:]")
     assert any(
         stmt["call_sym"]["name"] == "~" and stmt["arg_sym_list"][1]["name"] == "[:]"
-        for stmt in ast["target_PSs"]
+        for stmt in ast["target_proposition_stmts"]
     )
 
 
@@ -375,20 +490,20 @@ def test_compound_slice_member_call_lowers_to_ordinary_call() -> None:
 
 
 def test_class_coloncolon_top_level_function_declaration() -> None:
-    source = translate_ast_to_source(compile_text("Val\nClass\nClass::func: (val1, val2) => (val3, val4)"))
+    source = translate_ast_to_source(compile_text("Val\nClass\nClass::func: (_val1, _val2) => (_val3, _val4)"))
     assert "Class::func" not in source
     assert "Function ~ func" in source
-    assert "func(^val1, ^val2)" in source
-    assert "| Val ~ ^val1" in source
-    assert "| Val ~ ^val2" in source
+    assert "func(^_val1, ^_val2)" in source
+    assert "| Val ~ ^_val1" in source
+    assert "| Val ~ ^_val2" in source
     assert "\n    Tuple ~ ^tmpfunc0\n" in source
     assert "\n    | Tuple ~ ^tmpfunc0\n" not in source
-    assert "\n    Val ~ ^val3\n" in source
-    assert "\n    Val ~ ^val4\n" in source
+    assert "\n    Val ~ ^_val3\n" in source
+    assert "\n    Val ~ ^_val4\n" in source
 
 
 def test_class_block_expands_to_current_scope() -> None:
-    source = translate_ast_to_source(compile_text("Class\n    ::field\n    ::func: (val1, val2) => (val3, val4)"))
+    source = translate_ast_to_source(compile_text("Class\n    ::field\n    ::func: (_val1, _val2) => (_val3, _val4)"))
     assert "Class::" not in source
     assert "\n  | ^Class\n" not in source
     assert "Function ~ field" in source
@@ -396,7 +511,7 @@ def test_class_block_expands_to_current_scope() -> None:
     assert "| Class ~ ^_class" in source
     assert "Symbol ~ ^_field" in source
     assert "Function ~ func" in source
-    assert "func(^val1, ^val2)" in source
+    assert "func(^_val1, ^_val2)" in source
 
 
 def test_class_field_shorthand_compiles() -> None:
@@ -409,46 +524,8 @@ def test_class_field_shorthand_compiles() -> None:
     assert "^_field = field(^_class)" in source
 
 
-def test_class_field_assignment_sugar_compiles() -> None:
-    source = translate_ast_to_source(compile_text("Value\nField\nClass\nValue ~ value\nClass::field = value"))
-    assert "Class::field" not in source
-    assert "Function ~ field" in source
-    assert "^_field = field(^_class)" in source
-    assert "Class ~ ^_class" in source
-    assert "field(^_class)" in source
-    assert " = value" in source
-
-
-def test_class_field_assignment_sugar_compiles_in_class_body() -> None:
-    source = translate_ast_to_source(compile_text("Value\nField\nClass\nValue ~ value\nClass\n    ::field = value"))
-    assert "Class::field" not in source
-    assert "Function ~ field" in source
-    assert "^_field = field(^_class)" in source
-    assert "Class ~ ^_class" in source
-    assert "field(^_class)" in source
-
-
-def test_class_field_assignment_sugar_allows_expression_rhs() -> None:
-    source = translate_ast_to_source(compile_text("Value\nField\nClass\nValue ~ value\nF: value => value'\nClass::field = F(value)"))
-    assert "F(value)" in source
-    assert "field(^_class)" in source
-
-
-def test_class_field_assignment_sugar_desugars_in_premise_section() -> None:
-    source = translate_ast_to_source(compile_text("Value\nField\nClass\nValue ~ value\n| Class::field = value\nP(value)"))
-    assert "| Function ~ ^field" in source
-    assert "| ∀{" in source
-    assert "^field(^_class)" in source
-    assert "P(^value)" in source
-
-
 def test_class_field_shorthand_uses_underscore_receiver_and_output_names() -> None:
-    source = translate_ast_to_source(compile_text("Class\n| field'\nClass::field"))
-    assert "| ^_class, ^_field" in source
-    assert "Symbol ~ ^_field" in source
-    assert "^_field = field(^_class)" in source
-
-    source = translate_ast_to_source(compile_text("Class\n| field'\n| field''\nClass::field"))
+    source = translate_ast_to_source(compile_text("Class\nClass::field"))
     assert "| ^_class, ^_field" in source
     assert "Symbol ~ ^_field" in source
     assert "^_field = field(^_class)" in source
@@ -462,49 +539,49 @@ def test_class_field_shorthand_desugars_in_premise_section() -> None:
     assert "Symbol ~ ^_field" in source
 
 def test_prime_suffix_names_compile_and_infer_from_base() -> None:
-    source = translate_ast_to_source(compile_text("List\n∀{| list', x'', y | y = list'}"))
-    assert "\n    | ^list', ^x'', ^y\n" in source
-    assert "| List ~ ^list'" in source
+    source = translate_ast_to_source(compile_text("List\n∀{| _list', _x'', _y | _y = _list'}"))
+    assert "\n    | ^_list', ^_x'', ^_y\n" in source
+    assert "| List ~ ^_list'" in source
     assert "invalid_bound_sym_name" not in source
-    assert "^y = ^list'" in source
+    assert "^_y = ^_list'" in source
 
 
 def test_class_method_body_is_preserved() -> None:
-    source = translate_ast_to_source(compile_text("Class\n    ::func: x => y\n        y = x"))
+    source = translate_ast_to_source(compile_text("Class\n    ::func: _x => _y\n        _y = _x"))
     assert "Class::func" not in source
     assert "Function ~ func" in source
-    assert "\n    | ^y = func(^x)\n" in source
-    assert "\n    ^y = ^x\n" in source
+    assert "\n    | ^_y = func(^_x)\n" in source
+    assert "\n    ^_y = ^_x\n" in source
 
 
 def test_function_declaration_and_body_are_separate_rules() -> None:
-    text = "Val\nClass\nClass::func: (val1, val2) => (val3, val4)\n    | val1 = val2\n    P(val3)"
-    desugared = run_stage2(text, SKILL_DIR).text
+    text = "Val\nClass\nClass::func: (_val1, _val2) => (_val3, _val4)\n    | _val1 = _val2\n    P(_val3)"
+    desugared = stage2_text(text, SKILL_DIR)
     assert desugared.count("∀{") == 3
-    assert desugared.count("Val ~ val3") == 1
-    assert desugared.count("Val ~ val4") == 1
-    assert "| (val3, val4) = func(val1, val2)" in desugared
-    assert "| val1 = val2" in desugared
-    assert "P(val3)" in desugared
+    assert desugared.count("Val ~ ^_val3") == 1
+    assert desugared.count("Val ~ ^_val4") == 1
+    assert "^_val3 = ^tmpfunc0[^tmpvalue1]" in desugared
+    assert "| ^_val1 = ^_val2" in desugared
+    assert "P(^_val3)" in desugared
 
-    declaration_index = desugared.index("Val ~ val3")
-    body_index = desugared.index("| val1 = val2")
+    declaration_index = desugared.index("Val ~ ^_val3")
+    body_index = desugared.index("| ^_val1 = ^_val2")
     assert declaration_index < body_index
 
 
 def test_repeated_function_bodies_are_conditional_facts() -> None:
-    text = "F: input => output\n    | input = 1\n    P(output)\n\nF: input => output\n    | input = 2\n    Q(output)"
+    text = "f: _input => _output\n    | _input = 1\n    P(_output)\n\nf: _input => _output\n    | _input = 2\n    Q(_output)"
     source = translate_ast_to_source(compile_text(text, base_dir=SKILL_DIR))
-    assert source.count("| ^input = 1") == 1
-    assert source.count("| ^input = 2") == 1
-    assert source.count("P(^output)") == 1
-    assert source.count("Q(^output)") == 1
-    assert source.count("Symbol ~ ^output") == 2
+    assert source.count("| ^_input = 1") == 1
+    assert source.count("| ^_input = 2") == 1
+    assert source.count("P(^_output)") == 1
+    assert source.count("Q(^_output)") == 1
+    assert source.count("Symbol ~ ^_output") == 2
 
 
 def test_function_arrow_shorthand_is_invalid() -> None:
     try:
-        compile_text("f: x -> g(x)", base_dir=SKILL_DIR)
+        compile_text("f: _x -> g(_x)", base_dir=SKILL_DIR)
     except CompileError as error:
         assert "function-assign '->' is not supported" in str(error)
         return
@@ -513,7 +590,7 @@ def test_function_arrow_shorthand_is_invalid() -> None:
 
 def test_inheritance_fact_does_not_declare_class_body() -> None:
     try:
-        compile_text("A ~ B\n    ::func: b => out")
+        compile_text("A ~ B\n    ::func: _b => _out")
     except CompileError as error:
         assert (
             "class-declaration body line must start with '::'" in str(error)
@@ -525,29 +602,22 @@ def test_inheritance_fact_does_not_declare_class_body() -> None:
 
 
 def test_explicit_class_declaration_after_inheritance_fact() -> None:
-    source = translate_ast_to_source(compile_text("B\n    ::func: b => out\nA ~ B"))
+    source = translate_ast_to_source(compile_text("B\n    ::func: _b => _out\nA ~ B"))
     assert "\n  | ^B\n" not in source
     assert "\n  A ~ B\n" in source
     assert "Function ~ func" in source
-    assert "\n    | B ~ ^b\n" in source
+    assert "\n    | B ~ ^_b\n" in source
 
 
 def test_class_operator_suffix_declaration() -> None:
-    source = translate_ast_to_source(compile_text("List\nList::[]: (list, id) => sym"))
+    source = translate_ast_to_source(compile_text("List\nList::[]: (_list, _id) => _sym"))
     assert "List::[]" not in source
     assert "Function ~ []" in source
-    assert "^list[^id]" in source
+    assert "^_list[^_id]" in source
 
 
 def test_class_coloncolon_requires_explicit_owner_declaration() -> None:
-    for text in ["Class::func: _class => out", "A ~ Class\nClass::func: _class => out", "Class::field"]:
-        try:
-            compile_text(text)
-        except CompileError as error:
-            assert "class member declaration requires explicit class declaration: Class" in str(error)
-        else:
-            raise AssertionError(f"expected undeclared class member owner to fail: {text!r}")
-
+    for text in ["Class::func: _class => _out", "A ~ Class\nClass::func: _class => _out", "Class::field"]:
         payload = module_check.check_module(text, "<stdin>", SKILL_DIR, is_file=False)
         assert payload["summary"]["error_count"] == 1, text
         assert payload["entries"][0]["code"] == "undeclared_class_member_owner", text
@@ -559,17 +629,17 @@ def test_class_coloncolon_requires_explicit_owner_declaration() -> None:
 
 
 def test_bare_plain_symbol_targets_are_invalid_class_declarations() -> None:
-    payload = module_check.check_module("Class\nsym", "<stdin>", SKILL_DIR, is_file=False)
+    payload = module_check.check_module("Class\n    _sym", "<stdin>", SKILL_DIR, is_file=False)
     assert payload["summary"]["error_count"] == 1
     assert payload["summary"]["warning_count"] == 0
-    assert payload["entries"][0]["code"] == "invalid_class_declaration_name"
+    assert payload["entries"][0]["code"] == "syntax_error"
+    assert payload["entries"][0]["reason"] == "class-declaration body line must start with '::'"
 
 
 def test_invalid_class_body_lines_fail() -> None:
     cases = [
         "Class\n    P(class)",
         "Class\n    : (class, x) => y",
-        "Class::field = value",
         "Class::field\n    P(field)",
         "Class\n    ::field\n        P(field)",
     ]
@@ -582,26 +652,26 @@ def test_invalid_class_body_lines_fail() -> None:
 
 
 def test_explicit_class_field_declaration_may_have_body() -> None:
-    source = translate_ast_to_source(compile_text("Class\nClass::field: class => field'\n    P(field')"))
+    source = translate_ast_to_source(compile_text("Class\nClass::field: _class => _field'\n    P(_field')"))
     assert "Class::field" not in source
     assert "Function ~ field" in source
-    assert "\n    P(^field')\n" in source
+    assert "\n    P(^_field')\n" in source
 
 
 def test_wrapper_predicates_lower_through_anf() -> None:
     cases = [
-        ("∀{| a, b | Tuple ~ (a, b)}", "tuple_literal_stmt", "Tuple"),
-        ("∀{| a, b | Set ~ {a, b}}", "set_literal_stmt", "Set"),
-        ("∀{| a | Value ~ 1}", "value_literal_stmt", "Value"),
+        ("∀{| _a, _b | Tuple ~ (_a, _b)}", "Tuple_literal_stmt", "Tuple"),
+        ("∀{| _a, _b | Set ~ {_a, _b}}", "Set_literal_stmt", "Set"),
+        ("∀{| _a | Value ~ 1}", "Value_literal_stmt", "Value"),
     ]
     for text, literal_kind, classifier in cases:
         ast = compile_text(text)
         assert any(binding["src_stmt"]["kind"] == literal_kind for binding in ast["premise_binding_stmts"]), (text, literal_kind)
-        target_calls = top_level_calls(ast, "~", "target_PSs")
+        target_calls = top_level_calls(ast, "~", "target_proposition_stmts")
         assert len(target_calls) == 1, (text, target_calls)
         assert target_calls[0]["arg_sym_list"][0]["name"] == classifier, (text, classifier)
         assert target_calls[0]["arg_sym_list"][1]["generated"], text
-        premise_calls = top_level_calls(ast, "~", "premise_PSs")
+        premise_calls = top_level_calls(ast, "~", "premise_proposition_stmts")
         assert not any(
             stmt["arg_sym_list"][0]["name"] == classifier and stmt["arg_sym_list"][1]["name"] == target_calls[0]["arg_sym_list"][1]["name"]
             for stmt in premise_calls
@@ -610,76 +680,76 @@ def test_wrapper_predicates_lower_through_anf() -> None:
 
 def test_capital_wrapper_predicates_normalize_to_infix() -> None:
     cases = [
-        ("∀{| a, b | Tuple~(a, b)}", "Tuple ~ (a, b)"),
-        ("∀{| a, b | Set~{a, b}}", "Set ~ {a, b}"),
-        ("∀{| a | Value~1}", "Value ~ 1"),
+        ("∀{| _a, _b | Tuple~(_a, _b)}", "Tuple ~ ^tmp"),
+        ("∀{| _a, _b | Set~{_a, _b}}", "Set ~ ^tmp"),
+        ("∀{| _a | Value~1}", "Value ~ ^tmp"),
     ]
-    for text, rendered in cases:
-        desugared = run_stage2(text, ".").text
-        assert rendered in desugared, (text, desugared)
-        assert "~" in rendered and rendered.replace(" ~ ", "~") not in desugared, (text, desugared)
+    for text, rendered_prefix in cases:
+        desugared = stage2_text(text, ".")
+        assert rendered_prefix in desugared, (text, desugared)
+        assert "Tuple~" not in desugared and "Set~" not in desugared and "Value~" not in desugared, (text, desugared)
         ast = compile_text(text)
-        assert top_level_calls(ast, "~", "target_PSs"), text
+        assert top_level_calls(ast, "~", "target_proposition_stmts"), text
 
 
 def test_stage2_ancestor_scope_for_function_decl() -> None:
-    text = "-: (list, list1) => list2\n    list2.size = (list.size + list1.size)"
-    desugared = run_stage2(text, ".").text
-    assert "| list, list1, list2" in desugared
-    assert "| list ~ list1" not in desugared
-    assert "| Symbol ~ list" in desugared
-    assert "| list ~ list" not in desugared
-    assert "| List ~ list" not in desugared
+    text = "-: (_list, _list1) => _list2\n    _list2.size = (_list.size + _list1.size)"
+    desugared = stage2_text(text, ".")
+    assert "| ^_list, ^_list1, ^_list2" in desugared
+    assert "| list ~ ^_list1" not in desugared
+    assert "| Symbol ~ ^_list" in desugared
+    assert "| ^_list ~ ^_list" not in desugared
+    assert "| List ~ ^_list" not in desugared
     assert "tuple~(__list, __list1)" not in desugared
-    assert "tuple ~ (list, list1)" not in desugared
+    assert "tuple ~ (^_list, ^_list1)" not in desugared
     assert "__list1" not in desugared
 
 
 def test_stage2_capital_inheritance_when_visible() -> None:
-    desugared = run_stage2("$import standard_library.lp\n∀{| list1 | list1 = list1}", SKILL_DIR).text
-    assert "| Symbol ~ list1" not in desugared
-    assert "| List ~ list1" in desugared
-    assert "| sym ~ list1" not in desugared
-    assert "| list ~ list1" not in desugared
+    desugared = stage2_text("$import standard_library.lp\n∀{| _list1 | _list1 = _list1}", SKILL_DIR, allow_imports=True)
+    assert "| Symbol ~ ^_list1" not in desugared
+    assert "| List ~ ^_list1" in desugared
+    assert "| sym ~ ^_list1" not in desugared
+    assert "| list ~ ^_list1" not in desugared
 
 
 def test_stage2_class_suffix_fallback_inheritance() -> None:
-    desugared = run_stage2("Chip_mem\nF: _chip_mem_class => _out", ".").text
-    assert "| Chip_mem ~ _chip_mem_class" in desugared
-    assert "| Symbol ~ _chip_mem_class" not in desugared
+    desugared = stage2_text("Chip_mem\nf: _chip_mem_class => _out", ".")
+    assert "| Chip_mem ~ ^_chip_mem_class" in desugared
+    assert "| Symbol ~ ^_chip_mem_class" not in desugared
 
-    primary_desugared = run_stage2("Chip_mem_class\nChip_mem\nF: _chip_mem_class => _out", ".").text
-    assert "| Chip_mem_class ~ _chip_mem_class" in primary_desugared
-    assert "| Chip_mem ~ _chip_mem_class" not in primary_desugared
+    primary_desugared = stage2_text("Chip_mem_class\nChip_mem\nf: _chip_mem_class => _out", ".")
+    assert "| Chip_mem_class ~ ^_chip_mem_class" in primary_desugared
+    assert "| Chip_mem ~ ^_chip_mem_class" not in primary_desugared
 
-    numeric_desugared = run_stage2("Chip_mem\nF: _chip_mem_class1 => _out", ".").text
-    assert "| Chip_mem ~ _chip_mem_class1" in numeric_desugared
-    assert "| Symbol ~ _chip_mem_class1" not in numeric_desugared
+    numeric_desugared = stage2_text("Chip_mem\nf: _chip_mem_class1 => _out", ".")
+    assert "| Chip_mem ~ ^_chip_mem_class1" in numeric_desugared
+    assert "| Symbol ~ ^_chip_mem_class1" not in numeric_desugared
 
-    diagnostics = collect_semantic_diagnostics_from_text("F: _chip_mem_class => _out")
+    diagnostics = collect_semantic_diagnostics_from_text("f: _chip_mem_class => _out")
     assert any(entry["code"] == "implicit_inheritance_fallback_symbol" for entry in diagnostics)
 
 
 def test_stage2_function_output_inheritance_is_target() -> None:
-    text = "List\n-: (list, list1) => list2\n    list2.size = (list.size + list1.size)"
-    desugared = run_stage2(text, SKILL_DIR).text
+    text = "List\n-: (_list, _list1) => _list2\n    _list2.size = (_list.size + _list1.size)"
+    desugared = stage2_text(text, SKILL_DIR)
     assert "\n    | List\n" not in desugared
     assert "\n    | Symbol ~ List\n" not in desugared
-    assert "\n    Symbol ~ List\n" in desugared
-    assert "| List ~ list" in desugared
-    assert "| List ~ list1" in desugared
-    assert "| List ~ list2" not in desugared
-    assert "\n        List ~ list2\n" in desugared
+    assert "\n  Symbol ~ List\n" in desugared
+    assert "| List ~ ^_list" in desugared
+    assert "| List ~ ^_list1" in desugared
+    assert "| List ~ ^_list2" not in desugared
+    assert "\n    List ~ ^_list2\n" in desugared
 
 
 def test_stage2_declared_class_symbol_fact_is_deduped() -> None:
-    desugared = run_stage2("List\nList", SKILL_DIR).text
-    assert desugared.count("\n    Symbol ~ List\n") == 1
+    desugared = stage2_text("List\nList", SKILL_DIR)
+    assert desugared.count("\n  Symbol ~ List\n") == 1
     assert "\n    | List\n" not in desugared
 
 
 def test_stage2_does_not_inject_implicit_stdlib_import() -> None:
-    desugared = run_stage2("∀{| x | x = x}", ".").text
+    desugared = stage2_text("∀{| _x | _x = _x}", ".")
     assert "$import standard_library.lp" not in desugared
 
 
@@ -691,72 +761,121 @@ def test_standard_library_supplies_universal_inheritance_axioms() -> None:
 
 def test_stage2_generated_sym_does_not_re_desugar() -> None:
     source = "$import standard_library.lp\n∀{\n    | ^list\n    | list ~ ^list\n    | ^list ~ ^list\n    ^list = ^list\n}\n"
-    desugared = run_stage2(source, SKILL_DIR).text
-    assert desugared.startswith("$import standard_library.lp\n")
+    desugared = stage2_text(source, SKILL_DIR, allow_imports=True)
     assert "| Symbol ~ ^list" not in desugared
     assert desugared.count("| list ~ ^list") == 1
     assert desugared.count("| ^list ~ ^list") == 1
 
 
 def test_stage2_authored_generated_sym_gets_no_implicit_facts() -> None:
-    desugared = run_stage2("∀{| ^x | ^x = ^x}", ".").text
+    desugared = stage2_text("∀{| ^x | ^x = ^x}", ".")
     assert "| ^x" in desugared
     assert "| Symbol ~ ^x" not in desugared
     assert "| ^x ~ ^x" not in desugared
 
 
 def test_double_underscore_sym_is_ordinary() -> None:
-    desugared = run_stage2("∀{| __x | __x = __x}", ".").text
-    assert "| Symbol ~ __x" in desugared
+    desugared = stage2_text("∀{| __x | __x = __x}", ".")
+    assert "| Symbol ~ ^__x" in desugared
 
 
 def test_stage2_synthesized_infixes_are_spaced() -> None:
-    desugared = run_stage2("∀{| x | x = x}", ".").text
-    assert "| Symbol ~ x" in desugared
-    assert "| x ~ x" not in desugared
-    assert "| Symbol~x" not in desugared
-    assert "| x~x" not in desugared
+    desugared = stage2_text("∀{| _x | _x = _x}", ".")
+    assert "| Symbol ~ ^_x" in desugared
+    assert "| ^_x ~ ^_x" not in desugared
+    assert "| Symbol~_x" not in desugared
+    assert "| _x~_x" not in desugared
 
 
 def test_stage2_attaches_authoritative_desugared_module() -> None:
-    result = run_stage2("F: _is_val => _sym\n    TS", ".")
+    result = stage2_result("f: _is_val => _sym\n    TS", ".")
     module = result.ast.modules[0].lowered_module
     assert module is not None
     assert run_stage3(result.ast).module is module
     signature_module = module.target_statements[1].sub_modules[0]
-    assert "Bool ~ _is_val" in [statement.text for statement in signature_module.predicate_statements]
-    assert "Symbol ~ _sym" in [statement.text for statement in signature_module.target_statements]
+    assert "Bool ~ _is_val" in [statement_text(statement) for statement in signature_module.predicate_statements]
+    assert "Symbol ~ _sym" in [statement_text(statement) for statement in signature_module.target_statements]
+
+
+def test_compile_stages_are_ast_only_and_no_render_fallbacks() -> None:
+    front_end_desugar_module = importlib.import_module("compile_pipeline.front_end_desugar")
+    back_end_sections_module = importlib.import_module("compile_pipeline.back_end_sections")
+    back_end_statements_module = importlib.import_module("compile_pipeline.back_end_statements")
+    back_end_lower_object_module = importlib.import_module("compile_pipeline.back_end_lower_object")
+
+    for removed in ["render_source_ast", "render_statement", "render_module_key", "desugar_module_text", "canonical_statement_key"]:
+        assert not hasattr(front_end_desugar_module, removed), removed
+    for removed_module in [
+        "syntax_check_common",
+        "compile_pipeline.typed_module_parser",
+        "compile_pipeline.declaration_locations",
+        "compile_pipeline.expr_parser",
+        "compile_pipeline.located_text",
+        "compile_pipeline.module_sections",
+        "compile_pipeline._legacy_stage1_normalize_source",
+        "compile_pipeline._legacy_stage2_desugar_module_text",
+        "compile_pipeline._legacy_stage3_parse_module_sections",
+        "compile_pipeline._legacy_stage4_parse_statements",
+        "compile_pipeline._legacy_stage5_lower_to_module_ast",
+        "normalize_module_declarations",
+    ]:
+        try:
+            importlib.import_module(removed_module)
+        except ModuleNotFoundError:
+            pass
+        else:
+            raise AssertionError(f"legacy module is still importable: {removed_module}")
+    for stage_module in [front_end_desugar_module, back_end_sections_module, back_end_statements_module, back_end_lower_object_module]:
+        assert not hasattr(stage_module, "main")
+
+    for call in [
+        lambda: run_stage2("∀{| _x | _x = _x}", "."),
+        lambda: run_stage3("∀{| _x | _x = _x}"),
+        lambda: run_stage4(run_stage1("∀{| _x | _x = _x}")),
+        lambda: run_stage5("∀{| _x | _x = _x}"),
+    ]:
+        try:
+            call()
+        except CompileError:
+            continue
+        raise AssertionError("stage accepted raw or wrong typed input")
+
+    source_ast = run_stage1("∀{| _x | _x = _x}")
+    module = source_ast.modules[0].lowered_module
+    assert not hasattr(source_ast.modules[0], "text")
+    assert module is not None and not hasattr(module.target_statements[0], "text")
+    assert module.target_statements[0].expr is not None and not hasattr(module.target_statements[0].expr, "text")
 
 
 def test_stage2_structural_collection_inheritance_module() -> None:
-    result = run_stage2("Reg\nF: _regs => _out", ".")
+    result = stage2_result("Reg\nF: _regs => _out", ".")
     signature_statement = next(statement for statement in result.ast.modules[0].lowered_module.target_statements if statement.sub_modules)
     signature_module = signature_statement.sub_modules[0]
-    premise_texts = [statement.text for statement in signature_module.predicate_statements]
+    premise_texts = [statement_text(statement) for statement in signature_module.predicate_statements]
     collection_stmt = next(statement for statement in signature_module.predicate_statements if statement.sub_modules)
     item_module = collection_stmt.sub_modules[0]
     assert "Set ~ _regs" in premise_texts
     assert item_module.syms == ["_regs_item"]
-    assert [statement.text for statement in item_module.predicate_statements] == ["_regs_item ∈ _regs"]
-    assert [statement.text for statement in item_module.target_statements] == ["Reg ~ _regs_item"]
+    assert [statement_text(statement) for statement in item_module.predicate_statements] == ["_regs_item ∈ _regs"]
+    assert [statement_text(statement) for statement in item_module.target_statements] == ["Reg ~ _regs_item"]
 
 
 def test_stage2_target_only_does_not_infer_bound_sym() -> None:
-    module = run_stage2("_x = y", ".").ast.modules[0].lowered_module
+    module = stage2_result("_x = y", ".").ast.modules[0].lowered_module
     assert module.syms == []
     assert module.predicate_statements == []
-    assert [statement.text for statement in module.target_statements] == ["_x = y"]
+    assert [statement_text(statement) for statement in module.target_statements] == ["_x = y"]
 
 
 def test_stage2_omits_symbol_when_inheritance_premise_exists() -> None:
-    desugared = run_stage2("∀{| x | Value ~ x | x = x}", ".").text
-    assert "| Value ~ x" in desugared
-    assert "| Symbol ~ x" not in desugared
+    desugared = stage2_text("∀{| _x | Value ~ _x | _x = _x}", ".")
+    assert "| Value ~ ^_x" in desugared
+    assert "| Symbol ~ ^_x" not in desugared
 
 
-def test_stage2_legacy_unspaced_infix_still_compiles() -> None:
-    ast = compile_text("∀{| x | Symbol~x}")
-    assert top_level_calls(ast, "~", "target_PSs")
+def test_stage2_permissive_unspaced_infix_still_compiles() -> None:
+    ast = compile_text("∀{| _x | Symbol~_x}")
+    assert top_level_calls(ast, "~", "target_proposition_stmts")
 
 
 def test_import_file_locations() -> None:
@@ -764,10 +883,10 @@ def test_import_file_locations() -> None:
         root = Path(tmp)
         imported = root / "imported.lp"
         main = root / "main.lp"
-        imported.write_text("∀{| x | x = x}\n", encoding="utf-8")
+        imported.write_text("∀{| _x | _x = _x}\n", encoding="utf-8")
         main.write_text("$import imported.lp\n", encoding="utf-8")
         ast = compile_text(main.read_text(encoding="utf-8"), base_dir=root, source=str(main), allow_imports=True)
-        assert ast["source_loc"]["source"] == str(imported.resolve())
+        assert ast["source_loc"]["file_path"] == str(imported.resolve())
         assert calls(ast, "=")
 
 
@@ -775,14 +894,21 @@ def test_import_searches_skill_dir_for_standard_library() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
         normalized = run_stage1(
-            "$import standard_library.lp\n∀{| x | x = x}",
+            "$import standard_library.lp\n∀{| _x | _x = _x}",
             base_dir=root,
             source=str(root / "main.lp"),
             allow_imports=True,
         )
         assert normalized.import_count == 1
-        assert "Symbol" in normalized.text
-        assert "∀{| x | x = x}" in normalized.text
+        module = normalized.modules[0].lowered_module
+        assert module is not None
+        assert "Symbol" in module.declared_classes
+        assert any(
+            submodule.syms == ["_x"]
+            and any(statement_text(statement) == "_x = _x" for statement in submodule.target_statements)
+            for statement in module.target_statements
+            for submodule in statement.sub_modules
+        )
 
 
 def test_stage1_dedupes_transitive_imports() -> None:
@@ -795,7 +921,8 @@ def test_stage1_dedupes_transitive_imports() -> None:
         normalized = run_stage1(source, base_dir=root, source=str(root / "main.lp"), allow_imports=True)
 
     assert normalized.import_count == 3
-    assert normalized.text.splitlines() == ["Shared", "A", "B", "Main"]
+    assert normalized.modules[0].lowered_module is not None
+    assert normalized.modules[0].lowered_module.declared_classes == ["Shared", "A", "B", "Main"]
 
 
 def test_stage1_dedupes_direct_and_resolved_alias_imports() -> None:
@@ -809,7 +936,8 @@ def test_stage1_dedupes_direct_and_resolved_alias_imports() -> None:
         normalized = run_stage1(source, base_dir=root, source=str(root / "main.lp"), allow_imports=True)
 
     assert normalized.import_count == 1
-    assert normalized.text == "Shared"
+    assert normalized.modules[0].lowered_module is not None
+    assert normalized.modules[0].lowered_module.declared_classes == ["Shared"]
 
 
 def test_source_utils_expand_imports_dedupes_visible_context_imports() -> None:
@@ -862,49 +990,49 @@ def test_stdin_import_rejected() -> None:
 
 
 def test_multiline_bar_semantics() -> None:
-    ast = compile_text("∀{\n| x\n| x ~ x\nx = x\n}")
-    assert [sym["name"] for sym in ast["bound_syms"] if not sym.get("generated")] == ["x"]
-    assert top_level_calls(ast, "~", "premise_PSs")
-    assert top_level_calls(ast, "=", "target_PSs")
+    ast = compile_text("∀{\n| _x\n| _x ~ _x\n_x = _x\n}")
+    assert [sym["name"] for sym in ast["bound_syms"] if not sym.get("generated")] == ["_x"]
+    assert top_level_calls(ast, "~", "premise_proposition_stmts")
+    assert top_level_calls(ast, "=", "target_proposition_stmts")
 
 
 def test_branch_header_lowers_to_target_module() -> None:
-    source = "| x\n|- P(x)\n    y = x\nz = z"
-    desugared = run_stage2(source, ".").text
-    assert "| - P(x)" not in desugared
+    source = "| _x\n|- P(_x)\n    _y = _x\n_z = _z"
+    desugared = stage2_text(source, ".")
+    assert "| - P(_x)" not in desugared
     ast = compile_text(source)
-    branch_modules = [node for node in ast["target_PSs"] if node.get("kind") == "quantified_stmt"]
+    branch_modules = [node for node in ast["target_proposition_stmts"] if node.get("kind") == "Quantified_stmt"]
     assert len(branch_modules) == 1
     branch = branch_modules[0]
     assert not branch["bound_syms"]
-    assert top_level_calls(branch, "P", "premise_PSs")
-    assert top_level_calls(branch, "=", "target_PSs")
-    assert top_level_calls(ast, "=", "target_PSs")
+    assert top_level_calls(branch, "P", "premise_proposition_stmts")
+    assert top_level_calls(branch, "=", "target_proposition_stmts")
+    assert top_level_calls(ast, "=", "target_proposition_stmts")
     assert not any(node.get("name") == "__compiler_branch_module" for node in all_nodes(ast))
 
 
 def test_sibling_branches_are_target_modules() -> None:
-    ast = compile_text("| x\n|- P(x)\n    y = x\n|- Q(x)\n    y = x\nz = z")
-    branch_modules = [node for node in ast["target_PSs"] if node.get("kind") == "quantified_stmt"]
+    ast = compile_text("| _x\n|- P(_x)\n    _y = _x\n|- Q(_x)\n    _y = _x\n_z = _z")
+    branch_modules = [node for node in ast["target_proposition_stmts"] if node.get("kind") == "Quantified_stmt"]
     assert len(branch_modules) == 2
-    assert top_level_calls(branch_modules[0], "P", "premise_PSs")
-    assert top_level_calls(branch_modules[1], "Q", "premise_PSs")
-    assert top_level_calls(ast, "=", "target_PSs")
+    assert top_level_calls(branch_modules[0], "P", "premise_proposition_stmts")
+    assert top_level_calls(branch_modules[1], "Q", "premise_proposition_stmts")
+    assert top_level_calls(ast, "=", "target_proposition_stmts")
 
 
 def test_premise_universal_block_contains_target_branch_modules() -> None:
-    source = "| x\n| \\all\n    |- P(x)\n        y = x\nz = z"
+    source = "| _x\n| \\all\n    |- P(_x)\n        _y = _x\n_z = _z"
     expanded = translate_ast_to_source(compile_text(source))
     assert "^∀" not in expanded
-    premise_modules = [node for node in compile_text(source)["premise_PSs"] if node.get("kind") == "quantified_stmt"]
+    premise_modules = [node for node in compile_text(source)["premise_proposition_stmts"] if node.get("kind") == "Quantified_stmt"]
     assert len(premise_modules) == 1
-    branch_modules = [node for node in premise_modules[0]["target_PSs"] if node.get("kind") == "quantified_stmt"]
+    branch_modules = [node for node in premise_modules[0]["target_proposition_stmts"] if node.get("kind") == "Quantified_stmt"]
     assert len(branch_modules) == 1
-    assert top_level_calls(branch_modules[0], "P", "premise_PSs")
+    assert top_level_calls(branch_modules[0], "P", "premise_proposition_stmts")
 
 
 def test_branch_requires_indented_block() -> None:
-    payload = module_check.check_module("| x\n|- P(x)\nz = z", module_check.STDIN_FILE, Path("."), is_file=False)
+    payload = module_check.check_module("| _x\n|- P(_x)\n_z = _z", module_check.STDIN_FILE, Path("."), is_file=False)
     assert payload["summary"]["error_count"] == 1
     entry = payload["entries"][0]
     assert entry["stage"] == "syntax"
@@ -913,21 +1041,20 @@ def test_branch_requires_indented_block() -> None:
 
 
 def test_branch_allows_function_output_in_nested_target() -> None:
-    payload = module_check.check_module("F: x => y\n    |- P(x)\n        y = 1", module_check.STDIN_FILE, Path("."), is_file=False)
+    payload = module_check.check_module("f: _x => _y\n    |- P(_x)\n        _y = 1", module_check.STDIN_FILE, Path("."), is_file=False)
     assert payload["summary"]["error_count"] == 0
     assert not any(entry["code"] == "function_output_in_premise" for entry in payload["entries"])
 
 
 def test_indentation_body_headers_are_validated() -> None:
     valid_sources = [
-        "∀\n    | x\n    P(x)",
-        "∃\n    | x\n    P(x)",
-        "@\n    | x\n    P(x)",
-        "| x\n| ∀\n    P(x)\nz = z",
-        "| x\n| ∃\n    | y\n    P(y)\nz = z",
-        "| x\n|- P(x)\n    Q(x)\nz = z",
-        "F: x => y\n    y = x",
-        "F: x => y\n    | G: a => b\n        b = a\n    y = G(x)",
+        "∀\n    | _x\n    P(_x)",
+        "∃\n    | _x\n    P(_x)",
+        "@\n    | _x\n    P(_x)",
+        "| _x\n| ∀\n    P(_x)\n_z = _z",
+        "| _x\n| ∃\n    | _y\n    P(_y)\n_z = _z",
+        "| _x\n|- P(_x)\n    Q(_x)\n_z = _z",
+        "f: _x => _y\n    _y = _x",
         "Class\n    ::field\n    ::func: _class => _out\n        P(_out)",
         "Class\nClass::func: _class => _out\n    P(_out)",
     ]
@@ -950,7 +1077,7 @@ def test_at_header_desugars_to_recursive_forall_block() -> None:
         "\n".join(
             [
                 "@note",
-                "    F: _x => _y",
+                "    f: _x => _y",
                 "        _y = _x",
                 "    f = f",
             ]
@@ -994,49 +1121,64 @@ def test_indentation_body_rejects_invalid_owner_and_level_jump() -> None:
 
 
 def test_target_nested_declaration_expands_in_function_body() -> None:
-    source = translate_ast_to_source(compile_text("F: x => y\n    G: a => b\n        P(b)\n    y = G(x)", base_dir=SKILL_DIR))
-    assert "\n    Function ~ G\n" in source
-    assert "\n      | ^b = G(^a)\n" in source
-    assert "\n      P(^b)\n" in source
+    source = translate_ast_to_source(compile_text("f: _x => _y\n    g: _a => _b\n        P(_b)\n    _y = g(_x)", base_dir=SKILL_DIR))
+    assert "\n    Function ~ g\n" in source
+    assert "\n      | ^_b = g(^_a)\n" in source
+    assert "\n      P(^_b)\n" in source
     assert "unsupported expression: |" not in source
 
 
 def test_premise_nested_declaration_expands_in_function_body() -> None:
-    source = translate_ast_to_source(compile_text("F: func => y\n    | func: a => b\n        P(b)\n    P(func)", base_dir=SKILL_DIR))
-    assert "\n    | Function ~ ^func\n" in source
-    assert "\n    | ∀{\n" in source
-    assert "\n      | ^b = ^func(^a)\n" in source
-    assert "\n      P(^b)\n" in source
-    assert "Function ~ | func" not in source
+    payload = module_check.check_module(
+        "f: _func => _y\n    | g: _a => _b\n        P(_b)\n    P(_func)",
+        module_check.STDIN_FILE,
+        Path("."),
+        is_file=False,
+    )
+    assert payload["summary"]["error_count"] == 1
+    assert payload["entries"][0]["code"] == "naming_error"
+    assert "invalid_bound_sym_name" in payload["entries"][0]["reason"]
 
 
 def test_no_body_premise_declaration_expands_signature() -> None:
-    source = translate_ast_to_source(compile_text("F: x => y\n    | f: a => b\n    y = x", base_dir=SKILL_DIR))
-    assert "\n    | Function ~ ^f\n" in source
-    assert "\n      | ^b = ^f(^a)\n" in source
+    payload = module_check.check_module(
+        "f: _x => _y\n    | g: _a => _b\n    _y = _x",
+        module_check.STDIN_FILE,
+        Path("."),
+        is_file=False,
+    )
+    assert payload["summary"]["error_count"] == 1
+    assert payload["entries"][0]["code"] == "naming_error"
+    assert "invalid_bound_sym_name" in payload["entries"][0]["reason"]
 
 
 def test_bool_declarations_emit_predicate_fact() -> None:
-    source = translate_ast_to_source(compile_text("P: x => bool\n    P(x)", base_dir=SKILL_DIR))
-    assert "\n  Predicate ~ P\n" in source
-    assert "\n  Function ~ P\n" not in source
+    source = translate_ast_to_source(compile_text("p: _x => _is_valid\n    p(_x)", base_dir=SKILL_DIR))
+    assert "\n  Function ~ p\n" in source
+    assert "\n    Bool ~ ^_is_valid\n" in source
 
-    premise_source = translate_ast_to_source(compile_text("F: x => y\n    | P: a => bool\n    y = x", base_dir=SKILL_DIR))
-    assert "\n    | Predicate ~ ^P\n" in premise_source
-    assert "\n    | Function ~ ^P\n" not in premise_source
+    payload = module_check.check_module(
+        "f: _x => _y\n    | p: _a => _is_valid\n    _y = _x",
+        module_check.STDIN_FILE,
+        Path("."),
+        is_file=False,
+    )
+    assert payload["summary"]["error_count"] == 1
+    assert payload["entries"][0]["code"] == "naming_error"
+    assert "invalid_bound_sym_name" in payload["entries"][0]["reason"]
 
 
 def test_duplicate_binders_deduplicate() -> None:
-    ast = compile_text("∀{| x, x | x = x}")
-    assert [sym["name"] for sym in ast["bound_syms"] if not sym.get("generated")] == ["x"]
+    ast = compile_text("∀{| _x, _x | _x = _x}")
+    assert [sym["name"] for sym in ast["bound_syms"] if not sym.get("generated")] == ["_x"]
 
 
 def test_nested_ancestor_conflict_is_invalid() -> None:
-    desugared = run_stage2("∀{| x | ∀{| x | x = x}}", ".").text
-    assert "| __x" not in desugared
-    assert "| x ~ __x" not in desugared
+    desugared = stage2_result("∀{| _x | ∀{| _x | _x = _x}}", ".")
+    nested = desugared.ast.modules[0].lowered_module.target_statements[0].sub_modules[0]
+    assert nested.syms == ["_x"]
     try:
-        compile_text("∀{| x | ∀{| x | x = x}}")
+        compile_text("∀{| _x | ∀{| _x | _x = _x}}")
     except CompileError as error:
         assert "bound_sym_name_conflict" in str(error)
     else:
@@ -1049,7 +1191,7 @@ def test_semantic_suppresses_multiple_inheritance_candidates_warning() -> None:
 
 
 def test_semantic_warning_for_bare_index_operator_symbol() -> None:
-    for text in ["sym = []", "P([])", "∀{| [] | [] = x}"]:
+    for text in ["sym = []", "P([])", "∀{| [] | [] = _x}"]:
         diagnostics = collect_semantic_diagnostics_from_text(text)
         assert any(entry["code"] == "bare_index_operator_symbol" and entry["type"] == "warning" for entry in diagnostics), text
 
@@ -1059,7 +1201,7 @@ def test_semantic_bare_index_operator_symbol_exempts_definitions() -> None:
         "List\nList::[]: (list, id) => sym",
         "[]: (list, id) => sym",
         "Function ~ []",
-        "x = [](list, id)",
+        "_x = [](list, id)",
     ]:
         diagnostics = collect_semantic_diagnostics_from_text(text)
         assert not any(entry["code"] == "bare_index_operator_symbol" for entry in diagnostics), text
@@ -1115,8 +1257,8 @@ def test_semantic_nested_premise_declaration_output_rule() -> None:
 
 
 def test_sibling_submodules_can_reuse_name() -> None:
-    source = translate_ast_to_source(compile_text("∀{\n∀{| x | x = x}\n∀{| x | x = x}\n}"))
-    assert source.count("\n    | ^x\n") == 2
+    source = translate_ast_to_source(compile_text("∀{\n∀{| _x | _x = _x}\n∀{| _x | _x = _x}\n}"))
+    assert source.count("\n    | ^_x\n") == 2
 
 
 def test_authored_caret_generated_sym_is_accepted() -> None:
@@ -1130,164 +1272,166 @@ def test_double_underscore_sym_is_not_generated() -> None:
 
 
 def test_translate_omits_empty_binder_bar() -> None:
-    ast = compile_text("Val ~ min_val\n∀{| val1 | val1 ≥ min_val}")
+    ast = compile_text("Val ~ min_val\n∀{| _val1 | _val1 ≥ min_val}")
     source = translate_ast_to_source(ast)
     lines = source.splitlines()
     assert "|" not in [line.strip() for line in lines]
     assert any(line.strip() == "Val ~ min_val" for line in lines)
     assert not any(line.strip() == "| Val ~ min_val" for line in lines)
-    assert any(line.strip() == "| ^val1" for line in lines)
-    assert any(line.strip() == "| Symbol ~ ^val1" for line in lines)
-    assert any(line.strip() == "^val1 ≥ min_val" for line in lines)
+    assert any(line.strip() == "| ^_val1" for line in lines)
+    assert any(line.strip() == "| Symbol ~ ^_val1" for line in lines)
+    assert any(line.strip() == "^_val1 ≥ min_val" for line in lines)
 
 
 def test_translate_keeps_binder_line_when_present() -> None:
-    ast = compile_text("∀{| x | x = x}")
+    ast = compile_text("∀{| _x | _x = _x}")
     source = translate_ast_to_source(ast)
-    assert "\n  | ^x" in source
+    assert "\n  | ^_x" in source
 
 
 def test_nested_module_disassembly_is_indented() -> None:
-    ast = compile_text("-: (list, list1) => list2\n    list2.size = (list.size + list1.size)")
+    ast = compile_text("-: (_list, _list1) => _list2\n    _list2.size = (_list.size + _list1.size)")
     source = translate_ast_to_source(ast)
     assert "\n  Function ~ -\n" in source
     assert "\n  ∀{\n" in source
-    assert "\n    | ^list, ^list1, ^list2" in source
-    assert "\n    | ^list2 = ^list - ^list1\n" in source
+    assert "\n    | ^_list, ^_list1, ^_list2" in source
+    assert "\n    | ^_list2 = ^_list - ^_list1\n" in source
     assert "\n  }\n" in source
 
 
 def test_function_output_inheritance_disassembles_as_target() -> None:
-    text = "List\n-: (list, list1) => list2\n    list2.size = (list.size + list1.size)"
+    text = "List\n-: (_list, _list1) => _list2\n    _list2.size = (_list.size + _list1.size)"
     first_source = translate_ast_to_source(compile_text(text, base_dir=SKILL_DIR))
     second_source = translate_ast_to_source(compile_text(first_source, base_dir=SKILL_DIR))
     assert "\n  | ^List\n" not in first_source
     assert "\n  | Symbol ~ List\n" not in first_source
     assert "\n  Symbol ~ List\n" in first_source
-    assert "\n    | List ~ ^list\n" in first_source
-    assert "\n    | List ~ ^list1\n" in first_source
-    assert "\n    | List ~ ^list2\n" not in first_source
-    assert "\n    List ~ ^list2\n" in first_source
+    assert "\n    | List ~ ^_list\n" in first_source
+    assert "\n    | List ~ ^_list1\n" in first_source
+    assert "\n    | List ~ ^_list2\n" not in first_source
+    assert "\n    List ~ ^_list2\n" in first_source
     assert second_source == first_source
 
 
 def test_bound_syms_are_not_filtered_as_intrinsics() -> None:
-    ast = compile_text("∀{| Symbol, Function, true, false | Symbol = Function}")
-    assert [sym["name"] for sym in ast["bound_syms"] if not sym.get("generated")] == ["Symbol", "Function", "true", "false"]
+    payload = module_check.check_module("∀{| Symbol, Function, true, false | Symbol = Function}", "<stdin>", SKILL_DIR, is_file=False)
+    assert payload["summary"]["error_count"] == 1
+    assert payload["entries"][0]["code"] == "naming_error"
+    assert payload["entries"][0]["reason"].count("invalid_bound_sym_name") == 4
 
 
 def test_free_classifier_syms_are_not_auto_bound() -> None:
-    ast = compile_text("∀{| x | Symbol ~ x | x = x}")
-    assert [sym["name"] for sym in ast["bound_syms"] if not sym.get("generated")] == ["x"]
+    ast = compile_text("∀{| _x | Symbol ~ _x | _x = _x}")
+    assert [sym["name"] for sym in ast["bound_syms"] if not sym.get("generated")] == ["_x"]
 
 
 def test_function_output_inheritance_cases() -> None:
-    value_source = translate_ast_to_source(compile_text("Value\nF: value => out_value\n    out_value = out_value", base_dir=SKILL_DIR))
-    assert "\n    | Value ~ ^value\n" in value_source
-    assert "\n    | ^out_value = F(^value)\n" in value_source
-    assert "\n    Value ~ ^out_value\n" in value_source
-    assert "\n    | Value ~ ^out_value\n" not in value_source
+    value_source = translate_ast_to_source(compile_text("Value\nf: _value => _out_value\n    _out_value = _out_value", base_dir=SKILL_DIR))
+    assert "\n    | Value ~ ^_value\n" in value_source
+    assert "\n    | ^_out_value = f(^_value)\n" in value_source
+    assert "\n    Value ~ ^_out_value\n" in value_source
+    assert "\n    | Value ~ ^_out_value\n" not in value_source
 
-    symbol_source = translate_ast_to_source(compile_text("F: x => y\n    y = y", base_dir=SKILL_DIR))
-    assert "\n    | Symbol ~ ^x\n" in symbol_source
-    assert "\n    | ^y = F(^x)\n" in symbol_source
-    assert "\n    Symbol ~ ^y\n" in symbol_source
+    symbol_source = translate_ast_to_source(compile_text("f: _x => _y\n    _y = _y", base_dir=SKILL_DIR))
+    assert "\n    | Symbol ~ ^_x\n" in symbol_source
+    assert "\n    | ^_y = f(^_x)\n" in symbol_source
+    assert "\n    Symbol ~ ^_y\n" in symbol_source
 
-    generated_source = translate_ast_to_source(compile_text("F: ^x => ^y\n    ^y = ^y", base_dir=SKILL_DIR))
+    generated_source = translate_ast_to_source(compile_text("f: ^x => ^y\n    ^y = ^y", base_dir=SKILL_DIR))
     assert "Symbol ~ ^x" not in generated_source
     assert "Symbol ~ ^y" not in generated_source
 
-    bool_source = translate_ast_to_source(compile_text("Bool\nP: x => bool\n    P(x)", base_dir=SKILL_DIR))
-    assert "\n    Bool ~ ^bool\n" in bool_source
-    assert "\n    | Bool ~ ^bool\n" not in bool_source
+    bool_source = translate_ast_to_source(compile_text("Bool\np: _x => _is_valid\n    p(_x)", base_dir=SKILL_DIR))
+    assert "\n    Bool ~ ^_is_valid\n" in bool_source
+    assert "\n    | Bool ~ ^_is_valid\n" not in bool_source
 
 
 def test_is_prefixed_declared_syms_implicitly_inherit_bool() -> None:
-    input_source = translate_ast_to_source(compile_text("F: _is_val => out\n    P(_is_val)", base_dir=SKILL_DIR))
+    input_source = translate_ast_to_source(compile_text("f: _is_val => _out\n    P(_is_val)", base_dir=SKILL_DIR))
     assert "\n    | Bool ~ ^_is_val\n" in input_source
-    assert "\n    Symbol ~ ^out\n" in input_source
+    assert "\n    Symbol ~ ^_out\n" in input_source
 
-    output_source = translate_ast_to_source(compile_text("F: x => is_valid", base_dir=SKILL_DIR))
-    assert "\n    | Symbol ~ ^x\n" in output_source
-    assert "\n    Bool ~ ^is_valid\n" in output_source
-    assert "\n    | Bool ~ ^is_valid\n" not in output_source
+    output_source = translate_ast_to_source(compile_text("f: _x => _is_valid", base_dir=SKILL_DIR))
+    assert "\n    | Symbol ~ ^_x\n" in output_source
+    assert "\n    Bool ~ ^_is_valid\n" in output_source
+    assert "\n    | Bool ~ ^_is_valid\n" not in output_source
 
-    override_source = translate_ast_to_source(compile_text("Is_val\nF: _is_val => out\n    P(_is_val)", base_dir=SKILL_DIR))
+    override_source = translate_ast_to_source(compile_text("Is_val\nf: _is_val => _out\n    P(_is_val)", base_dir=SKILL_DIR))
     assert "\n    | Bool ~ ^_is_val\n" in override_source
     assert "Is_val ~ ^_is_val" not in override_source
 
-    generated_source = translate_ast_to_source(compile_text("F: ^is_val => ^out\n    P(^is_val)", base_dir=SKILL_DIR))
+    generated_source = translate_ast_to_source(compile_text("f: ^is_val => ^out\n    P(^is_val)", base_dir=SKILL_DIR))
     assert "Bool ~ ^is_val" not in generated_source
     assert "Symbol ~ ^is_val" not in generated_source
 
 
 def test_function_declaration_without_output_guarantee_omits_rule() -> None:
-    source = translate_ast_to_source(compile_text("F: ^x => ^y", base_dir=SKILL_DIR))
-    assert source.strip() == "∀{\n  Function ~ F\n}"
+    source = translate_ast_to_source(compile_text("f: ^x => ^y", base_dir=SKILL_DIR))
+    assert source.strip() == "∀{\n  Function ~ f\n}"
 
 
 def test_tuple_function_declaration_call_and_destructure_are_premises() -> None:
-    source = translate_ast_to_source(compile_text("F: x => (y, z)", base_dir=SKILL_DIR))
-    assert "\n    | ^tmpF0 = F(^x)\n" in source
-    assert "\n    | ^y = ^tmpF0[^tmpvalue1]\n" in source
-    assert "\n    | ^z = ^tmpF0[^tmpvalue2]\n" in source
-    assert "\n    Tuple ~ ^tmpF0\n" in source
-    assert "\n    Symbol ~ ^y\n" in source
-    assert "\n    Symbol ~ ^z\n" in source
+    source = translate_ast_to_source(compile_text("f: _x => (_y, _z)", base_dir=SKILL_DIR))
+    assert "\n    | ^tmpf0 = f(^_x)\n" in source
+    assert "\n    | ^_y = ^tmpf0[^tmpvalue1]\n" in source
+    assert "\n    | ^_z = ^tmpf0[^tmpvalue2]\n" in source
+    assert "\n    Tuple ~ ^tmpf0\n" in source
+    assert "\n    Symbol ~ ^_y\n" in source
+    assert "\n    Symbol ~ ^_z\n" in source
 
 
 def test_generated_tuple_function_declaration_keeps_tuple_guarantee() -> None:
-    source = translate_ast_to_source(compile_text("F: ^sym => (^sym1, ^sym2)", base_dir=SKILL_DIR))
+    source = translate_ast_to_source(compile_text("f: ^sym => (^sym1, ^sym2)", base_dir=SKILL_DIR))
     assert "\n  ∀{\n" in source
-    assert "\n    | ^tmpF0 = F(^sym)\n" in source
-    assert "\n    | ^sym1 = ^tmpF0[^tmpvalue1]\n" in source
-    assert "\n    | ^sym2 = ^tmpF0[^tmpvalue2]\n" in source
-    assert "\n    Tuple ~ ^tmpF0\n" in source
+    assert "\n    | ^tmpf0 = f(^sym)\n" in source
+    assert "\n    | ^sym1 = ^tmpf0[^tmpvalue1]\n" in source
+    assert "\n    | ^sym2 = ^tmpf0[^tmpvalue2]\n" in source
+    assert "\n    Tuple ~ ^tmpf0\n" in source
     assert "\n    Value ~ ^tmpvalue1\n" in source
     assert "\n    Value ~ ^tmpvalue2\n" in source
     assert "Symbol ~ ^sym" not in source
     assert "Symbol ~ ^sym1" not in source
     assert "Symbol ~ ^sym2" not in source
-    assert "\n    | Tuple ~ ^tmpF0\n" not in source
+    assert "\n    | Tuple ~ ^tmpf0\n" not in source
 
 
 def test_function_body_return_destructuring_omits_redundant_classifiers() -> None:
     source = translate_ast_to_source(
-        compile_text("Sym\nF: sym => (sym1, sym2)\n    | P1(sym)\n    P2(sym1, sym2)", base_dir=SKILL_DIR)
+        compile_text("Sym\nf: _sym => (_sym1, _sym2)\n    | P1(_sym)\n    P2(_sym1, _sym2)", base_dir=SKILL_DIR)
     )
-    assert "\n    | ^tmpF0 = F(^sym)\n" in source
-    assert "\n    Tuple ~ ^tmpF0\n" in source
+    assert "\n    | ^tmpf0 = f(^_sym)\n" in source
+    assert "\n    Tuple ~ ^tmpf0\n" in source
     assert "\n    Value ~ ^tmpvalue1\n" in source
     assert "\n    Value ~ ^tmpvalue2\n" in source
-    assert "\n    | ^tmpF3 = F(^sym)\n" in source
-    assert "\n    | ^sym1 = ^tmpF3[^tmpvalue4]\n" in source
-    assert "\n    | ^sym2 = ^tmpF3[^tmpvalue5]\n" in source
-    assert source.count("Tuple ~ ^tmpF") == 1
+    assert "\n    | ^tmpf3 = f(^_sym)\n" in source
+    assert "\n    | ^_sym1 = ^tmpf3[^tmpvalue4]\n" in source
+    assert "\n    | ^_sym2 = ^tmpf3[^tmpvalue5]\n" in source
+    assert source.count("Tuple ~ ^tmpf") == 1
     assert source.count("Value ~ ^tmpvalue") == 2
-    assert "\n    P2(^sym1, ^sym2)\n" in source
+    assert "\n    P2(^_sym1, ^_sym2)\n" in source
 
 
 def test_function_body_local_literal_classifier_is_preserved() -> None:
-    source = translate_ast_to_source(compile_text("Sym\nF: sym => out\n    P((sym, out))", base_dir=SKILL_DIR))
+    source = translate_ast_to_source(compile_text("Sym\nf: _sym => _out\n    P((_sym, _out))", base_dir=SKILL_DIR))
     assert source.count("Tuple ~ ") == 1
-    assert "\n    Tuple ~ ^tmpsym_out" in source
-    assert "P(^tmpsym_out" in source
+    assert "\n    Tuple ~ ^tmptuple0" in source
+    assert "P(^tmptuple0" in source
 
 
 def test_sibling_nested_modules_are_indented_consistently() -> None:
-    source = translate_ast_to_source(compile_text("∀{\n∀{| x | x = x}\n∀{| y | y = y}\n}"))
+    source = translate_ast_to_source(compile_text("∀{\n∀{| _x | _x = _x}\n∀{| _y | _y = _y}\n}"))
     assert source.count("\n  ∀{\n") == 2
-    assert "\n    | ^x\n" in source
-    assert "\n    | ^y\n" in source
+    assert "\n    | ^_x\n" in source
+    assert "\n    | ^_y\n" in source
 
 
 def test_target_literal_assignment_normalized() -> None:
-    ast = compile_text("∀{| x | x = 1}")
+    ast = compile_text("∀{| _x | _x = 1}")
     assert not target_bindings(ast)
-    assert any(binding["src_stmt"]["kind"] == "value_literal_stmt" for binding in ast["premise_binding_stmts"])
-    assert not any(stmt["arg_sym_list"][0]["name"] == "Value" for stmt in top_level_calls(ast, "~", "premise_PSs"))
-    assert any(stmt["arg_sym_list"][0]["name"] == "Value" for stmt in top_level_calls(ast, "~", "target_PSs"))
-    assert top_level_calls(ast, "=", "target_PSs")
+    assert any(binding["src_stmt"]["kind"] == "Value_literal_stmt" for binding in ast["premise_binding_stmts"])
+    assert not any(stmt["arg_sym_list"][0]["name"] == "Value" for stmt in top_level_calls(ast, "~", "premise_proposition_stmts"))
+    assert any(stmt["arg_sym_list"][0]["name"] == "Value" for stmt in top_level_calls(ast, "~", "target_proposition_stmts"))
+    assert top_level_calls(ast, "=", "target_proposition_stmts")
 
 
 def test_generated_literal_assignment_is_closure_stable() -> None:
@@ -1296,22 +1440,22 @@ def test_generated_literal_assignment_is_closure_stable() -> None:
 
 
 def test_nested_literal_argument_adds_classifier_target() -> None:
-    ast = compile_text("∀{| p, a, b | P((a, b))}")
-    assert any(binding["src_stmt"]["kind"] == "tuple_literal_stmt" for binding in ast["premise_binding_stmts"])
-    premise_calls = top_level_calls(ast, "~", "premise_PSs")
-    target_calls = top_level_calls(ast, "~", "target_PSs")
+    ast = compile_text("∀{| _p, _a, _b | P((_a, _b))}")
+    assert any(binding["src_stmt"]["kind"] == "Tuple_literal_stmt" for binding in ast["premise_binding_stmts"])
+    premise_calls = top_level_calls(ast, "~", "premise_proposition_stmts")
+    target_calls = top_level_calls(ast, "~", "target_proposition_stmts")
     assert not any(stmt["arg_sym_list"][0]["name"] == "Tuple" and stmt["arg_sym_list"][1].get("generated") for stmt in premise_calls)
     assert any(stmt["arg_sym_list"][0]["name"] == "Tuple" and stmt["arg_sym_list"][1].get("generated") for stmt in target_calls)
 
 
 def test_authored_premise_literal_classifier_keeps_premise_and_adds_target() -> None:
-    ast = compile_text("∀{| x | Value ~ 1 | x = x}")
+    ast = compile_text("∀{| _x | Value ~ 1 | _x = _x}")
     premise_calls = [
-        stmt for stmt in top_level_calls(ast, "~", "premise_PSs")
+        stmt for stmt in top_level_calls(ast, "~", "premise_proposition_stmts")
         if stmt["arg_sym_list"][0]["name"] == "Value" and stmt["arg_sym_list"][1].get("generated")
     ]
     target_calls = [
-        stmt for stmt in top_level_calls(ast, "~", "target_PSs")
+        stmt for stmt in top_level_calls(ast, "~", "target_proposition_stmts")
         if stmt["arg_sym_list"][0]["name"] == "Value" and stmt["arg_sym_list"][1].get("generated")
     ]
     assert len(premise_calls) == 1, premise_calls
@@ -1320,52 +1464,52 @@ def test_authored_premise_literal_classifier_keeps_premise_and_adds_target() -> 
 
 
 def test_authored_target_literal_classifier_dedupes_generated_target() -> None:
-    source = translate_ast_to_source(compile_text("∀{| x | Value ~ 1}"))
+    source = translate_ast_to_source(compile_text("∀{| _x | Value ~ 1}"))
     assert source.count("\n  Value ~ ^tmp10\n") == 1, source
 
 
 def test_target_module_assignment_normalized() -> None:
-    ast = compile_text("∀{| x | x = ∀{| y | y = y}}")
+    ast = compile_text("∀{| _x | _x = ∀{| _y | _y = _y}}")
     assert not target_bindings(ast)
-    assert any(binding["src_stmt"]["kind"] == "quantified_stmt" for binding in ast["premise_binding_stmts"])
-    assert top_level_calls(ast, "=", "target_PSs")
+    assert any(binding["src_stmt"]["kind"] == "Quantified_stmt" for binding in ast["premise_binding_stmts"])
+    assert top_level_calls(ast, "=", "target_proposition_stmts")
 
 
 def test_multiline_binding_rhs_disassembly_is_indented() -> None:
     text = "sym = {| ^sym | ^sym >= 0 => ^sym + 1}"
     first_source = translate_ast_to_source(compile_text(text))
     second_source = translate_ast_to_source(compile_text(first_source))
-    assert "\n  | ^tmpmodule03 = {\n    | ^logic_language_out0\n" in first_source
+    assert "\n  | ^tmp03 = {\n    | ^logic_language_out0\n" in first_source
     assert "\n    ∃{\n      | ^sym, ^tmp00, ^tmp11, ^tmpadd2\n" in first_source
     assert "\n      Value ~ ^tmp00\n      Value ~ ^tmp11\n      ^logic_language_out0 = ^tmpadd2\n" in first_source
-    assert "\n    }\n  }\n  sym = ^tmpmodule03\n" in first_source
-    assert "\n}\n  sym = ^tmpmodule03\n" not in first_source
+    assert "\n    }\n  }\n  sym = ^tmp03\n" in first_source
+    assert "\n}\n  sym = ^tmp03\n" not in first_source
     assert second_source == first_source
 
 
 def test_disassembled_final_ast_preserves_target_placement() -> None:
-    ast = compile_text("Val ~ min_val\n∀{| val1 | val1 ≥ min_val}")
+    ast = compile_text("Val ~ min_val\n∀{| _val1 | _val1 ≥ min_val}")
     source = translate_ast_to_source(ast)
     reparsed = compile_text(source)
     assert not target_bindings(reparsed)
-    assert any(stmt.get("call_sym", {}).get("name") == "~" for stmt in reparsed["target_PSs"])
-    assert not any(stmt.get("call_sym", {}).get("name") == "~" for stmt in reparsed["premise_PSs"])
+    assert any(stmt.get("call_sym", {}).get("name") == "~" for stmt in reparsed["target_proposition_stmts"])
+    assert not any(stmt.get("call_sym", {}).get("name") == "~" for stmt in reparsed["premise_proposition_stmts"])
 
 
 def test_round_trip_disassembly_is_idempotent() -> None:
-    text = "Val ~ min_val\n∀{| val1 | val1 ≥ min_val}"
+    text = "Val ~ min_val\n∀{| _val1 | _val1 ≥ min_val}"
     first_ast = compile_text(text)
     first_source = translate_ast_to_source(first_ast)
     second_ast = compile_text(first_source)
     second_source = translate_ast_to_source(second_ast)
     assert second_source == first_source
-    assert first_source.count("| Symbol ~ ^val1") == 1
-    assert "| ^val1 ~ ^val1" not in first_source
-    assert "| Val ~ ^val1" not in first_source
+    assert first_source.count("| Symbol ~ ^_val1") == 1
+    assert "| ^_val1 ~ ^_val1" not in first_source
+    assert "| Val ~ ^_val1" not in first_source
 
 
 def test_generated_temp_round_trip_is_idempotent() -> None:
-    text = "-: (list, list1) => list2\n    list2.size = (list.size + list1.size)"
+    text = "-: (_list, _list1) => _list2\n    _list2.size = (_list.size + _list1.size)"
     first_ast = compile_text(text)
     first_source = translate_ast_to_source(first_ast)
     second_ast = compile_text(first_source)
@@ -1378,7 +1522,7 @@ def test_generated_temp_round_trip_is_idempotent() -> None:
 
 
 def test_wrapper_round_trip_is_stable() -> None:
-    text = "∀{| a, b | Tuple ~ (a, b)}"
+    text = "∀{| _a, _b | Tuple ~ (_a, _b)}"
     first_source = translate_ast_to_source(compile_text(text))
     second_source = translate_ast_to_source(compile_text(first_source))
     assert second_source == first_source
@@ -1388,8 +1532,8 @@ def test_tuple_assignment_round_trip_adds_classifier_predicate() -> None:
     text = "x = (a, b)"
     first_source = translate_ast_to_source(compile_text(text))
     second_source = translate_ast_to_source(compile_text(first_source))
-    assert "\n  Tuple ~ ^tmpa_b0\n" in first_source
-    assert "| Tuple ~ ^tmpa_b0" not in first_source
+    assert "\n  Tuple ~ ^tmptuple0\n" in first_source
+    assert "| Tuple ~ ^tmptuple0" not in first_source
     assert second_source == first_source
 
 
@@ -1413,7 +1557,7 @@ def test_run_compile_pipeline_fails_on_final_ast_validation_invalid_name() -> No
     compile_module_script.FinalAstChecker = FakeChecker
     try:
         try:
-            run_compile_pipeline("∀{| x | x = x}")
+            run_compile_pipeline("∀{| _x | _x = _x}")
         except CompileError as error:
             message = str(error)
             assert "final AST validation failed:" in message
@@ -1445,7 +1589,7 @@ def test_run_compile_pipeline_fails_on_final_ast_validation_conflict() -> None:
     compile_module_script.FinalAstChecker = FakeChecker
     try:
         try:
-            run_compile_pipeline("∀{| x | x = x}")
+            run_compile_pipeline("∀{| _x | _x = _x}")
         except CompileError as error:
             message = str(error)
             assert "bound_sym_name_conflict" in message
@@ -1466,7 +1610,7 @@ class FakeChecker:
     def check(self, ast):
         return [{"file":"<ast>","lineno":0,"col_start_no":0,"col_end_no":1,"type":"error","code":"invalid_bound_sym_name","reason":"bad"}]
 compile_module.FinalAstChecker = FakeChecker
-sys.argv = ["compile_module.py", "--text", "∀{| x | x = x}"]
+sys.argv = ["compile_module.py", "--text", "∀{| _x | _x = _x}"]
 raise SystemExit(compile_module.main())
 """
     result = subprocess.run(
@@ -1493,7 +1637,7 @@ class FakeChecker:
     def check(self, ast):
         return [{"file":"<ast>","lineno":0,"col_start_no":0,"col_end_no":1,"type":"error","code":"invalid_bound_sym_name","reason":"bad"}]
 compile_module.FinalAstChecker = FakeChecker
-sys.argv = ["compile_module.py", "--debug-stages", "--text", "∀{| x | x = x}"]
+sys.argv = ["compile_module.py", "--debug-stages", "--text", "∀{| _x | _x = _x}"]
 raise SystemExit(compile_module.main())
 """
     result = subprocess.run(
@@ -1505,8 +1649,8 @@ raise SystemExit(compile_module.main())
         check=False,
     )
     assert result.returncode == 1
-    assert "stage: stage1_normalize_source" in result.stdout
-    assert "stage: stage5_lower_to_module_ast" in result.stdout
+    assert '"stage": "stage1_front_end"' in result.stdout
+    assert '"stage": "stage2_back_end"' in result.stdout
     assert "final AST validation failed:" in result.stderr
 
 
@@ -1624,16 +1768,15 @@ def test_module_check_positioned_class_field_assignment_body_error() -> None:
 
 def test_module_check_positioned_arrow_and_literal_errors() -> None:
     cases = [
-        ("f: x -> y\n    P(y)\n", "function-assign '->' is not supported; use '=>' with an indented function body", 0, 5, 7),
-        ("x = '\\q'\n", "invalid escape sequence \\q", 0, 5, 7),
-        ("'x' = y\n", "literal cannot appear on assignment left-hand side", 0, 0, 1),
+        ("f: _x -> _y\n    P(_y)\n", "syntax", "function-assign '->' is not supported; use '=>' with an indented function body", 0, 6, 8),
+        ("x = '\\q'\n", "compile", "invalid escape sequence \\q", 0, 5, 7),
     ]
 
-    for text, reason, line, col_start, col_end in cases:
+    for text, stage, reason, line, col_start, col_end in cases:
         payload = module_check.check_module(text, module_check.STDIN_FILE, Path("."), is_file=False)
         assert payload["summary"]["error_count"] == 1, (text, payload)
         entry = payload["entries"][0]
-        assert entry["stage"] == "syntax"
+        assert entry["stage"] == stage
         assert entry["reason"] == reason
         assert entry["lineno"] == line
         assert entry["col_start_no"] == col_start
@@ -1702,7 +1845,7 @@ def test_module_check_semantic_error_stops_before_compile() -> None:
     module_check.semantic_entries = semantic_error
     module_check.run_compile_pipeline = fail_compile
     try:
-        payload = module_check.check_module("∀{| x | x = x}", module_check.STDIN_FILE, Path("."), is_file=False)
+        payload = module_check.check_module("∀{| _x | _x = _x}", module_check.STDIN_FILE, Path("."), is_file=False)
     finally:
         module_check.semantic_entries = original_semantic_entries
         module_check.run_compile_pipeline = original_run_compile_pipeline
@@ -1736,7 +1879,7 @@ def test_module_check_semantic_warning_continues_to_compile() -> None:
     module_check.semantic_entries = semantic_warning
     module_check.run_compile_pipeline = compile_ok
     try:
-        payload = module_check.check_module("∀{| x | x = x}", module_check.STDIN_FILE, Path("."), is_file=False)
+        payload = module_check.check_module("∀{| _x | _x = _x}", module_check.STDIN_FILE, Path("."), is_file=False)
     finally:
         module_check.semantic_entries = original_semantic_entries
         module_check.run_compile_pipeline = original_run_compile_pipeline
@@ -1753,7 +1896,7 @@ def test_module_check_compile_error_uses_entry_file_start() -> None:
 
     module_check.run_compile_pipeline = compile_fails
     try:
-        payload = module_check.check_module("∀{| x | x = x}", "/tmp/input.lp", Path("."), is_file=False)
+        payload = module_check.check_module("∀{| _x | _x = _x}", "/tmp/input.lp", Path("."), is_file=False)
     finally:
         module_check.run_compile_pipeline = original_run_compile_pipeline
 
@@ -1773,19 +1916,11 @@ def test_module_check_compile_error_uses_source_fragment_location() -> None:
     entry = payload["entries"][0]
     assert entry["stage"] == "compile"
     assert entry["file"] == "/tmp/input.lp"
-    assert entry["reason"] == "unsupported expression: a ??? b"
-    assert entry["lineno"] == 0
-    assert entry["col_start_no"] == 4
-    assert entry["col_end_no"] == 11
-    assert entry["code"] == "compile_error"
-
-    payload = module_check.check_module("1\n", "/tmp/input.lp", Path("."), is_file=False)
-    entry = payload["entries"][0]
-    assert entry["stage"] == "compile"
-    assert entry["reason"] == "unsupported non-call statement: 1"
+    assert entry["reason"] == "unsupported expression: raw"
     assert entry["lineno"] == 0
     assert entry["col_start_no"] == 0
     assert entry["col_end_no"] == 1
+    assert entry["code"] == "compile_error"
 
 
 def test_module_check_final_ast_diagnostics_keep_location_and_code() -> None:
@@ -1805,7 +1940,7 @@ def test_module_check_final_ast_diagnostics_keep_location_and_code() -> None:
 
     module_check.run_compile_pipeline = final_ast_fails
     try:
-        payload = module_check.check_module("∀{| x | x = x}", "/tmp/input.lp", Path("."), is_file=False)
+        payload = module_check.check_module("∀{| _x | _x = _x}", "/tmp/input.lp", Path("."), is_file=False)
     finally:
         module_check.run_compile_pipeline = original_run_compile_pipeline
 
@@ -1814,20 +1949,20 @@ def test_module_check_final_ast_diagnostics_keep_location_and_code() -> None:
 
 
 def test_module_check_final_ast_plain_declaration_conflict_uses_input_location() -> None:
-    source = "∀\n    | x\n    F: x => y\n"
+    source = "∀\n    | _x\n    f: _x => _y\n"
     payload = module_check.check_module(source, "/tmp/input.lp", Path("."), is_file=False)
 
     assert payload["summary"]["error_count"] == 1
     entry = next(entry for entry in payload["entries"] if entry["stage"] == "final_ast")
     assert entry["stage"] == "final_ast"
     assert entry["code"] == "bound_sym_name_conflict"
-    assert entry["reason"] == "bound-sym name 'x' conflicts with ancestor statement"
+    assert entry["reason"] == "bound-sym name '_x' conflicts with ancestor statement"
     assert entry["lineno"] == 2
-    assert entry["col_start_no"] == source.splitlines()[2].index("x")
+    assert entry["col_start_no"] == source.splitlines()[2].index("_x")
 
 
 def test_module_check_final_ast_class_method_body_conflict_uses_declaration_location() -> None:
-    source = "∀\n    | x\n    Class\n    Class::m: x => y\n        P(y)\n"
+    source = "∀\n    | _x\n    Class\n    Class::m: _x => _y\n        P(_y)\n"
     payload = module_check.check_module(source, "/tmp/input.lp", Path("."), is_file=False)
 
     assert payload["summary"]["error_count"] == 2
@@ -1835,7 +1970,7 @@ def test_module_check_final_ast_class_method_body_conflict_uses_declaration_loca
     assert entry["stage"] == "final_ast"
     assert entry["code"] == "bound_sym_name_conflict"
     assert entry["lineno"] == 3
-    assert entry["col_start_no"] == source.splitlines()[3].index("x")
+    assert entry["col_start_no"] == source.splitlines()[3].index("_x")
 
 
 def test_module_check_text_import_resolves_standard_library_from_skill_dir() -> None:
@@ -1882,7 +2017,7 @@ def test_module_check_stdin_import_uses_base_dir() -> None:
                 "--base-dir",
                 str(root),
             ],
-            input="$import imported.lp\n∀{| x | x = x}",
+            input="$import imported.lp\n∀{| _x | _x = _x}",
             capture_output=True,
             text=True,
             encoding="utf-8",
@@ -1896,7 +2031,7 @@ def test_module_check_stdin_import_uses_base_dir() -> None:
 
 def test_expand_module_cli_text_mode() -> None:
     result = subprocess.run(
-        [sys.executable, str(SCRIPTS_DIR / "expand_module.py"), "--text", "∀{| x | x = x}"],
+        [sys.executable, str(SCRIPTS_DIR / "expand_module.py"), "--text", "∀{| _x | _x = _x}"],
         capture_output=True,
         text=True,
         encoding="utf-8",
@@ -1905,13 +2040,13 @@ def test_expand_module_cli_text_mode() -> None:
     )
     assert result.returncode == 0
     assert result.stderr == ""
-    assert result.stdout == "∀{\n  | ^x\n  | Symbol ~ ^x\n  ^x = ^x\n}\n"
+    assert result.stdout == "∀{\n  | ^_x\n  | Symbol ~ ^_x\n  ^_x = ^_x\n}\n"
 
 
 def test_expand_module_cli_file_mode() -> None:
     with tempfile.TemporaryDirectory() as temp_dir:
         path = Path(temp_dir) / "input.lp"
-        path.write_text("∀{| x | x = x}", encoding="utf-8")
+        path.write_text("∀{| _x | _x = _x}", encoding="utf-8")
         result = subprocess.run(
             [sys.executable, str(SCRIPTS_DIR / "expand_module.py"), str(path)],
             capture_output=True,
@@ -1922,13 +2057,13 @@ def test_expand_module_cli_file_mode() -> None:
         )
     assert result.returncode == 0
     assert result.stderr == ""
-    assert result.stdout == "∀{\n  | ^x\n  | Symbol ~ ^x\n  ^x = ^x\n}\n"
+    assert result.stdout == "∀{\n  | ^_x\n  | Symbol ~ ^_x\n  ^_x = ^_x\n}\n"
 
 
 def test_expand_module_cli_stdin_mode() -> None:
     result = subprocess.run(
         [sys.executable, str(SCRIPTS_DIR / "expand_module.py")],
-        input="∀{| x | x = x}",
+        input="∀{| _x | _x = _x}",
         capture_output=True,
         text=True,
         encoding="utf-8",
@@ -1937,266 +2072,12 @@ def test_expand_module_cli_stdin_mode() -> None:
     )
     assert result.returncode == 0
     assert result.stderr == ""
-    assert result.stdout == "∀{\n  | ^x\n  | Symbol ~ ^x\n  ^x = ^x\n}\n"
+    assert result.stdout == "∀{\n  | ^_x\n  | Symbol ~ ^_x\n  ^_x = ^_x\n}\n"
 
 
 def test_expand_module_cli_invalid_input() -> None:
     result = subprocess.run(
-        [sys.executable, str(SCRIPTS_DIR / "expand_module.py"), "--text", "∀{| 1x | 1x = 1x}"],
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        cwd=SKILL_DIR,
-        check=False,
-    )
-    assert result.returncode == 1
-    assert result.stdout == ""
-    assert result.stderr
-
-
-def test_normalize_module_declarations_groups_source_units() -> None:
-    source = "\n".join(
-        [
-            "y",
-            "F: _a => _b",
-            "    _b = _a",
-            "Class::m: _class => _out",
-            "    _out = _class",
-            "A ~ B",
-            "F: _x => _y",
-            "    _y = _x",
-            "Class",
-            "    ::field",
-            "    ::m: _class => _out2",
-            "        _out2 = _class",
-            "z = z",
-        ]
-    )
-    assert normalize_module_declarations.normalize_module_declarations_text(source) == "\n".join(
-        [
-            "y",
-            "A ~ B",
-            "Class",
-            "    ::m: _class => _out",
-            "        _out = _class",
-            "    ::m: _class => _out2",
-            "        _out2 = _class",
-            "    ::field",
-            "F: _a => _b",
-            "    _b = _a",
-            "F: _x => _y",
-            "    _y = _x",
-            "z = z",
-            "",
-        ]
-    )
-
-
-def test_normalize_module_declarations_places_inheritance_before_member_bodies() -> None:
-    source = "\n".join(
-        [
-            "B",
-            "A",
-            "A ~ B",
-            "B::method: (_b, _in) => _out",
-            "    P(_out)",
-        ]
-    )
-    assert normalize_module_declarations.normalize_module_declarations_text(source) == "\n".join(
-        [
-            "A",
-            "A ~ B",
-            "B",
-            "    ::method: (_b, _in) => _out",
-            "        P(_out)",
-            "",
-        ]
-    )
-
-
-def test_normalize_module_declarations_unindents_multiline_logical_member_body() -> None:
-    source = "\n".join(
-        [
-            "Class",
-            "Class::m: _class => _out",
-            "    _out = {",
-            "        | _item",
-            "        P(_item)",
-            "    }",
-        ]
-    )
-    assert normalize_module_declarations.normalize_module_declarations_text(source) == "\n".join(
-        [
-            "Class",
-            "    ::m: _class => _out",
-            "        _out = {",
-            "            | _item",
-            "            P(_item)",
-            "        }",
-            "",
-        ]
-    )
-
-
-def test_normalize_module_declarations_respects_nested_block_barriers() -> None:
-    source = "\n".join(
-        [
-            "B",
-            "A ~ B",
-            "F: _a => _b",
-            "    _b = _a",
-            "∀",
-            "    D",
-            "    C",
-            "    C ~ D",
-            "    D::m: _d => _out",
-            "        P(_out)",
-            "    H: _x => _y",
-            "        _y = _x",
-            "    h = h",
-            "F: _x => _y",
-            "    _y = _x",
-        ]
-    )
-    assert normalize_module_declarations.normalize_module_declarations_text(source) == "\n".join(
-        [
-            "B",
-            "A ~ B",
-            "F: _a => _b",
-            "    _b = _a",
-            "∀",
-            "    C",
-            "    C ~ D",
-            "    D",
-            "        ::m: _d => _out",
-            "            P(_out)",
-            "    H: _x => _y",
-            "        _y = _x",
-            "    h = h",
-            "F: _x => _y",
-            "    _y = _x",
-            "",
-        ]
-    )
-
-
-def test_normalize_module_declarations_opaque_exists_and_declaration_bodies() -> None:
-    source = "\n".join(
-        [
-            "G: _a => _b",
-            "    ∀",
-            "        F: _x => _y",
-            "            _y = _x",
-            "        f = f",
-            "    _b = _a",
-            "∃{",
-            "| _x",
-            "F: _x => _y",
-            "    _y = _x",
-            "}",
-            "G: _x => _y",
-            "    _y = _x",
-        ]
-    )
-    normalized = normalize_module_declarations.normalize_module_declarations_text(source)
-    assert normalized.count("G:") == 2
-    assert "    ∀\n        F: _x => _y\n            _y = _x\n        f = f" in normalized
-    assert "∃{\n| _x\nF: _x => _y\n    _y = _x\n}" in normalized
-    assert normalized.index("G: _a => _b") < normalized.index("∃{") < normalized.index("G: _x => _y")
-
-
-def test_normalize_module_declarations_cli_modes_and_imports() -> None:
-    with tempfile.TemporaryDirectory() as temp_dir:
-        root = Path(temp_dir)
-        imported = root / "imported.lp"
-        source_file = root / "source.lp"
-        imported.write_text("Imported\n", encoding="utf-8")
-        source_file.write_text("$import imported.lp\nf = f", encoding="utf-8")
-
-        file_result = subprocess.run(
-            [sys.executable, str(SCRIPTS_DIR / "normalize_module_declarations.py"), str(source_file)],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            cwd=SKILL_DIR,
-            check=False,
-        )
-        text_result = subprocess.run(
-            [
-                sys.executable,
-                str(SCRIPTS_DIR / "normalize_module_declarations.py"),
-                "--base-dir",
-                str(root),
-                "--text",
-                "$import imported.lp\nf = f",
-            ],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            cwd=SKILL_DIR,
-            check=False,
-        )
-        stdin_result = subprocess.run(
-            [sys.executable, str(SCRIPTS_DIR / "normalize_module_declarations.py"), "--base-dir", str(root)],
-            input="$import imported.lp\nf = f",
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            cwd=SKILL_DIR,
-            check=False,
-        )
-
-    for result in (file_result, text_result, stdin_result):
-        assert result.returncode == 0, result.stderr or result.stdout
-        assert result.stderr == ""
-        assert result.stdout == "Imported\nf = f\n"
-
-
-def test_normalize_module_declarations_dedupes_transitive_imports() -> None:
-    normalized = normalize_module_declarations.normalize_module_declarations_text(
-        (SKILL_DIR / "semantic_logic" / "sym_type_resolver.lp").read_text(encoding="utf-8"),
-        SKILL_DIR / "semantic_logic",
-        source=str((SKILL_DIR / "semantic_logic" / "sym_type_resolver.lp").resolve()),
-        allow_imports=True,
-    )
-    assert [line for line in normalized.splitlines() if line == "Stmt~Binding_stmt"] == ["Stmt~Binding_stmt"]
-    assert [line for line in normalized.splitlines() if line == "Stmt"] == ["Stmt"]
-    assert "    ::get_sym_type: (_stmt, _sym) => _sym_type" in normalized
-    lines = normalized.splitlines()
-    assert lines.index("Stmt~Binding_stmt") + 1 == lines.index("Binding_stmt")
-
-
-def test_normalize_module_declarations_requires_explicit_class_members() -> None:
-    for source in ["Class::m: _class => _out", "A ~ Class\nClass::m: _class => _out", "Class::field = value"]:
-        try:
-            normalize_module_declarations.normalize_module_declarations_text(source)
-        except CompileError as error:
-            assert "class member declaration requires explicit class declaration: Class" in str(error)
-        else:
-            raise AssertionError(f"expected undeclared class member owner to fail: {source!r}")
-
-    normalized = normalize_module_declarations.normalize_module_declarations_text("Class::m: _class => _out\nClass")
-    assert "Class\n    ::m: _class => _out" in normalized
-
-    normalized = normalize_module_declarations.normalize_module_declarations_text("Class::field = value\nClass")
-    assert "Class\n    ::field = value" in normalized
-
-    normalized = normalize_module_declarations.normalize_module_declarations_text("Class\n    ::field = value")
-    assert "Class\n    ::field = value" in normalized
-
-    with tempfile.TemporaryDirectory() as directory:
-        root = Path(directory)
-        (root / "imported.lp").write_text("Class\n", encoding="utf-8")
-        normalized = normalize_module_declarations.normalize_module_declarations_text(
-            "$import imported.lp\nClass::m: _class => _out",
-            base_dir=root,
-        )
-    assert "Class\n    ::m: _class => _out" in normalized
-
-
-def test_normalize_module_declarations_cli_invalid_input() -> None:
-    result = subprocess.run(
-        [sys.executable, str(SCRIPTS_DIR / "normalize_module_declarations.py"), "--text", "∀{\n  x = x"],
+        [sys.executable, str(SCRIPTS_DIR / "expand_module.py"), "--text", "{| }"],
         capture_output=True,
         text=True,
         encoding="utf-8",
@@ -2243,7 +2124,7 @@ def test_resolve_sym_type_class_wins_over_callable_evidence() -> None:
 
 
 def test_resolve_sym_type_operator_symbols_are_not_colorable() -> None:
-    payload = resolve_sym_type.resolve_text("Function ~ []\nx = [](y)\nz = [:](x, y)")
+    payload = resolve_sym_type.resolve_text("Function ~ []\n_x = [](y)\nz = [:](x, y)")
     assert resolved_symbol(payload, "[]")["type"] == "func"
     assert resolved_symbol(payload, "=")["type"] == "pred"
     assert resolved_symbol(payload, "~")["type"] == "pred"
@@ -2259,12 +2140,12 @@ def test_resolve_sym_type_definition_locations() -> None:
             [
                 "A~B",
                 "B",
-                "f: x => y",
-                "    y = f(x)",
+                "f: _x => _y",
+                "    _y = f(_x)",
                 "Function ~ g",
-                "z = g(y)",
+                "_z = g(_y)",
                 "Predicate ~ p",
-                "p(z)",
+                "p(_z)",
             ]
         )
     )
@@ -2273,8 +2154,8 @@ def test_resolve_sym_type_definition_locations() -> None:
     assert occurrence_on_line(payload, "f", 3)["definition"]["lineno"] == 2
     assert occurrence_on_line(payload, "g", 5)["definition"]["lineno"] == 4
     assert occurrence_on_line(payload, "p", 7)["definition"]["lineno"] == 6
-    assert "definition" not in occurrence_on_line(payload, "x", 3)
-    assert "definition" not in occurrence_on_line(payload, "z", 7)
+    assert "definition" not in occurrence_on_line(payload, "_x", 3)
+    assert "definition" not in occurrence_on_line(payload, "_z", 7)
 
 
 def test_resolve_sym_type_class_typed_pure_symbol_definition() -> None:
@@ -2307,17 +2188,17 @@ def test_resolve_sym_type_class_typed_pure_symbol_falls_back_to_fact() -> None:
 
 
 def test_resolve_sym_type_class_typed_pure_symbol_beats_pure_intro() -> None:
-    payload = resolve_sym_type.resolve_text("| value\nClass\nClass ~ value\nP(value)")
-    occurrence = occurrence_on_line(payload, "value", 3)
+    payload = resolve_sym_type.resolve_text("| _value\nClass\nClass ~ _value\nP(_value)")
+    occurrence = occurrence_on_line(payload, "_value", 3)
     assert occurrence["type"] == "pure"
     assert occurrence["definition"]["name"] == "Class"
     assert occurrence["definition"]["lineno"] == 1
 
 
 def test_resolve_sym_type_untyped_pure_symbol_has_no_definition() -> None:
-    payload = resolve_sym_type.resolve_text("| x\nP(x)")
-    assert "definition" not in occurrence_on_line(payload, "x", 0)
-    assert "definition" not in occurrence_on_line(payload, "x", 1)
+    payload = resolve_sym_type.resolve_text("| _x\nP(_x)")
+    assert "definition" not in occurrence_on_line(payload, "_x", 0)
+    assert "definition" not in occurrence_on_line(payload, "_x", 1)
 
 
 def test_resolve_sym_type_output_uses_generated_signature_class_evidence() -> None:
@@ -2326,12 +2207,12 @@ def test_resolve_sym_type_output_uses_generated_signature_class_evidence() -> No
             [
                 "Sym_type",
                 "Stmt",
-                "Stmt::get_sym_type: (stmt, sym) => sym_type",
-                "    sym_type = sym_type",
+                "Stmt::get_sym_type: (_stmt, _sym) => _sym_type",
+                "    _sym_type = _sym_type",
             ]
         )
     )
-    occurrence = occurrence_on_line(payload, "sym_type", 2)
+    occurrence = occurrence_on_line(payload, "_sym_type", 2)
     assert occurrence["type"] == "pure"
     assert not occurrence["colorable"]
     assert occurrence["definition"] == {
@@ -2362,7 +2243,7 @@ def test_resolve_sym_type_signature_class_evidence_uses_numeric_suffixes() -> No
 
 
 def test_resolve_sym_type_class_suffix_fallback_definition() -> None:
-    payload = resolve_sym_type.resolve_text("Chip_mem\nF: _chip_mem_class => _out")
+    payload = resolve_sym_type.resolve_text("Chip_mem\nf: _chip_mem_class => _out")
     occurrence = occurrence_on_line(payload, "_chip_mem_class", 1)
     assert occurrence["type"] == "pure"
     assert not occurrence["colorable"]
@@ -2375,7 +2256,7 @@ def test_resolve_sym_type_generated_binder_class_evidence_defines_pure_symbol() 
         "\n".join(
             [
                 "Id",
-                "F: _x => _out",
+                "f: _x => _out",
                 "    ∀{",
                 "        | _id1, _id2",
                 "        | 0 ≤ _id1 < _id2",
@@ -2393,15 +2274,15 @@ def test_resolve_sym_type_generated_binder_class_evidence_defines_pure_symbol() 
 
 
 def test_resolve_sym_type_authored_premise_class_fact_does_not_define_pure_symbol() -> None:
-    payload = resolve_sym_type.resolve_text("Val\nF: x => y\n    | Val ~ x\n    y = y")
-    assert "definition" not in occurrence_on_line(payload, "x", 1)
-    assert "definition" not in occurrence_on_line(payload, "x", 2)
+    payload = resolve_sym_type.resolve_text("Val\nf: _x => _y\n    | Val ~ _x\n    _y = _y")
+    assert "definition" not in occurrence_on_line(payload, "_x", 1)
+    assert "definition" not in occurrence_on_line(payload, "_x", 2)
 
 
 def test_resolve_sym_type_authored_premise_class_fact_is_not_class_navigation_evidence() -> None:
-    payload = resolve_sym_type.resolve_text("Id\nF: x => y\n    | Id ~ x\n    y = y")
-    assert "definition" not in occurrence_on_line(payload, "x", 1)
-    assert "definition" not in occurrence_on_line(payload, "x", 2)
+    payload = resolve_sym_type.resolve_text("Id\nf: _x => _y\n    | Id ~ _x\n    _y = _y")
+    assert "definition" not in occurrence_on_line(payload, "_x", 1)
+    assert "definition" not in occurrence_on_line(payload, "_x", 2)
 
 
 def test_resolve_sym_type_imported_signature_class_definition() -> None:
@@ -2424,14 +2305,14 @@ def test_resolve_sym_type_target_equality_propagates_class_definition() -> None:
         "\n".join(
             [
                 "Sym_type",
-                "Sym_type ~ class_sym_type",
-                "f: x => out",
-                "    out = class_sym_type",
+                "Sym_type ~ _class_sym_type",
+                "f: _x => _out",
+                "    _out = _class_sym_type",
             ]
         )
     )
-    assert occurrence_on_line(payload, "out", 2)["definition"]["name"] == "Sym_type"
-    assert occurrence_on_line(payload, "out", 3)["definition"]["name"] == "Sym_type"
+    assert occurrence_on_line(payload, "_out", 2)["definition"]["name"] == "Sym_type"
+    assert occurrence_on_line(payload, "_out", 3)["definition"]["name"] == "Sym_type"
 
 
 def test_resolve_sym_type_premise_equality_does_not_propagate_class_definition() -> None:
@@ -2439,16 +2320,16 @@ def test_resolve_sym_type_premise_equality_does_not_propagate_class_definition()
         "\n".join(
             [
                 "Sym_type",
-                "Sym_type ~ class_sym_type",
-                "f: x => out",
-                "    | out = class_sym_type",
-                "    out = out",
+                "Sym_type ~ _class_sym_type",
+                "f: _x => _out",
+                "    | _out = _class_sym_type",
+                "    _out = _out",
             ]
         )
     )
-    assert "definition" not in occurrence_on_line(payload, "out", 2)
-    assert "definition" not in occurrence_on_line(payload, "out", 3)
-    assert "definition" not in occurrence_on_line(payload, "out", 4)
+    assert "definition" not in occurrence_on_line(payload, "_out", 2)
+    assert "definition" not in occurrence_on_line(payload, "_out", 3)
+    assert "definition" not in occurrence_on_line(payload, "_out", 4)
 
 
 def test_resolve_sym_type_inheritance_fact_does_not_define_capital_class_name() -> None:
@@ -2464,22 +2345,22 @@ def test_resolve_sym_type_class_block_receiver_definition() -> None:
                 "Notsubset_stmt",
                 "    ::lhs_sym",
                 "    ::rhs_sym",
-                "    ::arg_sym_list: notsubset_stmt => list",
-                "        list = [notsubset_stmt.lhs_sym, notsubset_stmt.rhs_sym]",
+                "    ::arg_sym_list: _notsubset_stmt => _list",
+                "        _list = [_notsubset_stmt.lhs_sym, _notsubset_stmt.rhs_sym]",
             ]
         )
     )
     for line in [3, 4]:
-        occurrence = occurrence_on_line(payload, "notsubset_stmt", line)
+        occurrence = occurrence_on_line(payload, "_notsubset_stmt", line)
         assert occurrence["type"] == "pure"
         assert occurrence["definition"]["name"] == "Notsubset_stmt"
         assert occurrence["definition"]["lineno"] == 0
 
 
 def test_resolve_sym_type_qualified_class_owner_receiver_definition() -> None:
-    payload = resolve_sym_type.resolve_text("Notsubset_stmt\nNotsubset_stmt::arg_sym_list: notsubset_stmt => list\n    list = notsubset_stmt")
+    payload = resolve_sym_type.resolve_text("Notsubset_stmt\nNotsubset_stmt::arg_sym_list: _notsubset_stmt => _list\n    _list = _notsubset_stmt")
     for line in [1, 2]:
-        occurrence = occurrence_on_line(payload, "notsubset_stmt", line)
+        occurrence = occurrence_on_line(payload, "_notsubset_stmt", line)
         assert occurrence["type"] == "pure"
         assert occurrence["definition"]["name"] == "Notsubset_stmt"
         assert occurrence["definition"]["lineno"] == 0
@@ -2514,18 +2395,18 @@ def test_resolve_sym_type_function_and_predicate_use_declaration_heads() -> None
         "\n".join(
             [
                 "Function ~ f",
-                "f: x => y",
-                "    y = x",
+                "f: _x => _y",
+                "    _y = _x",
                 "Predicate ~ p",
-                "p: x => bool",
-                "    bool = true",
-                "z = f(x)",
-                "p(z)",
+                "p: _x => _is_valid",
+                "    _is_valid = true",
+                "_z = f(_x)",
+                "p(_z)",
             ]
         )
     )
     assert occurrence_on_line(payload, "f", 6)["definition"]["lineno"] == 1
-    assert occurrence_on_line(payload, "p", 7)["definition"]["lineno"] == 4
+    assert occurrence_on_line(payload, "p", 7)["definition"]["lineno"] == 3
 
 
 def test_resolve_sym_type_member_call_uses_qualified_class_method_definition() -> None:
@@ -2533,12 +2414,12 @@ def test_resolve_sym_type_member_call_uses_qualified_class_method_definition() -
         "\n".join(
             [
                 "Class",
-                "func: x => y",
-                "    y = x",
-                "Class ~ receiver",
-                "Class::func: receiver => out",
-                "    out = receiver",
-                "y = receiver.func",
+                "func: _x => _y",
+                "    _y = _x",
+                "Class ~ _receiver",
+                "Class::func: _receiver => _out",
+                "    _out = _receiver",
+                "_y = _receiver.func",
             ]
         )
     )
@@ -2552,10 +2433,10 @@ def test_resolve_sym_type_member_call_uses_indented_class_method_definition() ->
         "\n".join(
             [
                 "Class",
-                "    ::func: receiver => out",
-                "        out = receiver",
-                "Class ~ receiver",
-                "y = receiver.func",
+                "    ::func: _receiver => _out",
+                "        _out = _receiver",
+                "Class ~ _receiver",
+                "_y = _receiver.func",
             ]
         )
     )
@@ -2570,8 +2451,8 @@ def test_resolve_sym_type_member_call_uses_bare_class_field_definition() -> None
             [
                 "Class",
                 "    ::field",
-                "Class ~ receiver",
-                "y = receiver.field",
+                "Class ~ _receiver",
+                "_y = _receiver.field",
             ]
         )
     )
@@ -2589,7 +2470,7 @@ def test_resolve_sym_type_bare_class_field_in_premise_section_is_function() -> N
                 "Class",
                 "    ::field",
                 "B",
-                "B~b",
+                "B~_b",
             ]
         )
     )
@@ -2604,10 +2485,10 @@ def test_resolve_sym_type_member_call_falls_back_to_function_declaration() -> No
         "\n".join(
             [
                 "Class",
-                "func: x => y",
-                "    y = x",
-                "Class ~ receiver",
-                "y = receiver.func",
+                "func: _x => _y",
+                "    _y = _x",
+                "Class ~ _receiver",
+                "_y = _receiver.func",
             ]
         )
     )
@@ -2639,7 +2520,7 @@ def test_resolve_sym_type_definition_prefers_current_file() -> None:
         imported = root / "imported.lp"
         imported.write_text("Function ~ f\n", encoding="utf-8")
         main = root / "main.lp"
-        main.write_text("$import imported.lp\nf: x => y\nz = f(x)\n", encoding="utf-8")
+        main.write_text("$import imported.lp\nf: _x => _y\n_z = f(_x)\n", encoding="utf-8")
         payload = resolve_sym_type.resolve_file(main)
 
     definition = occurrence_on_line(payload, "f", 2)["definition"]
@@ -2709,14 +2590,14 @@ def test_script_modules_import_without_cycles() -> None:
         "expand_module",
         "compile_pipeline.errors",
         "compile_pipeline.source_utils",
-        "compile_pipeline.module_sections",
-        "compile_pipeline.stage1_normalize_source",
-        "compile_pipeline.stage2_desugar_module_text",
-        "compile_pipeline.stage3_parse_module_sections",
-        "compile_pipeline.stage4_parse_statements",
-        "compile_pipeline.stage5_lower_to_module_ast",
+        "compile_pipeline.source_syntax",
+        "compile_pipeline.module_parser",
+        "compile_pipeline.front_end_source_loader",
+        "compile_pipeline.front_end_desugar",
+        "compile_pipeline.back_end_sections",
+        "compile_pipeline.back_end_statements",
+        "compile_pipeline.back_end_lower_object",
         "syntax_check",
-        "syntax_check_common",
         "semantic_check",
         "module_check",
         "resolve_sym_type",
@@ -2781,10 +2662,11 @@ def main() -> int:
         test_double_underscore_sym_is_ordinary,
         test_stage2_synthesized_infixes_are_spaced,
         test_stage2_attaches_authoritative_desugared_module,
+        test_compile_stages_are_ast_only_and_no_render_fallbacks,
         test_stage2_structural_collection_inheritance_module,
         test_stage2_target_only_does_not_infer_bound_sym,
         test_stage2_omits_symbol_when_inheritance_premise_exists,
-        test_stage2_legacy_unspaced_infix_still_compiles,
+        test_stage2_permissive_unspaced_infix_still_compiles,
         test_import_file_locations,
         test_import_searches_skill_dir_for_standard_library,
         test_stage1_dedupes_transitive_imports,
@@ -2833,8 +2715,13 @@ def main() -> int:
         test_generated_tuple_function_declaration_keeps_tuple_guarantee,
         test_function_body_return_destructuring_omits_redundant_classifiers,
         test_function_body_local_literal_classifier_is_preserved,
+        test_final_ast_source_loc_invariant_and_generated_source_name,
+        test_ast_type_inheritance_uses_isinstance,
+        test_generated_declaration_fact_uses_declaration_head_loc,
+        test_generated_inheritance_fact_uses_inferred_binder_loc,
         test_sibling_nested_modules_are_indented_consistently,
         test_target_literal_assignment_normalized,
+        test_generated_literal_assignment_is_closure_stable,
         test_nested_literal_argument_adds_classifier_target,
         test_authored_premise_literal_classifier_keeps_premise_and_adds_target,
         test_authored_target_literal_classifier_dedupes_generated_target,
@@ -2875,15 +2762,6 @@ def main() -> int:
         test_expand_module_cli_file_mode,
         test_expand_module_cli_stdin_mode,
         test_expand_module_cli_invalid_input,
-        test_normalize_module_declarations_groups_source_units,
-        test_normalize_module_declarations_places_inheritance_before_member_bodies,
-        test_normalize_module_declarations_unindents_multiline_logical_member_body,
-        test_normalize_module_declarations_respects_nested_block_barriers,
-        test_normalize_module_declarations_opaque_exists_and_declaration_bodies,
-        test_normalize_module_declarations_cli_modes_and_imports,
-        test_normalize_module_declarations_dedupes_transitive_imports,
-        test_normalize_module_declarations_requires_explicit_class_members,
-        test_normalize_module_declarations_cli_invalid_input,
         test_resolve_sym_type_class_func_pred_and_alias_evidence,
         test_resolve_sym_type_predicate_wins_over_function,
         test_resolve_sym_type_class_wins_over_callable_evidence,

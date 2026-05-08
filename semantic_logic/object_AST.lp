@@ -3,7 +3,8 @@ Sym
     # Compiler-emitted symbol AST nodes carry `source_loc` for diagnostics.
     # Generated symbols set `generated=true` and use the authored source
     # symbol/expression location as `source_loc`.
-Str~Sym
+    ::name
+    ::source_name
 
 Stmt
     ::bound_syms
@@ -68,3 +69,7 @@ Module_stmt~Quantified_stmt
 Quantified_stmt
     ::quantifier_sym
 Proposition_stmt~Quantified_stmt
+
+AST_node
+AST_node ~ Sym
+AST_node ~ Stmt

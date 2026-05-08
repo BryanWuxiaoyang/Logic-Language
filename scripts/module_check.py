@@ -12,10 +12,10 @@ from typing import Any
 
 from compile_module import FinalAstValidationCompileError, Stage2DiagnosticsCompileError, run_compile_pipeline
 from compile_pipeline.errors import CompileError
-from compile_pipeline.source_utils import load_lark_parser, load_tokens
+from compile_pipeline.source_utils import load_tokens
 from semantic_check import collect_semantic_diagnostics_from_file, collect_semantic_diagnostics_from_text
 from syntax_check import STDIN_FILE, Diagnostic, check_text, make_diagnostic, source_position_for_compile_message
-from syntax_check_common import CheckError
+from compile_pipeline.module_parser import CheckError
 
 
 Entry = dict[str, Any]
@@ -119,8 +119,7 @@ def final_ast_entries(error: FinalAstValidationCompileError, file_label: str) ->
 
 def syntax_entries(source: str, file_label: str, base_dir: Path) -> list[Entry]:
     tokens = load_tokens()
-    parser = load_lark_parser()
-    diagnostics = check_text(source, file_label, base_dir.resolve(), tokens, parser)
+    diagnostics = check_text(source, file_label, base_dir.resolve(), tokens)
     return [diagnostic_with_stage(diagnostic, "syntax") for diagnostic in diagnostics]
 
 
@@ -134,12 +133,15 @@ def semantic_entries(source: str, file_label: str, base_dir: Path, is_file: bool
 
 
 def naming_entries(source: str, file_label: str, base_dir: Path) -> list[Entry]:
-    from compile_pipeline.stage1_normalize_source import run as normalize_source
-    from compile_pipeline.stage2_desugar_module_text import run as desugar_source
+    from compile_pipeline.stage1_front_end import run as run_front_end
 
-    normalized = normalize_source(source, base_dir.resolve(), source=file_label, allow_imports=True)
-    desugared = desugar_source(normalized, base_dir.resolve())
-    return [with_stage(dict(entry), "naming") for entry in desugared.diagnostics]
+    try:
+        front_end = run_front_end(source, base_dir.resolve(), source=file_label, allow_imports=True)
+    except CompileError as error:
+        if str(error).startswith("stage1 front-end diagnostics failed:"):
+            raise
+        return []
+    return [with_stage(dict(entry), "naming") for entry in front_end.diagnostics]
 
 
 def compile_entries(source: str, file_label: str, base_dir: Path) -> list[Entry]:

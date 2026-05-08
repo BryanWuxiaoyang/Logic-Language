@@ -12,20 +12,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
 
+from AST import Binding_stmt, Func_stmt, Inherit_stmt, Module_stmt, Stmt, Sym, object_ast_from_json
 from compile_module import run_compile_pipeline
 from compile_pipeline.errors import CompileError
-from compile_pipeline.module_sections import (
-    is_generated_sym_name,
-    is_plain_sym,
-    parse_declaration,
-    parse_premise_declaration,
-)
+from compile_pipeline.source_syntax import is_generated_sym_name, is_plain_sym, parse_declaration, parse_premise_declaration
 from compile_pipeline.source_utils import find_quoted_literal_end, is_literal_quote_start, load_tokens
 from inheritance_sources import inheritance_candidate_chain
-from syntax_check_common import (
-    CheckError,
+from compile_pipeline.module_parser import (
     LocatedText,
-    analyze_module_text,
     expand_for_checking,
     logical_lines_located,
     make_located_text,
@@ -73,6 +67,27 @@ OPERATOR_NAMES = {
     "!",
     "[]",
     "[:]",
+}
+FUNC_KINDS = {
+    "Func_stmt",
+    "Pred_stmt",
+    "Eq_stmt",
+    "Inherit_stmt",
+    "And_stmt",
+    "Or_stmt",
+    "Not_stmt",
+    "Implies_stmt",
+    "Ne_stmt",
+    "Gt_stmt",
+    "Lt_stmt",
+    "Ge_stmt",
+    "Le_stmt",
+    "In_stmt",
+    "Notin_stmt",
+    "Subset_stmt",
+    "Notsubset_stmt",
+    "Includedin_stmt",
+    "Notincludedin_stmt",
 }
 NORMALIZED_OPERATOR_ALIASES = {
     "!=": {"≠"},
@@ -181,10 +196,9 @@ def resolve_text(
 ) -> dict[str, Any]:
     base_path = Path(base_dir).resolve()
     try:
-        analyze_module_text(text, source_label=file_label, base_dir=base_path)
-        ast = run_compile_pipeline(text, base_path, source=file_label, allow_imports=True).ast
+        ast = object_ast_from_json(run_compile_pipeline(text, base_path, source=file_label, allow_imports=True).ast)
         expanded = located_import_expansion(text, file_label, base_path)
-    except (CheckError, CompileError, OSError, ValueError):
+    except (CompileError, OSError, ValueError):
         return empty_payload()
 
     evidence = collect_type_evidence(ast)
@@ -202,19 +216,17 @@ def resolve_file(file_path: Path) -> dict[str, Any]:
     )
 
 
-def collect_type_evidence(ast: dict[str, Any]) -> dict[str, set[str]]:
+def collect_type_evidence(ast: Stmt) -> dict[str, set[str]]:
     aliases = DisjointSet()
     func_evidence: set[str] = set()
     pred_evidence: set[str] = set()
     class_evidence: set[str] = set()
     inheritance_facts: list[tuple[str, str]] = []
 
-    for node in walk_ast(ast):
-        if node.get("kind") == "sym":
-            name = node.get("name")
-            if isinstance(name, str) and name and is_capital_head(name):
-                class_evidence.add(name)
-                aliases.find(name)
+    for node in walk_object_ast(ast):
+        if isinstance(node, Sym) and node.name and is_capital_head(node.name):
+            class_evidence.add(node.name)
+            aliases.find(node.name)
     collect_module_evidence(ast, func_evidence, pred_evidence, class_evidence, aliases, inheritance_facts)
 
     groups = aliases.groups()
@@ -235,46 +247,40 @@ def collect_type_evidence(ast: dict[str, Any]) -> dict[str, set[str]]:
 
 
 def collect_module_evidence(
-    node: Any,
+    node: Stmt,
     func_evidence: set[str],
     pred_evidence: set[str],
     class_evidence: set[str],
     aliases: DisjointSet,
     inheritance_facts: list[tuple[str, str]],
 ) -> None:
-    if not isinstance(node, dict):
+    if not isinstance(node, Module_stmt):
         return
-    if node.get("kind") not in {"quantified_stmt", "set_stmt"}:
-        return
-    for binding in node.get("premise_binding_stmts", []):
-        if not isinstance(binding, dict):
-            continue
-        src = binding.get("src_stmt")
-        if isinstance(src, dict) and src.get("kind") in {"quantified_stmt", "set_stmt"}:
+    for binding in node.premise_binding_stmts:
+        src = binding.src_stmt
+        if isinstance(src, Module_stmt):
             collect_module_evidence(src, func_evidence, pred_evidence, class_evidence, aliases, inheritance_facts)
-        elif isinstance(src, dict):
+        else:
             collect_function_call_heads(src, func_evidence, aliases)
-    for statement in [*node.get("premise_PSs", []), *node.get("target_PSs", [])]:
+    for statement in [*node.premise_proposition_stmts, *node.target_proposition_stmts]:
         collect_predicate_statement_evidence(statement, func_evidence, pred_evidence, class_evidence, aliases, inheritance_facts)
 
 
 def collect_predicate_statement_evidence(
-    node: Any,
+    node: Stmt,
     func_evidence: set[str],
     pred_evidence: set[str],
     class_evidence: set[str],
     aliases: DisjointSet,
     inheritance_facts: list[tuple[str, str]],
 ) -> None:
-    if not isinstance(node, dict):
-        return
-    if node.get("kind") in {"quantified_stmt", "set_stmt"}:
+    if isinstance(node, Module_stmt):
         collect_module_evidence(node, func_evidence, pred_evidence, class_evidence, aliases, inheritance_facts)
         return
-    if node.get("kind") != "func_stmt":
+    if not isinstance(node, Func_stmt):
         return
-    call_name = sym_name(node.get("call_sym"))
-    args = [sym_name(arg) for arg in node.get("arg_sym_list", [])]
+    call_name = sym_name(node.call_sym)
+    args = [sym_name(arg) for arg in node.arg_sym_list]
     if call_name:
         pred_evidence.add(call_name)
         aliases.find(call_name)
@@ -289,34 +295,42 @@ def collect_predicate_statement_evidence(
             class_evidence.add(source_name)
 
 
-def collect_function_call_heads(node: Any, output: set[str], aliases: DisjointSet) -> None:
-    if isinstance(node, dict):
-        if node.get("kind") == "func_stmt":
-            call_name = sym_name(node.get("call_sym"))
+def collect_function_call_heads(node: Stmt, output: set[str], aliases: DisjointSet) -> None:
+    for stmt in walk_object_ast(node):
+        if isinstance(stmt, Func_stmt):
+            call_name = sym_name(stmt.call_sym)
             if call_name:
                 output.add(call_name)
                 aliases.find(call_name)
-        for value in node.values():
-            collect_function_call_heads(value, output, aliases)
-    elif isinstance(node, list):
-        for item in node:
-            collect_function_call_heads(item, output, aliases)
 
 
-def walk_ast(node: Any) -> Iterable[dict[str, Any]]:
-    if isinstance(node, dict):
-        yield node
-        for value in node.values():
-            yield from walk_ast(value)
-    elif isinstance(node, list):
-        for item in node:
-            yield from walk_ast(item)
+def walk_object_ast(node: Stmt) -> Iterable[Stmt]:
+    yield node
+    if isinstance(node, Module_stmt):
+        for sym in node.bound_syms:
+            yield sym
+        for binding in node.premise_binding_stmts:
+            yield from walk_object_ast(binding)
+        for statement in [*node.premise_proposition_stmts, *node.target_proposition_stmts]:
+            yield from walk_object_ast(statement)
+    elif isinstance(node, Binding_stmt):
+        yield node.dst_sym
+        yield from walk_object_ast(node.src_stmt)
+    elif isinstance(node, Func_stmt):
+        yield node.call_sym
+        yield from node.arg_sym_list
+
+
+def walk_func_stmts(node: Stmt) -> Iterable[Func_stmt]:
+    for stmt in walk_object_ast(node):
+        if isinstance(stmt, Func_stmt):
+            yield stmt
 
 
 def sym_name(node: Any) -> str | None:
-    if isinstance(node, dict) and node.get("kind") == "sym":
-        name = node.get("name")
-        if isinstance(name, str) and name and not is_generated_sym_name(name):
+    if isinstance(node, Sym):
+        name = node.name
+        if name and not is_generated_sym_name(name):
             return name
     return None
 
@@ -358,7 +372,7 @@ def located_import_expansion(text: str, file_label: str, base_dir: Path) -> Loca
 def collect_definitions(
     expanded: LocatedText,
     evidence: dict[str, set[str]],
-    ast: dict[str, Any],
+    ast: Stmt,
 ) -> dict[str, list[Definition]]:
     cleaned = remove_comments_located(expanded)
     aliases = DisjointSet()
@@ -485,7 +499,7 @@ def collect_definitions(
 
 
 def collect_ast_class_type_candidates(
-    ast: dict[str, Any],
+    ast: Stmt,
     start_order: int,
     authored_premise_class_facts: set[tuple[str, str]],
 ) -> list[tuple[str, str, int]]:
@@ -493,11 +507,13 @@ def collect_ast_class_type_candidates(
     target_equalities: list[tuple[str, str]] = []
     order = start_order
 
-    def add_class_fact(statement: Any, *, allow_authored_premise: bool) -> None:
+    def add_class_fact(statement: Stmt, *, allow_authored_premise: bool) -> None:
         nonlocal order
         order += 1
-        call_name = sym_name(statement.get("call_sym")) if isinstance(statement, dict) else None
-        args = [sym_name(arg) for arg in statement.get("arg_sym_list", [])] if isinstance(statement, dict) else []
+        if not isinstance(statement, Func_stmt):
+            return
+        call_name = sym_name(statement.call_sym)
+        args = [sym_name(arg) for arg in statement.arg_sym_list]
         if call_name != "~" or len(args) != 2 or not args[0] or not args[1]:
             return
         class_name, source_name = args
@@ -507,28 +523,27 @@ def collect_ast_class_type_candidates(
             return
         direct_facts.append((class_name, source_name, order))
 
-    def walk_module(node: Any) -> None:
+    def walk_module(node: Stmt) -> None:
         nonlocal order
-        if not isinstance(node, dict) or node.get("kind") not in {"quantified_stmt", "set_stmt"}:
+        if not isinstance(node, Module_stmt):
             return
-        for statement in node.get("target_PSs", []):
+        for statement in node.target_proposition_stmts:
             add_class_fact(statement, allow_authored_premise=True)
-            call_name = sym_name(statement.get("call_sym")) if isinstance(statement, dict) else None
-            args = [sym_name(arg) for arg in statement.get("arg_sym_list", [])] if isinstance(statement, dict) else []
+            call_name = sym_name(statement.call_sym) if isinstance(statement, Func_stmt) else None
+            args = [sym_name(arg) for arg in statement.arg_sym_list] if isinstance(statement, Func_stmt) else []
             if call_name == "=" and len(args) == 2 and args[0] and args[1]:
                 left, right = args
                 if not is_capital_head(left) and not is_capital_head(right):
                     target_equalities.append((left, right))
-            if isinstance(statement, dict) and statement.get("kind") in {"quantified_stmt", "set_stmt"}:
+            if isinstance(statement, Module_stmt):
                 walk_module(statement)
-        for statement in node.get("premise_PSs", []):
+        for statement in node.premise_proposition_stmts:
             add_class_fact(statement, allow_authored_premise=False)
-            if isinstance(statement, dict) and statement.get("kind") in {"quantified_stmt", "set_stmt"}:
+            if isinstance(statement, Module_stmt):
                 walk_module(statement)
-        for binding in node.get("premise_binding_stmts", []):
-            src = binding.get("src_stmt") if isinstance(binding, dict) else None
-            if isinstance(src, dict) and src.get("kind") in {"quantified_stmt", "set_stmt"}:
-                walk_module(src)
+        for binding in node.premise_binding_stmts:
+            if isinstance(binding.src_stmt, Module_stmt):
+                walk_module(binding.src_stmt)
 
     walk_module(ast)
 
@@ -574,19 +589,6 @@ def collect_explicit_class_definitions(line: LocatedText, order: int) -> list[De
     if occurrence is None:
         return []
     return [definition_from_occurrence(occurrence, "class", order, kind="class_decl", owner_class=occurrence.name)]
-
-
-def collect_qualified_class_owner_definitions(line: LocatedText, order: int) -> list[Definition]:
-    match = re.match(r"^(?P<class>[^\s:]+)::", line.text)
-    if match is None:
-        return []
-    class_name = match.group("class")
-    if not is_plain_sym(class_name) or not is_capital_head(class_name):
-        return []
-    occurrence = occurrence_from_located(line, class_name)
-    if occurrence is None:
-        return []
-    return [definition_from_occurrence(occurrence, "class", order, kind="class_owner", owner_class=class_name)]
 
 
 def declaration_owner_class(line_text: str, class_stack: list[tuple[int, str]]) -> str | None:
@@ -1076,7 +1078,7 @@ def build_payload(
     occurrences: list[Occurrence],
     evidence: dict[str, set[str]],
     definitions: dict[str, list[Definition]],
-    ast: dict[str, Any] | None = None,
+    ast: Stmt | None = None,
 ) -> dict[str, Any]:
     entries: list[dict[str, Any]] = []
     counts: Counter[str] = Counter()
@@ -1152,7 +1154,7 @@ def dedupe_member_entries(entries: list[dict[str, Any]]) -> list[dict[str, Any]]
     return output
 
 
-def serialize_symbol_classes(definitions: dict[str, list[Definition]], ast: dict[str, Any] | None) -> dict[str, list[str]]:
+def serialize_symbol_classes(definitions: dict[str, list[Definition]], ast: Stmt | None) -> dict[str, list[str]]:
     direct: dict[str, set[str]] = {}
     for name, entries in definitions.items():
         for entry in entries:
@@ -1171,15 +1173,13 @@ def serialize_symbol_classes(definitions: dict[str, list[Definition]], ast: dict
     return output
 
 
-def collect_symbol_class_edges(ast: dict[str, Any] | None) -> list[tuple[str, str]]:
+def collect_symbol_class_edges(ast: Stmt | None) -> list[tuple[str, str]]:
     edges: list[tuple[str, str]] = []
     if ast is None:
         return edges
-    for node in walk_ast(ast):
-        if node.get("kind") != "func_stmt":
-            continue
-        call_name = sym_name(node.get("call_sym"))
-        args = [sym_name(arg) for arg in node.get("arg_sym_list", [])]
+    for node in walk_func_stmts(ast):
+        call_name = sym_name(node.call_sym)
+        args = [sym_name(arg) for arg in node.arg_sym_list]
         if call_name != "~" or len(args) != 2 or not args[0] or not args[1]:
             continue
         class_name, source_name = args
@@ -1188,15 +1188,13 @@ def collect_symbol_class_edges(ast: dict[str, Any] | None) -> list[tuple[str, st
     return edges
 
 
-def collect_class_parent_edges(ast: dict[str, Any] | None) -> dict[str, set[str]]:
+def collect_class_parent_edges(ast: Stmt | None) -> dict[str, set[str]]:
     parents: dict[str, set[str]] = {}
     if ast is None:
         return parents
-    for node in walk_ast(ast):
-        if node.get("kind") != "func_stmt":
-            continue
-        call_name = sym_name(node.get("call_sym"))
-        args = [sym_name(arg) for arg in node.get("arg_sym_list", [])]
+    for node in walk_func_stmts(ast):
+        call_name = sym_name(node.call_sym)
+        args = [sym_name(arg) for arg in node.arg_sym_list]
         if call_name != "~" or len(args) != 2 or not args[0] or not args[1]:
             continue
         parent, child = args

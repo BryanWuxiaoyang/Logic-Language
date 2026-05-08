@@ -10,6 +10,17 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from AST import (
+    Binding_stmt,
+    Func_stmt,
+    Literal_stmt,
+    Module_stmt,
+    Set_literal_stmt,
+    Stmt,
+    Sym,
+    Tuple_literal_stmt,
+    object_ast_from_json,
+)
 
 AstNode = dict[str, Any]
 
@@ -44,8 +55,9 @@ class FinalAstChecker:
     def __init__(self) -> None:
         self.diagnostics: list[Diagnostic] = []
 
-    def check(self, ast: AstNode) -> list[dict[str, object]]:
-        self.visit_stmt(require_node(ast, "root"), tuple(), binding_allowed=False)
+    def check(self, ast: AstNode | Stmt) -> list[dict[str, object]]:
+        root = object_ast_from_json(ast) if isinstance(ast, dict) else ast
+        self.visit_stmt(root, tuple(), binding_allowed=False)
         diagnostics = sorted(
             self.diagnostics,
             key=lambda diagnostic: (
@@ -57,31 +69,29 @@ class FinalAstChecker:
         )
         return [diagnostic.to_json() for diagnostic in diagnostics]
 
-    def visit_stmt(self, node: AstNode, ancestor_names: tuple[str, ...], *, binding_allowed: bool) -> None:
-        kind = require_kind(node)
-        if kind in {"quantified_stmt", "set_stmt"}:
+    def visit_stmt(self, node: Stmt, ancestor_names: tuple[str, ...], *, binding_allowed: bool) -> None:
+        if isinstance(node, Module_stmt):
             self.visit_module(node, ancestor_names)
             return
-        if kind == "binding_stmt":
+        if isinstance(node, Binding_stmt):
             if not binding_allowed:
                 self.emit_invalid_binding_location(node)
-            self.visit_stmt(require_node(node.get("src_stmt"), "binding_stmt.src_stmt"), ancestor_names, binding_allowed=False)
+            self.visit_stmt(node.src_stmt, ancestor_names, binding_allowed=False)
             return
-        if kind == "func_stmt" or kind == "sym":
+        if isinstance(node, (Func_stmt, Sym)):
             return
-        if kind in {"char_literal_stmt", "str_literal_stmt", "value_literal_stmt"}:
+        if isinstance(node, Literal_stmt) and not isinstance(node, (Tuple_literal_stmt, Set_literal_stmt)):
             return
-        if kind in {"tuple_literal_stmt", "set_literal_stmt"}:
-            for item in require_list(node, "item_stmts"):
-                self.visit_stmt(require_node(item, f"{kind}.item_stmts item"), ancestor_names, binding_allowed=False)
+        if isinstance(node, (Tuple_literal_stmt, Set_literal_stmt)):
+            for item in node.item_stmts:
+                self.visit_stmt(item, ancestor_names, binding_allowed=False)
             return
-        raise AstCheckError(f"unsupported AST node kind: {kind}")
+        raise AstCheckError(f"unsupported AST node class: {type(node).__name__}")
 
-    def visit_module(self, node: AstNode, ancestor_names: tuple[str, ...]) -> None:
+    def visit_module(self, node: Module_stmt, ancestor_names: tuple[str, ...]) -> None:
         current_names: set[str] = set()
         raw_names: list[str] = []
-        for sym in require_list(node, "bound_syms"):
-            sym_node = require_node(sym, "bound_syms item")
+        for sym_node in node.bound_syms:
             raw_name = self.check_bound_sym(sym_node, node)
             if raw_name is None:
                 continue
@@ -93,19 +103,16 @@ class FinalAstChecker:
             raw_names.append(raw_name)
 
         child_ancestors = (*ancestor_names, *raw_names)
-        for field in ("premise_binding_stmts", "premise_PSs", "target_PSs"):
-            for stmt in require_list(node, field):
-                self.visit_stmt(
-                    require_node(stmt, f"{require_kind(node)}.{field} item"),
-                    child_ancestors,
-                    binding_allowed=field == "premise_binding_stmts",
-                )
+        for stmt in node.premise_binding_stmts:
+            self.visit_stmt(stmt, child_ancestors, binding_allowed=True)
+        for stmt in node.premise_proposition_stmts:
+            self.visit_stmt(stmt, child_ancestors, binding_allowed=False)
+        for stmt in node.target_proposition_stmts:
+            self.visit_stmt(stmt, child_ancestors, binding_allowed=False)
 
-    def check_bound_sym(self, sym_node: AstNode, owner_stmt: AstNode) -> str | None:
-        if sym_node.get("kind") != "sym":
-            raise AstCheckError("bound_syms item must be a sym node")
-        name = sym_node.get("name")
-        if not isinstance(name, str) or not name:
+    def check_bound_sym(self, sym_node: Sym, owner_stmt: Module_stmt) -> str | None:
+        name = sym_node.name
+        if not name:
             self.emit_invalid_name(sym_node, owner_stmt, name)
             return None
         if is_valid_bound_sym_name(name):
@@ -113,7 +120,7 @@ class FinalAstChecker:
         self.emit_invalid_name(sym_node, owner_stmt, name)
         return name
 
-    def emit_invalid_name(self, sym_node: AstNode, owner_stmt: AstNode, name: object) -> None:
+    def emit_invalid_name(self, sym_node: Sym, owner_stmt: Module_stmt, name: object) -> None:
         self.diagnostics.append(
             make_diagnostic(
                 sym_node,
@@ -123,7 +130,7 @@ class FinalAstChecker:
             )
         )
 
-    def emit_conflict(self, sym_node: AstNode, owner_stmt: AstNode, name: str, detail: str) -> None:
+    def emit_conflict(self, sym_node: Sym, owner_stmt: Module_stmt, name: str, detail: str) -> None:
         self.diagnostics.append(
             make_diagnostic(
                 sym_node,
@@ -133,7 +140,7 @@ class FinalAstChecker:
             )
         )
 
-    def emit_invalid_binding_location(self, binding_node: AstNode) -> None:
+    def emit_invalid_binding_location(self, binding_node: Binding_stmt) -> None:
         self.diagnostics.append(
             make_diagnostic(
                 binding_node,
@@ -166,12 +173,12 @@ def is_valid_ordinary_bound_sym_name(name: str) -> bool:
     return len(name) == 1 and not name[0].isspace() and not name[0].isdigit() and name not in {"'", '"', "^"}
 
 
-def make_diagnostic(sym_node: AstNode, owner_stmt: AstNode, *, code: str, reason: str) -> Diagnostic:
+def make_diagnostic(sym_node: Stmt | Sym, owner_stmt: Stmt | Sym, *, code: str, reason: str) -> Diagnostic:
     loc = choose_loc(sym_node, owner_stmt)
-    source = loc.get("source", "<ast>")
-    line = safe_int(loc.get("line"), 1)
-    column = safe_int(loc.get("column"), 1)
-    end_column = safe_int(loc.get("end_column"), column + max(len(str(sym_node.get("name", ""))), 1) - 1)
+    source = loc.file_path
+    line = loc.line
+    column = loc.column
+    end_column = loc.end_column
     return Diagnostic(
         file=str(source),
         lineno=max(line - 1, 0),
@@ -183,25 +190,8 @@ def make_diagnostic(sym_node: AstNode, owner_stmt: AstNode, *, code: str, reason
     )
 
 
-def choose_loc(sym_node: AstNode, owner_stmt: AstNode) -> AstNode:
-    loc = sym_node.get("source_loc") or sym_node.get("loc")
-    if isinstance(loc, dict):
-        return loc
-    loc = owner_stmt.get("source_loc") or owner_stmt.get("loc")
-    if isinstance(loc, dict):
-        return loc
-    return {"source": "<ast>", "line": 1, "column": 1, "end_column": 1}
-
-
-def safe_int(value: object, default: int) -> int:
-    return value if isinstance(value, int) and value > 0 else default
-
-
-def require_kind(node: AstNode) -> str:
-    kind = node.get("kind")
-    if not isinstance(kind, str) or not kind:
-        raise AstCheckError("AST node requires non-empty string field 'kind'")
-    return kind
+def choose_loc(sym_node: Stmt | Sym, owner_stmt: Stmt | Sym):
+    return getattr(sym_node, "source_loc", None) or getattr(owner_stmt, "source_loc", None)
 
 
 def require_node(value: Any, label: str) -> AstNode:
@@ -210,19 +200,14 @@ def require_node(value: Any, label: str) -> AstNode:
     return value
 
 
-def require_list(node: AstNode, field: str) -> list[Any]:
-    value = node.get(field)
-    if not isinstance(value, list):
-        raise AstCheckError(f"{require_kind(node)}.{field} must be a list")
-    return value
-
-
 def load_ast(path: Path | None) -> AstNode:
     try:
         text = path.read_text(encoding="utf-8") if path is not None else sys.stdin.read()
-        return require_node(json.loads(text), "root JSON")
+        return object_ast_from_json(require_node(json.loads(text), "root JSON")).to_json()
     except json.JSONDecodeError as error:
         raise AstCheckError(f"invalid JSON: {error}") from error
+    except ValueError as error:
+        raise AstCheckError(str(error)) from error
     except OSError as error:
         raise AstCheckError(str(error)) from error
 

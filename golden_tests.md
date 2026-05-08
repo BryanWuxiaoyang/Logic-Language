@@ -5,8 +5,8 @@ In addition `expand_module` should be closure-identical, i.e. `expand_module* = 
 ## implicit inheritance
 "
 List
--: (list, list1) => list2
-    list2.size = (list.size + list1.size)
+-: (_list, _list1) => _list2
+    _list2.size = (_list.size + _list1.size)
 "
 =
 "
@@ -14,21 +14,21 @@ List
   Symbol ~ List
   Function ~ -
   ∀{
-    | ^list, ^list1, ^list2
-    | ^list2 = ^list - ^list1
-    | List ~ ^list
-    | List ~ ^list1
-    List ~ ^list2
+    | ^_list, ^_list1, ^_list2
+    | ^_list2 = ^_list - ^_list1
+    | List ~ ^_list
+    | List ~ ^_list1
+    List ~ ^_list2
   }
   ∀{
-    | ^list, ^list1, ^list2, ^tmpfunc_stmt0, ^tmpsize1, ^tmpsize2, ^tmpfunc_stmt3
-    | ^list2 = ^list - ^list1
-    | ^tmpfunc_stmt0 = size(^list2)
-    | ^tmpsize1 = size(^list)
-    | ^tmpsize2 = size(^list1)
-    | ^tmpfunc_stmt3 = ^tmpsize1 + ^tmpsize2
-    | List ~ ^list
-    | List ~ ^list1
+    | ^_list, ^_list1, ^_list2, ^tmpfunc_stmt0, ^tmpsize1, ^tmpadd2, ^tmpfunc_stmt3
+    | ^_list2 = ^_list - ^_list1
+    | ^tmpfunc_stmt0 = size(^_list2)
+    | ^tmpsize1 = size(^_list)
+    | ^tmpadd2 = ^tmpsize1 + ^_list1
+    | ^tmpfunc_stmt3 = size(^tmpadd2)
+    | List ~ ^_list
+    | List ~ ^_list1
     ^tmpfunc_stmt0 = ^tmpfunc_stmt3
   }
 }
@@ -44,12 +44,12 @@ List
 ∀{
   Function ~ -
   ∀{
-    | ^list, ^list1, ^list2, ^tmpfunc_stmt0, ^tmpsize1, ^tmpsize2, ^tmpfunc_stmt3
+    | ^list, ^list1, ^list2, ^tmpfunc_stmt0, ^tmpsize1, ^tmpadd2, ^tmpfunc_stmt3
     | ^list2 = ^list - ^list1
     | ^tmpfunc_stmt0 = size(^list2)
     | ^tmpsize1 = size(^list)
-    | ^tmpsize2 = size(^list1)
-    | ^tmpfunc_stmt3 = ^tmpsize1 + ^tmpsize2
+    | ^tmpadd2 = ^tmpsize1 + ^list1
+    | ^tmpfunc_stmt3 = size(^tmpadd2)
     ^tmpfunc_stmt0 = ^tmpfunc_stmt3
   }
 }
@@ -58,26 +58,26 @@ List
 ## function-declaration
 "
 Sym
-F: sym => (sym1, sym2)
+func: _sym => (_sym1, _sym2)
 "
 =
 "
 ∀{
   Symbol ~ Sym
-  Function ~ F
+  Function ~ func
   ∀{
-    | ^sym, ^sym1, ^sym2, ^tmpF0, ^tmpvalue1, ^tmpvalue2
-    | ^tmpF0 = F(^sym)
+    | ^_sym, ^_sym1, ^_sym2, ^tmpfunc0, ^tmpvalue1, ^tmpvalue2
+    | ^tmpfunc0 = func(^_sym)
     | ^tmpvalue1 = 0
-    | ^sym1 = ^tmpF0[^tmpvalue1]
+    | ^_sym1 = ^tmpfunc0[^tmpvalue1]
     | ^tmpvalue2 = 1
-    | ^sym2 = ^tmpF0[^tmpvalue2]
-    | Sym ~ ^sym
-    Tuple ~ ^tmpF0
+    | ^_sym2 = ^tmpfunc0[^tmpvalue2]
+    | Sym ~ ^_sym
+    Tuple ~ ^tmpfunc0
     Value ~ ^tmpvalue1
     Value ~ ^tmpvalue2
-    Sym ~ ^sym1
-    Sym ~ ^sym2
+    Sym ~ ^_sym1
+    Sym ~ ^_sym2
   }
 }
 "
@@ -85,39 +85,39 @@ F: sym => (sym1, sym2)
 ## function with tuple-target
 "
 Sym
-F: sym => (sym1, sym2)
-    | P1(sym)
-    P2(sym1, sym2)
+func: _sym => (_sym1, _sym2)
+    | P1(_sym)
+    P2(_sym1, _sym2)
 "
 =
 "
 ∀{
   Symbol ~ Sym
-  Function ~ F
+  Function ~ func
   ∀{
-    | ^sym, ^sym1, ^sym2, ^tmpF0, ^tmpvalue1, ^tmpvalue2
-    | ^tmpF0 = F(^sym)
+    | ^_sym, ^_sym1, ^_sym2, ^tmpfunc0, ^tmpvalue1, ^tmpvalue2
+    | ^tmpfunc0 = func(^_sym)
     | ^tmpvalue1 = 0
-    | ^sym1 = ^tmpF0[^tmpvalue1]
+    | ^_sym1 = ^tmpfunc0[^tmpvalue1]
     | ^tmpvalue2 = 1
-    | ^sym2 = ^tmpF0[^tmpvalue2]
-    | Sym ~ ^sym
-    Tuple ~ ^tmpF0
+    | ^_sym2 = ^tmpfunc0[^tmpvalue2]
+    | Sym ~ ^_sym
+    Tuple ~ ^tmpfunc0
     Value ~ ^tmpvalue1
     Value ~ ^tmpvalue2
-    Sym ~ ^sym1
-    Sym ~ ^sym2
+    Sym ~ ^_sym1
+    Sym ~ ^_sym2
   }
   ∀{
-    | ^sym, ^sym1, ^sym2, ^tmpF3, ^tmpvalue4, ^tmpvalue5
-    | ^tmpF3 = F(^sym)
+    | ^_sym, ^_sym1, ^_sym2, ^tmpfunc3, ^tmpvalue4, ^tmpvalue5
+    | ^tmpfunc3 = func(^_sym)
     | ^tmpvalue4 = 0
-    | ^sym1 = ^tmpF3[^tmpvalue4]
+    | ^_sym1 = ^tmpfunc3[^tmpvalue4]
     | ^tmpvalue5 = 1
-    | ^sym2 = ^tmpF3[^tmpvalue5]
-    | Sym ~ ^sym
-    | P1(^sym)
-    P2(^sym1, ^sym2)
+    | ^_sym2 = ^tmpfunc3[^tmpvalue5]
+    | Sym ~ ^_sym
+    | P1(^_sym)
+    P2(^_sym1, ^_sym2)
   }
 }
 "
@@ -129,8 +129,8 @@ sym = {| ^sym | ^sym >= 0 => ^sym + 1}
 =
 "
 ∀{
-  | ^tmpmodule03
-  | ^tmpmodule03 = {
+  | ^tmp03
+  | ^tmp03 = {
     | ^logic_language_out0
     ∃{
       | ^sym, ^tmp00, ^tmp11, ^tmpadd2
@@ -143,7 +143,7 @@ sym = {| ^sym | ^sym >= 0 => ^sym + 1}
       ^logic_language_out0 = ^tmpadd2
     }
   }
-  sym = ^tmpmodule03
+  sym = ^tmp03
 }
 "
 
@@ -151,7 +151,7 @@ sym = {| ^sym | ^sym >= 0 => ^sym + 1}
 "
 Class
 Sym
-Class::func: (class, ^sym1) => sym2
+Class::func: (_class, ^sym1) => _sym2
 "
 =
 "
@@ -160,10 +160,10 @@ Class::func: (class, ^sym1) => sym2
   Symbol ~ Sym
   Function ~ func
   ∀{
-    | ^class, ^sym1, ^sym2
-    | ^sym2 = func(^class, ^sym1)
-    | Class ~ ^class
-    Sym ~ ^sym2
+    | ^_class, ^sym1, ^_sym2
+    | ^_sym2 = func(^_class, ^sym1)
+    | Class ~ ^_class
+    Sym ~ ^_sym2
   }
 }
 "
@@ -193,7 +193,7 @@ Class::val
 "
 Val
 Class
-    ::func: (class, val1) => val2
+    ::func: (_class, _val1) => _val2
 "
 =
 "
@@ -202,11 +202,11 @@ Class
   Symbol ~ Class
   Function ~ func
   ∀{
-    | ^class, ^val1, ^val2
-    | ^val2 = func(^class, ^val1)
-    | Class ~ ^class
-    | Val ~ ^val1
-    Val ~ ^val2
+    | ^_class, ^_val1, ^_val2
+    | ^_val2 = func(^_class, ^_val1)
+    | Class ~ ^_class
+    | Val ~ ^_val1
+    Val ~ ^_val2
   }
 }
 "
@@ -214,8 +214,8 @@ Class
 ## class-call
 "
 Class
-Class::func: (class, ^sym1) => ^sym2
-∀{| class | ^sym | class.func(^sym) = 0}
+Class::func: (_class, ^sym1) => ^sym2
+∀{| _class | ^sym | _class.func(^sym) = 0}
 "
 =
 "
@@ -223,10 +223,10 @@ Class::func: (class, ^sym1) => ^sym2
   Symbol ~ Class
   Function ~ func
   ∀{
-    | ^class, ^sym, ^tmpfunc_stmt0, ^tmpvalue_literal_stmt1
-    | ^tmpfunc_stmt0 = func(^class, ^sym)
+    | ^_class, ^sym, ^tmpfunc_stmt0, ^tmpvalue_literal_stmt1
+    | ^tmpfunc_stmt0 = func(^_class, ^sym)
     | ^tmpvalue_literal_stmt1 = 0
-    | Class ~ ^class
+    | Class ~ ^_class
     Value ~ ^tmpvalue_literal_stmt1
     ^tmpfunc_stmt0 = ^tmpvalue_literal_stmt1
   }
@@ -235,33 +235,33 @@ Class::func: (class, ^sym1) => ^sym2
 
 ## nested-function-declaration
 "
-F: func => ^sym1
-    | func: ^sym2 => ^sym3
+func: _func => ^sym1
+    | ^inner_func: ^sym2 => ^sym3
         P(^sym3)
-    P(func)
+    P(^inner_func)
 "
 =
 "
 ∀{
-  Function ~ F
+  Function ~ func
   ∀{
-    | ^func, ^sym1
-    | ^sym1 = F(^func)
-    | Function ~ ^func
+    | ^_func, ^sym1, ^inner_func
+    | ^sym1 = func(^_func)
+    | Symbol ~ ^_func
+    | Function ~ ^inner_func
     | ∀{
       | ^sym2, ^sym3
-      | ^sym3 = ^func(^sym2)
+      | ^sym3 = ^inner_func(^sym2)
       P(^sym3)
     }
-    P(^func)
+    P(^inner_func)
   }
 }
-
 "
 
 ## branch
 "
-F: ^sym1 => ^sym2
+func: ^sym1 => ^sym2
     | ^sym3
     | \all
         |- P1(^sym1)
@@ -276,10 +276,10 @@ F: ^sym1 => ^sym2
 =
 "
 ∀{
-  Function ~ F
+  Function ~ func
   ∀{
     | ^sym1, ^sym2, ^sym3
-    | ^sym2 = F(^sym1)
+    | ^sym2 = func(^sym1)
     | ∀{
       ∀{
         | P1(^sym1)
@@ -322,88 +322,64 @@ sym14 = sym1[1: 2]
 =
 "
 ∀{
-  | ^tmp1_2_30, ^tmp1_2_31, ^tmpfunc_stmt2, ^tmpvalue_literal_stmt3, ^tmp04, ^tmpfunc_stmt5, ^tmpchar_literal_stmt6, ^tmp17, ^tmpfunc_stmt8, ^tmpchar_literal_stmt9, ^tmp210, ^tmpfunc_stmt11, ^tmpchar_literal_stmt12, ^tmp113, ^tmptmp14, ^tmp1_2_315, ^tmptmp16, ^tmptmp17, ^tmptmp18, ^tmpfunc_stmt19, ^tmpvalue_literal_stmt20, ^tmp121, ^tmp222, ^tmp1_223, ^tmp1_224, ^tmp125, ^tmp226, ^tmp1_2_1_227, ^tmp1_228, ^tmp129, ^tmp230, ^tmp1_2_1_231, ^tmp132, ^tmp233, ^tmpsym1_1_234
-  | ^tmp1_2_30 = (1, 2, 3)
-  | ^tmp1_2_31 = {1, 2, 3}
-  | ^tmpfunc_stmt2 = size(sym3)
-  | ^tmpvalue_literal_stmt3 = 3
-  | ^tmp04 = 0
-  | ^tmpfunc_stmt5 = sym3[^tmp04]
-  | ^tmpchar_literal_stmt6 = '1'
-  | ^tmp17 = 1
-  | ^tmpfunc_stmt8 = sym3[^tmp17]
-  | ^tmpchar_literal_stmt9 = '2'
-  | ^tmp210 = 2
-  | ^tmpfunc_stmt11 = sym3[^tmp210]
-  | ^tmpchar_literal_stmt12 = '3'
-  | ^tmp113 = '1'
-  | ^tmptmp14 = '∀'
-  | ^tmp1_2_315 = (1, 2, 3)
-  | ^tmptmp16 = {}
-  | ^tmptmp17 = ()
-  | ^tmptmp18 = ()
-  | ^tmpfunc_stmt19 = size(sym10)
-  | ^tmpvalue_literal_stmt20 = 0
+  | ^tmptuple0, ^tmpset1, ^tmp1232, ^tmp13, ^tmptmp4, ^tmptuple5, ^tmpset6, ^tmptuple7, ^tmptuple8, ^tmpstring_literal9, ^tmp110, ^tmp211, ^tmpslice12, ^tmptuple13, ^tmp114, ^tmp215, ^tmpslice16, ^tmptuple17, ^tmp118, ^tmp219, ^tmpslice20, ^tmp121, ^tmp222, ^tmpslice23
+  | ^tmptuple0 = (1, 2, 3)
+  | ^tmpset1 = {1, 2, 3}
+  | ^tmp1232 = "123"
+  | ^tmp13 = '1'
+  | ^tmptmp4 = '∀'
+  | ^tmptuple5 = (1, 2, 3)
+  | ^tmpset6 = {}
+  | ^tmptuple7 = ()
+  | ^tmptuple8 = ()
+  | ^tmpstring_literal9 = ""
+  | ^tmp110 = 1
+  | ^tmp211 = 2
+  | ^tmpslice12 = [:](^tmp110, ^tmp211)
+  | ^tmptuple13 = (1, 2)
+  | ^tmp114 = 1
+  | ^tmp215 = 2
+  | ^tmpslice16 = [:](^tmptuple13, ^tmp114, ^tmp215)
+  | ^tmptuple17 = (1, 2)
+  | ^tmp118 = 1
+  | ^tmp219 = 2
+  | ^tmpslice20 = [:](^tmptuple17, ^tmp118, ^tmp219)
   | ^tmp121 = 1
   | ^tmp222 = 2
-  | ^tmp1_223 = [:](^tmp121, ^tmp222)
-  | ^tmp1_224 = (1, 2)
-  | ^tmp125 = 1
-  | ^tmp226 = 2
-  | ^tmp1_2_1_227 = [:](^tmp1_224, ^tmp125, ^tmp226)
-  | ^tmp1_228 = (1, 2)
-  | ^tmp129 = 1
-  | ^tmp230 = 2
-  | ^tmp1_2_1_231 = [:](^tmp1_228, ^tmp129, ^tmp230)
-  | ^tmp132 = 1
-  | ^tmp233 = 2
-  | ^tmpsym1_1_234 = [:](sym1, ^tmp132, ^tmp233)
-  Tuple ~ ^tmp1_2_30
-  Set ~ ^tmp1_2_31
-  Value ~ ^tmpvalue_literal_stmt3
-  Value ~ ^tmp04
-  Char ~ ^tmpchar_literal_stmt6
-  Value ~ ^tmp17
-  Char ~ ^tmpchar_literal_stmt9
-  Value ~ ^tmp210
-  Char ~ ^tmpchar_literal_stmt12
-  Char ~ ^tmp113
-  Char ~ ^tmptmp14
-  Tuple ~ ^tmp1_2_315
-  Set ~ ^tmptmp16
-  Tuple ~ ^tmptmp17
-  Tuple ~ ^tmptmp18
-  Value ~ ^tmpvalue_literal_stmt20
+  | ^tmpslice23 = [:](sym1, ^tmp121, ^tmp222)
+  Tuple ~ ^tmptuple0
+  Set ~ ^tmpset1
+  String ~ ^tmp1232
+  Char ~ ^tmp13
+  Char ~ ^tmptmp4
+  Tuple ~ ^tmptuple5
+  Set ~ ^tmpset6
+  Tuple ~ ^tmptuple7
+  Tuple ~ ^tmptuple8
+  String ~ ^tmpstring_literal9
+  Value ~ ^tmp110
+  Value ~ ^tmp211
+  Tuple ~ ^tmptuple13
+  Value ~ ^tmp114
+  Value ~ ^tmp215
+  Tuple ~ ^tmptuple17
+  Value ~ ^tmp118
+  Value ~ ^tmp219
   Value ~ ^tmp121
   Value ~ ^tmp222
-  Tuple ~ ^tmp1_224
-  Value ~ ^tmp125
-  Value ~ ^tmp226
-  Tuple ~ ^tmp1_228
-  Value ~ ^tmp129
-  Value ~ ^tmp230
-  Value ~ ^tmp132
-  Value ~ ^tmp233
-  sym1 = ^tmp1_2_30
-  sym2 = ^tmp1_2_31
-  String ~ sym3
-  ^tmpfunc_stmt2 = ^tmpvalue_literal_stmt3
-  ^tmpfunc_stmt5 = ^tmpchar_literal_stmt6
-  ^tmpfunc_stmt8 = ^tmpchar_literal_stmt9
-  ^tmpfunc_stmt11 = ^tmpchar_literal_stmt12
-  Char ~ sym4
-  sym4 = ^tmp113
-  Char ~ sym5
-  sym5 = ^tmptmp14
-  sym6 = ^tmp1_2_315
-  sym7 = ^tmptmp16
-  sym8 = ^tmptmp17
-  sym9 = ^tmptmp18
-  String ~ sym10
-  ^tmpfunc_stmt19 = ^tmpvalue_literal_stmt20
-  sym11 = ^tmp1_223
-  sym12 = ^tmp1_2_1_227
-  sym13 = ^tmp1_2_1_231
-  sym14 = ^tmpsym1_1_234
+  sym1 = ^tmptuple0
+  sym2 = ^tmpset1
+  sym3 = ^tmp1232
+  sym4 = ^tmp13
+  sym5 = ^tmptmp4
+  sym6 = ^tmptuple5
+  sym7 = ^tmpset6
+  sym8 = ^tmptuple7
+  sym9 = ^tmptuple8
+  sym10 = ^tmpstring_literal9
+  sym11 = ^tmpslice12
+  sym12 = ^tmpslice16
+  sym13 = ^tmpslice20
+  sym14 = ^tmpslice23
 }
 "
