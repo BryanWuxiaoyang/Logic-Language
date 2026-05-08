@@ -31,6 +31,15 @@ class FinalAstValidationCompileError(CompileError):
         self.diagnostics = diagnostics or []
 
 
+class Stage2DiagnosticsCompileError(CompileError):
+    """Raised when stage 2 emits fatal diagnostics before section parsing."""
+
+    def __init__(self, diagnostics: list[dict[str, object]], stage_summaries: list[str]) -> None:
+        super().__init__(format_stage2_diagnostics_error(diagnostics))
+        self.diagnostics = diagnostics
+        self.stage_summaries = stage_summaries
+
+
 @dataclass(frozen=True)
 class CompilePipelineResult:
     ast: dict[str, Any]
@@ -49,6 +58,22 @@ def format_final_ast_validation_error(diagnostics: list[dict[str, object]]) -> s
     return "\n".join(lines)
 
 
+def format_stage2_diagnostics_error(diagnostics: list[dict[str, object]]) -> str:
+    lines = ["stage2 diagnostics failed:"]
+    for entry in diagnostics:
+        file = str(entry.get("file", "<ast>"))
+        line = int(entry.get("lineno", 0) or 0) + 1
+        column = int(entry.get("col_start_no", 0) or 0) + 1
+        code = str(entry.get("code", "stage2_error"))
+        reason = str(entry.get("reason", "stage2 diagnostic failed"))
+        lines.append(f"{file}:{line}:{column}: {code}: {reason}")
+    return "\n".join(lines)
+
+
+def has_error_diagnostics(diagnostics: list[dict[str, object]]) -> bool:
+    return any(entry.get("type") == "error" for entry in diagnostics)
+
+
 def run_compile_pipeline(
     text: str,
     base_dir: Path | str = ".",
@@ -64,8 +89,10 @@ def run_compile_pipeline(
     from compile_pipeline.declaration_locations import annotate_declaration_bound_locs
 
     normalized = normalize_source(text, base_dir, source=source, allow_imports=allow_imports)
-    desugared = desugar_source(normalized.text, Path(base_dir).resolve())
-    sections = parse_sections(desugared.text)
+    desugared = desugar_source(normalized, Path(base_dir).resolve())
+    if has_error_diagnostics(desugared.diagnostics):
+        raise Stage2DiagnosticsCompileError(desugared.diagnostics, [normalized.summary(), desugared.summary()])
+    sections = parse_sections(desugared.ast)
     annotate_declaration_bound_locs(sections.module, normalized.text, normalized.source)
     statements = parse_statements(sections)
     lowered = lower_to_ast(statements, normalized.loc)

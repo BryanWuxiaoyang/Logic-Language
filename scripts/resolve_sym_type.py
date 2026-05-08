@@ -190,7 +190,7 @@ def resolve_text(
     evidence = collect_type_evidence(ast)
     definitions = collect_definitions(expanded, evidence, ast)
     occurrences = scan_source_occurrences(text, file_label)
-    return build_payload(occurrences, evidence, definitions)
+    return build_payload(occurrences, evidence, definitions, ast)
 
 
 def resolve_file(file_path: Path) -> dict[str, Any]:
@@ -1076,6 +1076,7 @@ def build_payload(
     occurrences: list[Occurrence],
     evidence: dict[str, set[str]],
     definitions: dict[str, list[Definition]],
+    ast: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     entries: list[dict[str, Any]] = []
     counts: Counter[str] = Counter()
@@ -1111,8 +1112,136 @@ def build_payload(
     return {
         "summary": {"symbol_count": len(symbols), "occurrence_count": len(entries)},
         "symbols": symbols,
+        "completion_symbols": serialize_completion_symbols(definitions, evidence),
+        "class_members": serialize_class_members(definitions, evidence),
+        "symbol_classes": serialize_symbol_classes(definitions, ast),
         "occurrences": entries,
     }
+
+
+def serialize_class_members(
+    definitions: dict[str, list[Definition]],
+    evidence: dict[str, set[str]],
+) -> dict[str, list[dict[str, Any]]]:
+    members: dict[str, list[dict[str, Any]]] = {}
+    for name, entries in definitions.items():
+        for entry in entries:
+            if entry.kind != "callable_decl" or entry.owner_class is None:
+                continue
+            members.setdefault(entry.owner_class, []).append(
+                {
+                    "name": name,
+                    "type": classify_symbol(name, evidence),
+                    "kind": entry.kind,
+                    "owner_class": entry.owner_class,
+                    "definition": serialize_definition(entry),
+                }
+            )
+    return {owner: dedupe_member_entries(entries) for owner, entries in sorted(members.items())}
+
+
+def dedupe_member_entries(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    seen: set[str] = set()
+    output: list[dict[str, Any]] = []
+    for entry in sorted(entries, key=lambda item: (str(item.get("name", "")), str(item.get("kind", "")))):
+        name = str(entry.get("name", ""))
+        if name in seen:
+            continue
+        seen.add(name)
+        output.append(entry)
+    return output
+
+
+def serialize_symbol_classes(definitions: dict[str, list[Definition]], ast: dict[str, Any] | None) -> dict[str, list[str]]:
+    direct: dict[str, set[str]] = {}
+    for name, entries in definitions.items():
+        for entry in entries:
+            if entry.type == "class" and entry.owner_class is not None and entry.kind in {"class_type_target", "class_type_fact", "class_receiver"}:
+                direct.setdefault(name, set()).add(entry.owner_class)
+    for class_name, sym_name in collect_symbol_class_edges(ast):
+        direct.setdefault(sym_name, set()).add(class_name)
+    class_parents = collect_class_parent_edges(ast)
+    output: dict[str, list[str]] = {}
+    for name, classes in direct.items():
+        expanded: set[str] = set()
+        for class_name in classes:
+            expanded.update(class_ancestor_closure(class_name, class_parents))
+        if expanded:
+            output[name] = sorted(expanded)
+    return output
+
+
+def collect_symbol_class_edges(ast: dict[str, Any] | None) -> list[tuple[str, str]]:
+    edges: list[tuple[str, str]] = []
+    if ast is None:
+        return edges
+    for node in walk_ast(ast):
+        if node.get("kind") != "func_stmt":
+            continue
+        call_name = sym_name(node.get("call_sym"))
+        args = [sym_name(arg) for arg in node.get("arg_sym_list", [])]
+        if call_name != "~" or len(args) != 2 or not args[0] or not args[1]:
+            continue
+        class_name, source_name = args
+        if is_capital_head(class_name) and not is_capital_head(source_name) and not is_generated_sym_name(source_name):
+            edges.append((class_name, source_name))
+    return edges
+
+
+def collect_class_parent_edges(ast: dict[str, Any] | None) -> dict[str, set[str]]:
+    parents: dict[str, set[str]] = {}
+    if ast is None:
+        return parents
+    for node in walk_ast(ast):
+        if node.get("kind") != "func_stmt":
+            continue
+        call_name = sym_name(node.get("call_sym"))
+        args = [sym_name(arg) for arg in node.get("arg_sym_list", [])]
+        if call_name != "~" or len(args) != 2 or not args[0] or not args[1]:
+            continue
+        parent, child = args
+        if is_capital_head(parent) and is_capital_head(child):
+            parents.setdefault(child, set()).add(parent)
+    return parents
+
+
+def class_ancestor_closure(class_name: str, parents: dict[str, set[str]]) -> set[str]:
+    output: set[str] = set()
+    stack = [class_name]
+    while stack:
+        current = stack.pop()
+        if current in output:
+            continue
+        output.add(current)
+        stack.extend(sorted(parents.get(current, set())))
+    return output
+
+
+def serialize_completion_symbols(
+    definitions: dict[str, list[Definition]],
+    evidence: dict[str, set[str]],
+) -> list[dict[str, Any]]:
+    symbols: list[dict[str, Any]] = []
+    global_kinds = {"call_evidence", "callable_decl", "class_decl", "class_type_fact", "classifier_fact"}
+    for name, entries in sorted(definitions.items()):
+        useful_entries = [
+            entry
+            for entry in entries
+            if entry.kind in global_kinds and is_colorable_identifier(entry.name)
+        ]
+        if not useful_entries:
+            continue
+        selected = min(useful_entries, key=lambda item: (item.rank, item.order, item.file, item.lineno, item.col_start_no))
+        symbols.append(
+            {
+                "name": name,
+                "type": classify_symbol(name, evidence),
+                "definition": serialize_definition(selected),
+                "kind": selected.kind,
+                **({"owner_class": selected.owner_class} if selected.owner_class is not None else {}),
+            }
+        )
+    return symbols
 
 
 def choose_definition(

@@ -20,6 +20,7 @@ from compile_module import CompileError, run_compile_pipeline
 from compile_pipeline.source_utils import expand_imports
 from compile_pipeline.stage1_normalize_source import run as run_stage1
 from compile_pipeline.stage2_desugar_module_text import run as run_stage2
+from compile_pipeline.stage3_parse_module_sections import run as run_stage3
 from semantic_check import collect_semantic_diagnostics_from_text
 from translate_AST_to_source import translate_ast_to_source
 
@@ -82,7 +83,7 @@ def assert_no_legacy_top_level(ast: dict) -> None:
     assert "target_statements" not in ast
     assert "premise_PSs" in ast
     assert "target_PSs" in ast
-    assert "loc" in ast
+    assert "source_loc" in ast
 
 
 def test_simple_quantified() -> None:
@@ -664,11 +665,17 @@ def test_stage2_function_output_inheritance_is_target() -> None:
     desugared = run_stage2(text, SKILL_DIR).text
     assert "\n    | List\n" not in desugared
     assert "\n    | Symbol ~ List\n" not in desugared
-    assert "\n    Symbol ~ List\n" not in desugared
+    assert "\n    Symbol ~ List\n" in desugared
     assert "| List ~ list" in desugared
     assert "| List ~ list1" in desugared
     assert "| List ~ list2" not in desugared
     assert "\n        List ~ list2\n" in desugared
+
+
+def test_stage2_declared_class_symbol_fact_is_deduped() -> None:
+    desugared = run_stage2("List\nList", SKILL_DIR).text
+    assert desugared.count("\n    Symbol ~ List\n") == 1
+    assert "\n    | List\n" not in desugared
 
 
 def test_stage2_does_not_inject_implicit_stdlib_import() -> None:
@@ -711,6 +718,36 @@ def test_stage2_synthesized_infixes_are_spaced() -> None:
     assert "| x~x" not in desugared
 
 
+def test_stage2_attaches_authoritative_desugared_module() -> None:
+    result = run_stage2("F: _is_val => _sym\n    TS", ".")
+    module = result.ast.modules[0].lowered_module
+    assert module is not None
+    assert run_stage3(result.ast).module is module
+    signature_module = module.target_statements[1].sub_modules[0]
+    assert "Bool ~ _is_val" in [statement.text for statement in signature_module.predicate_statements]
+    assert "Symbol ~ _sym" in [statement.text for statement in signature_module.target_statements]
+
+
+def test_stage2_structural_collection_inheritance_module() -> None:
+    result = run_stage2("Reg\nF: _regs => _out", ".")
+    signature_statement = next(statement for statement in result.ast.modules[0].lowered_module.target_statements if statement.sub_modules)
+    signature_module = signature_statement.sub_modules[0]
+    premise_texts = [statement.text for statement in signature_module.predicate_statements]
+    collection_stmt = next(statement for statement in signature_module.predicate_statements if statement.sub_modules)
+    item_module = collection_stmt.sub_modules[0]
+    assert "Set ~ _regs" in premise_texts
+    assert item_module.syms == ["_regs_item"]
+    assert [statement.text for statement in item_module.predicate_statements] == ["_regs_item ∈ _regs"]
+    assert [statement.text for statement in item_module.target_statements] == ["Reg ~ _regs_item"]
+
+
+def test_stage2_target_only_does_not_infer_bound_sym() -> None:
+    module = run_stage2("_x = y", ".").ast.modules[0].lowered_module
+    assert module.syms == []
+    assert module.predicate_statements == []
+    assert [statement.text for statement in module.target_statements] == ["_x = y"]
+
+
 def test_stage2_omits_symbol_when_inheritance_premise_exists() -> None:
     desugared = run_stage2("∀{| x | Value ~ x | x = x}", ".").text
     assert "| Value ~ x" in desugared
@@ -730,7 +767,7 @@ def test_import_file_locations() -> None:
         imported.write_text("∀{| x | x = x}\n", encoding="utf-8")
         main.write_text("$import imported.lp\n", encoding="utf-8")
         ast = compile_text(main.read_text(encoding="utf-8"), base_dir=root, source=str(main), allow_imports=True)
-        assert ast["loc"]["source"] == str(imported.resolve())
+        assert ast["source_loc"]["source"] == str(imported.resolve())
         assert calls(ast, "=")
 
 
@@ -1126,7 +1163,7 @@ def test_function_output_inheritance_disassembles_as_target() -> None:
     second_source = translate_ast_to_source(compile_text(first_source, base_dir=SKILL_DIR))
     assert "\n  | ^List\n" not in first_source
     assert "\n  | Symbol ~ List\n" not in first_source
-    assert "\n  Symbol ~ List\n" not in first_source
+    assert "\n  Symbol ~ List\n" in first_source
     assert "\n    | List ~ ^list\n" in first_source
     assert "\n    | List ~ ^list1\n" in first_source
     assert "\n    | List ~ ^list2\n" not in first_source
@@ -1251,6 +1288,11 @@ def test_target_literal_assignment_normalized() -> None:
     assert not any(stmt["arg_sym_list"][0]["name"] == "Value" for stmt in top_level_calls(ast, "~", "premise_PSs"))
     assert any(stmt["arg_sym_list"][0]["name"] == "Value" for stmt in top_level_calls(ast, "~", "target_PSs"))
     assert top_level_calls(ast, "=", "target_PSs")
+
+
+def test_generated_literal_assignment_is_closure_stable() -> None:
+    expanded = translate_ast_to_source(compile_text("sym = 'a'"))
+    assert translate_ast_to_source(compile_text(expanded)) == expanded
 
 
 def test_nested_literal_argument_adds_classifier_target() -> None:
@@ -1428,9 +1470,10 @@ sys.argv = ["compile_module.py", "--text", "∀{| x | x = x}"]
 raise SystemExit(compile_module.main())
 """
     result = subprocess.run(
-        ["python3", "-c", code],
+        [sys.executable, "-c", code],
         capture_output=True,
         text=True,
+        encoding="utf-8",
         cwd=Path(__file__).resolve().parents[4],
         check=False,
     )
@@ -1454,9 +1497,10 @@ sys.argv = ["compile_module.py", "--debug-stages", "--text", "∀{| x | x = x}"]
 raise SystemExit(compile_module.main())
 """
     result = subprocess.run(
-        ["python3", "-c", code],
+        [sys.executable, "-c", code],
         capture_output=True,
         text=True,
+        encoding="utf-8",
         cwd=Path(__file__).resolve().parents[4],
         check=False,
     )
@@ -1797,7 +1841,7 @@ def test_module_check_final_ast_class_method_body_conflict_uses_declaration_loca
 def test_module_check_text_import_resolves_standard_library_from_skill_dir() -> None:
     result = subprocess.run(
         [
-            "python3",
+            sys.executable,
             str(SCRIPTS_DIR / "module_check.py"),
             "--text",
             "$import standard_library.lp\n∀{| _val | _val = _val}",
@@ -1806,6 +1850,7 @@ def test_module_check_text_import_resolves_standard_library_from_skill_dir() -> 
         ],
         capture_output=True,
         text=True,
+        encoding="utf-8",
         cwd=SKILL_DIR,
         check=False,
     )
@@ -1832,7 +1877,7 @@ def test_module_check_stdin_import_uses_base_dir() -> None:
         (root / "imported.lp").write_text("Imported\n", encoding="utf-8")
         result = subprocess.run(
             [
-                "python3",
+                sys.executable,
                 str(SCRIPTS_DIR / "module_check.py"),
                 "--base-dir",
                 str(root),
@@ -1840,6 +1885,7 @@ def test_module_check_stdin_import_uses_base_dir() -> None:
             input="$import imported.lp\n∀{| x | x = x}",
             capture_output=True,
             text=True,
+            encoding="utf-8",
             cwd=SKILL_DIR,
             check=False,
         )
@@ -1850,9 +1896,10 @@ def test_module_check_stdin_import_uses_base_dir() -> None:
 
 def test_expand_module_cli_text_mode() -> None:
     result = subprocess.run(
-        ["python3", str(SCRIPTS_DIR / "expand_module.py"), "--text", "∀{| x | x = x}"],
+        [sys.executable, str(SCRIPTS_DIR / "expand_module.py"), "--text", "∀{| x | x = x}"],
         capture_output=True,
         text=True,
+        encoding="utf-8",
         cwd=SKILL_DIR,
         check=False,
     )
@@ -1866,9 +1913,10 @@ def test_expand_module_cli_file_mode() -> None:
         path = Path(temp_dir) / "input.lp"
         path.write_text("∀{| x | x = x}", encoding="utf-8")
         result = subprocess.run(
-            ["python3", str(SCRIPTS_DIR / "expand_module.py"), str(path)],
+            [sys.executable, str(SCRIPTS_DIR / "expand_module.py"), str(path)],
             capture_output=True,
             text=True,
+            encoding="utf-8",
             cwd=SKILL_DIR,
             check=False,
         )
@@ -1879,10 +1927,11 @@ def test_expand_module_cli_file_mode() -> None:
 
 def test_expand_module_cli_stdin_mode() -> None:
     result = subprocess.run(
-        ["python3", str(SCRIPTS_DIR / "expand_module.py")],
+        [sys.executable, str(SCRIPTS_DIR / "expand_module.py")],
         input="∀{| x | x = x}",
         capture_output=True,
         text=True,
+        encoding="utf-8",
         cwd=SKILL_DIR,
         check=False,
     )
@@ -1893,9 +1942,10 @@ def test_expand_module_cli_stdin_mode() -> None:
 
 def test_expand_module_cli_invalid_input() -> None:
     result = subprocess.run(
-        ["python3", str(SCRIPTS_DIR / "expand_module.py"), "--text", "∀{| 1x | 1x = 1x}"],
+        [sys.executable, str(SCRIPTS_DIR / "expand_module.py"), "--text", "∀{| 1x | 1x = 1x}"],
         capture_output=True,
         text=True,
+        encoding="utf-8",
         cwd=SKILL_DIR,
         check=False,
     )
@@ -2064,15 +2114,16 @@ def test_normalize_module_declarations_cli_modes_and_imports() -> None:
         source_file.write_text("$import imported.lp\nf = f", encoding="utf-8")
 
         file_result = subprocess.run(
-            ["python3", str(SCRIPTS_DIR / "normalize_module_declarations.py"), str(source_file)],
+            [sys.executable, str(SCRIPTS_DIR / "normalize_module_declarations.py"), str(source_file)],
             capture_output=True,
             text=True,
+            encoding="utf-8",
             cwd=SKILL_DIR,
             check=False,
         )
         text_result = subprocess.run(
             [
-                "python3",
+                sys.executable,
                 str(SCRIPTS_DIR / "normalize_module_declarations.py"),
                 "--base-dir",
                 str(root),
@@ -2081,14 +2132,16 @@ def test_normalize_module_declarations_cli_modes_and_imports() -> None:
             ],
             capture_output=True,
             text=True,
+            encoding="utf-8",
             cwd=SKILL_DIR,
             check=False,
         )
         stdin_result = subprocess.run(
-            ["python3", str(SCRIPTS_DIR / "normalize_module_declarations.py"), "--base-dir", str(root)],
+            [sys.executable, str(SCRIPTS_DIR / "normalize_module_declarations.py"), "--base-dir", str(root)],
             input="$import imported.lp\nf = f",
             capture_output=True,
             text=True,
+            encoding="utf-8",
             cwd=SKILL_DIR,
             check=False,
         )
@@ -2143,9 +2196,10 @@ def test_normalize_module_declarations_requires_explicit_class_members() -> None
 
 def test_normalize_module_declarations_cli_invalid_input() -> None:
     result = subprocess.run(
-        ["python3", str(SCRIPTS_DIR / "normalize_module_declarations.py"), "--text", "∀{\n  x = x"],
+        [sys.executable, str(SCRIPTS_DIR / "normalize_module_declarations.py"), "--text", "∀{\n  x = x"],
         capture_output=True,
         text=True,
+        encoding="utf-8",
         cwd=SKILL_DIR,
         check=False,
     )
@@ -2600,9 +2654,10 @@ def test_resolve_sym_type_invalid_source_returns_empty_success_payload() -> None
 
 def test_resolve_sym_type_cli_modes() -> None:
     result = subprocess.run(
-        ["python3", str(SCRIPTS_DIR / "resolve_sym_type.py"), "--text", "Function ~ f\ny = f(x)", "--pretty"],
+        [sys.executable, str(SCRIPTS_DIR / "resolve_sym_type.py"), "--text", "Function ~ f\ny = f(x)", "--pretty"],
         capture_output=True,
         text=True,
+        encoding="utf-8",
         cwd=SKILL_DIR,
         check=False,
     )
@@ -2616,9 +2671,10 @@ def test_resolve_sym_type_cli_modes() -> None:
         main = root / "main.lp"
         main.write_text("$import imported.lp\np(x)\n", encoding="utf-8")
         file_result = subprocess.run(
-            ["python3", str(SCRIPTS_DIR / "resolve_sym_type.py"), "--file", str(main)],
+            [sys.executable, str(SCRIPTS_DIR / "resolve_sym_type.py"), "--file", str(main)],
             capture_output=True,
             text=True,
+            encoding="utf-8",
             cwd=SKILL_DIR,
             check=False,
         )
@@ -2629,7 +2685,7 @@ def test_resolve_sym_type_cli_modes() -> None:
 
         stdin_result = subprocess.run(
             [
-                "python3",
+                sys.executable,
                 str(SCRIPTS_DIR / "resolve_sym_type.py"),
                 "--filename",
                 str(main),
@@ -2639,6 +2695,7 @@ def test_resolve_sym_type_cli_modes() -> None:
             input="$import imported.lp\np(x)\n",
             capture_output=True,
             text=True,
+            encoding="utf-8",
             cwd=SKILL_DIR,
             check=False,
         )
@@ -2716,12 +2773,16 @@ def main() -> int:
         test_stage2_capital_inheritance_when_visible,
         test_stage2_class_suffix_fallback_inheritance,
         test_stage2_function_output_inheritance_is_target,
+        test_stage2_declared_class_symbol_fact_is_deduped,
         test_stage2_does_not_inject_implicit_stdlib_import,
         test_standard_library_supplies_universal_inheritance_axioms,
         test_stage2_generated_sym_does_not_re_desugar,
         test_stage2_authored_generated_sym_gets_no_implicit_facts,
         test_double_underscore_sym_is_ordinary,
         test_stage2_synthesized_infixes_are_spaced,
+        test_stage2_attaches_authoritative_desugared_module,
+        test_stage2_structural_collection_inheritance_module,
+        test_stage2_target_only_does_not_infer_bound_sym,
         test_stage2_omits_symbol_when_inheritance_premise_exists,
         test_stage2_legacy_unspaced_infix_still_compiles,
         test_import_file_locations,

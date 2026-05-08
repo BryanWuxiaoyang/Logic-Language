@@ -1,5 +1,8 @@
 
 Sym
+    # Compiler-emitted symbol AST nodes carry `source_loc` for diagnostics.
+    # Generated symbols set `generated=true` and use the authored source
+    # symbol/expression location as `source_loc`.
 Str~Sym
 
 Stmt

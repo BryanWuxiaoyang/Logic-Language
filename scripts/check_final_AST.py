@@ -184,10 +184,10 @@ def make_diagnostic(sym_node: AstNode, owner_stmt: AstNode, *, code: str, reason
 
 
 def choose_loc(sym_node: AstNode, owner_stmt: AstNode) -> AstNode:
-    loc = sym_node.get("loc")
+    loc = sym_node.get("source_loc") or sym_node.get("loc")
     if isinstance(loc, dict):
         return loc
-    loc = owner_stmt.get("loc")
+    loc = owner_stmt.get("source_loc") or owner_stmt.get("loc")
     if isinstance(loc, dict):
         return loc
     return {"source": "<ast>", "line": 1, "column": 1, "end_column": 1}

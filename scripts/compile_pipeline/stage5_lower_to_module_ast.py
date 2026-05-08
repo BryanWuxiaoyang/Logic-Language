@@ -14,6 +14,7 @@ SCRIPTS_DIR = Path(__file__).resolve().parents[1]
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
+from compile_pipeline.ast_nodes import convert_loc_fields
 from compile_pipeline.errors import CompileError
 from compile_pipeline.module_sections import (
     DECL_BODY_OUTPUT_MARKER,
@@ -159,7 +160,7 @@ class AstLowerer:
         if generated:
             ast["generated"] = True
         if module.quantifier is not None:
-            ast["quantifier_sym"] = sym_node(module.quantifier)
+            ast["quantifier_sym"] = sym_node(module.quantifier, self.loc)
         return ast
 
     def lower_statement(
@@ -376,7 +377,7 @@ def run(parsed: ParsedStatements | str, loc: SourceLoc | None = None) -> ModuleA
     if isinstance(parsed, str):
         parsed = parse_statements(parsed)
     loc = loc or SourceLoc("__stdin__", 1, 1, 1, 1)
-    return ModuleAstResult(ast=AstLowerer(loc).lower_module(parsed.module))
+    return ModuleAstResult(ast=convert_loc_fields(AstLowerer(loc).lower_module(parsed.module)))
 
 
 def sym_node(name: str, loc: dict[str, Any] | None = None, *, generated: bool = False) -> AstNode:

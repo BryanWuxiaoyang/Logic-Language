@@ -10,7 +10,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from compile_module import FinalAstValidationCompileError, run_compile_pipeline
+from compile_module import FinalAstValidationCompileError, Stage2DiagnosticsCompileError, run_compile_pipeline
 from compile_pipeline.errors import CompileError
 from compile_pipeline.source_utils import load_lark_parser, load_tokens
 from semantic_check import collect_semantic_diagnostics_from_file, collect_semantic_diagnostics_from_text
@@ -133,9 +133,20 @@ def semantic_entries(source: str, file_label: str, base_dir: Path, is_file: bool
     return [with_stage(dict(entry), "semantic") for entry in entries]
 
 
+def naming_entries(source: str, file_label: str, base_dir: Path) -> list[Entry]:
+    from compile_pipeline.stage1_normalize_source import run as normalize_source
+    from compile_pipeline.stage2_desugar_module_text import run as desugar_source
+
+    normalized = normalize_source(source, base_dir.resolve(), source=file_label, allow_imports=True)
+    desugared = desugar_source(normalized, base_dir.resolve())
+    return [with_stage(dict(entry), "naming") for entry in desugared.diagnostics]
+
+
 def compile_entries(source: str, file_label: str, base_dir: Path) -> list[Entry]:
     try:
         run_compile_pipeline(source, base_dir.resolve(), source=file_label, allow_imports=True)
+    except Stage2DiagnosticsCompileError as error:
+        return [with_stage(dict(entry), "naming") for entry in error.diagnostics]
     except FinalAstValidationCompileError as error:
         return final_ast_entries(error, file_label)
     except (CompileError, OSError) as error:
@@ -145,6 +156,14 @@ def compile_entries(source: str, file_label: str, base_dir: Path) -> list[Entry]
 
 def check_module(source: str, file_label: str, base_dir: Path, *, is_file: bool) -> dict[str, Any]:
     entries = syntax_entries(source, file_label, base_dir)
+    if has_errors(entries):
+        return output_payload(entries)
+
+    try:
+        entries.extend(naming_entries(source, file_label, base_dir))
+    except (CheckError, CompileError, OSError, ValueError) as error:
+        positioned = positioned_error_entry(error, "naming", "naming_error") if isinstance(error, CheckError) else None
+        entries.append(positioned or fallback_entry(file_label, "naming", "naming_error", str(error)))
     if has_errors(entries):
         return output_payload(entries)
 

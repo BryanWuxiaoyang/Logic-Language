@@ -548,7 +548,7 @@ The AST is intended as a precise intermediate logic form that can support human-
 - introduce `class-declaration`
     - `class-declaration` is a surface syntax form only. Semantically it is sugar that expands to ordinary function declarations and `~` facts.
     - it does not introduce a new primitive semantic kind named `class`.
-    - A standalone capital-head target line such as `Class` declares `Class` as a class in the current scope and emits no logical statement.
+    - A standalone capital-head target line such as `Class` declares `Class` as a class in the current scope and emits `Symbol ~ Class` as a target statement.
     - Standalone non-capital symbols such as `class` and standalone operator symbols such as `~` are invalid as class declarations.
     - `Class::...` and `Class` body syntax require an explicit visible `Class` declaration in the same direct module body or an imported module.
     - inheritance facts such as `A ~ Class` do not declare `Class`.
@@ -774,14 +774,15 @@ The AST is intended as a precise intermediate logic form that can support human-
 - introduce `module_AST` as the compiler output form.
     - `compile_module` emits the root `module_stmt` JSON node by default.
     - final output uses `module_AST` field names such as `bound_syms`, `premise_binding_stmts`, `premise_PSs`, and `target_PSs`.
-    - output contains direct AST fields only; derived recursive fields are not emitted.
+    - output contains direct AST fields only; derived recursive fields are not emitted. Source positions are stored under `source_loc`, not `loc`.
 
-- `compile_module` is implemented as a staged compiler pipeline.
-    - `stage1_normalize_source`: expands imports, removes comments, normalizes latex codes, and preserves source identity.
-    - `stage2_desugar_module_text`: applies surface rewrites such as declarations, literals, operators, member calls, and implicit inheritance.
-    - `stage3_parse_module_sections`: parses set/quantified modules, binders, premise sections, and target sections.
-    - `stage4_parse_statements`: parses structural statement/term forms before AST lowering.
+- `compile_module` is implemented as a staged AST compiler pipeline.
+    - `stage1_normalize_source`: expands imports, removes comments, normalizes latex codes, and builds a mutable syntax AST. The syntax AST preserves function declarations with bodies, class declarations, class-method declarations, class fields, class field assignments, and parsed expression nodes.
+    - `stage2_desugar_module_text`: receives the stage1 AST and mutates it in place for source-sugar rewrites. The legacy `.text` API remains as deterministic compatibility rendering.
+    - `stage3_parse_module_sections`: receives the stage2 AST and expands/desugars it toward the normal module structure used by canonical `module_AST` lowering.
+    - `stage4_parse_statements`: compatibility pass for parsed statement summaries.
     - `stage5_lower_to_module_ast`: emits the final `module_AST`, ANF-lifts non-symbol call arguments, inserts generated bindings, and enforces AST shape.
+    - All emitted symbol nodes use `source_loc`; generated symbols set `generated=true` and use the authored source symbol/expression location as their `source_loc`.
 
 - introduce `compile_module`
     - it inputs `module-text` or `module-file` and returns `module_AST` JSON.
@@ -802,17 +803,17 @@ The AST is intended as a precise intermediate logic form that can support human-
 - `stage1_normalize_source`
     - path: `scripts/compile_pipeline/stage1_normalize_source.py`
     - input: source module text.
-    - output: normalized source summary with imports, comments, latex normalization, and source identity handling.
+    - output: normalized source summary plus a mutable syntax AST with imports, comments, latex normalization, and source identity handling.
 
 - `stage2_desugar_module_text`
     - path: `scripts/compile_pipeline/stage2_desugar_module_text.py`
-    - input: normalized module text.
-    - output: desugared module-text summary for source-level rewrites.
+    - input: normalized module text or stage1 syntax AST.
+    - output: in-place desugared syntax AST plus compatibility-rendered module-text summary for source-level rewrites.
 
 - `stage3_parse_module_sections`
     - path: `scripts/compile_pipeline/stage3_parse_module_sections.py`
-    - input: desugared module text.
-    - output: parsed module/section summary.
+    - input: stage2 syntax AST or compatibility-rendered desugared module text.
+    - output: parsed module/section summary attached to the syntax AST when available.
 
 - `stage4_parse_statements`
     - path: `scripts/compile_pipeline/stage4_parse_statements.py`

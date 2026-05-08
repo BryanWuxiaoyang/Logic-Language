@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
@@ -27,7 +28,7 @@ def loc(source: str = "<ast>", line: int = 1, column: int = 1, end_column: int =
 
 
 def sym(name: str | None, **extra: object) -> dict:
-    node = {"kind": "sym", "loc": loc()}
+    node = {"kind": "sym", "source_loc": loc()}
     if name is not None:
         node["name"] = name
     node.update(extra)
@@ -37,7 +38,7 @@ def sym(name: str | None, **extra: object) -> dict:
 def func(name: str, *args: dict) -> dict:
     return {
         "kind": "func_stmt",
-        "loc": loc(),
+        "source_loc": loc(),
         "call_sym": sym(name),
         "arg_sym_list": list(args),
     }
@@ -46,7 +47,7 @@ def func(name: str, *args: dict) -> dict:
 def binding(dst: str = "y", src: dict | None = None) -> dict:
     return {
         "kind": "binding_stmt",
-        "loc": loc(),
+        "source_loc": loc(),
         "dst_sym": sym(dst),
         "src_stmt": src or func("F", sym("x")),
     }
@@ -55,7 +56,7 @@ def binding(dst: str = "y", src: dict | None = None) -> dict:
 def module(bound_syms: list[dict], *, premise_bindings: list[dict] | None = None, premise_pss: list[dict] | None = None, target_pss: list[dict] | None = None) -> dict:
     return {
         "kind": "quantified_stmt",
-        "loc": loc(),
+        "source_loc": loc(),
         "bound_syms": bound_syms,
         "premise_binding_stmts": premise_bindings or [],
         "premise_PSs": premise_pss or [],
@@ -70,10 +71,11 @@ def codes(ast: dict) -> list[str]:
 
 def run_cli(args: list[str], *, stdin: str | None = None) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        ["python3", str(CHECKER), *args],
+        [sys.executable, str(CHECKER), *args],
         input=stdin,
         capture_output=True,
         text=True,
+        encoding="utf-8",
         check=False,
     )
 

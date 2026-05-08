@@ -13,6 +13,7 @@ SCRIPTS_DIR = Path(__file__).resolve().parents[1]
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
+from compile_pipeline.ast_nodes import SourceFileAst, SourceLoc
 from compile_pipeline.errors import CompileError
 from compile_pipeline.module_sections import (
     BRANCH_MODULE_MARKER,
@@ -46,6 +47,7 @@ from compile_pipeline.source_utils import (
 )
 from syntax_check_common import STDIN_FILE, collect_top_level_declarations, make_located_text
 from inheritance_sources import SYMBOL_SOURCE, selected_inheritance_source
+from compile_pipeline.check_naming_convention import check_naming_convention
 
 
 NUMERIC_LITERAL_RE = re.compile(r"(?<![\w'])\d+(?:\.\d+)?(?![\w'])")
@@ -73,6 +75,8 @@ class DesugarResult:
     import_count: int
     body_line_count: int
     visible_sym_count: int
+    ast: SourceFileAst
+    diagnostics: list[dict[str, object]]
 
     def summary(self) -> str:
         return "\n".join(
@@ -81,20 +85,25 @@ class DesugarResult:
                 f"imports: {self.import_count}",
                 f"body_lines: {self.body_line_count}",
                 f"visible_syms: {self.visible_sym_count}",
+                f"diagnostics: {len(self.diagnostics)}",
                 "desugared_text:",
                 self.text.rstrip(),
             ]
         )
 
 
-def run(text: str, base_dir: Path | str = ".") -> DesugarResult:
+def run(text: str | SourceFileAst | object, base_dir: Path | str = ".") -> DesugarResult:
+    from compile_pipeline.stage1_normalize_source import build_source_file_ast, whole_text_loc
+
     base_path = Path(base_dir).resolve()
+    source_ast = input_source_ast(text)
+    source_text = source_ast.text if source_ast is not None else str(text)
     tokens = load_tokens()
-    import_lines, body_text = split_imports(text)
+    import_lines, body_text = split_imports(source_text)
     output_imports = dedupe([normalize_latex(line, tokens) for line in import_lines])
 
     normalized_body = normalize_latex(body_text, tokens)
-    visible_text = visible_context_text(text, base_path, tokens)
+    visible_text = visible_context_text(source_text, base_path, tokens)
     visible_class_names = collect_free_class_owner_syms(visible_text)
     visible_syms = (
         collect_visible_syms(visible_text)
@@ -105,15 +114,47 @@ def run(text: str, base_dir: Path | str = ".") -> DesugarResult:
     body = strip_outer_blank_lines(remove_comments(normalized_body))
     if not body:
         desugared = "\n".join(output_imports) + "\n"
-        return DesugarResult(desugared, len(output_imports), 0, len(visible_syms))
+        ast = refresh_ast(source_ast, desugared, build_source_file_ast, whole_text_loc)
+        diagnostics = check_naming_convention(ast)
+        return DesugarResult(desugared, len(output_imports), 0, len(visible_syms), ast, diagnostics)
 
     compiler = ModuleCompiler(load_lark_parser(), visible_class_names=visible_class_names)
     module = compiler.compile(body)
     desugarer = ModuleDesugarer(visible_syms)
-    desugared_body = desugarer.render_module(module, ScopeState(set(visible_syms), set(visible_class_names)), indent=0)
+    desugared_module = desugarer.desugar_module(module, ScopeState(set(visible_syms), set(visible_class_names)))
+    desugared_body = "" if desugared_module is None else desugarer.render_structural_module(desugared_module, indent=0)
     desugared = "\n".join([*output_imports, desugared_body]) + "\n"
-    return DesugarResult(desugared, len(output_imports), len(desugared_body.splitlines()), len(visible_syms))
+    ast = refresh_ast(source_ast, desugared, build_source_file_ast, whole_text_loc, lowered_module=desugared_module)
+    diagnostics = check_naming_convention(ast)
+    return DesugarResult(desugared, len(output_imports), len(desugared_body.splitlines()), len(visible_syms), ast, diagnostics)
 
+
+
+def input_source_ast(value: object) -> SourceFileAst | None:
+    if isinstance(value, SourceFileAst):
+        return value
+    ast = getattr(value, "ast", None)
+    return ast if isinstance(ast, SourceFileAst) else None
+
+
+def refresh_ast(
+    source_ast: SourceFileAst | None,
+    text: str,
+    build_source_file_ast: object,
+    whole_text_loc: object,
+    *,
+    lowered_module: Module | None = None,
+) -> SourceFileAst:
+    if source_ast is None:
+        loc = whole_text_loc(text, "__stdin__")
+        source_ast = build_source_file_ast(text, "__stdin__", loc, [])
+    else:
+        source_ast.text = text
+        source_ast.modules[:] = build_source_file_ast(text, source_ast.source, source_ast.source_loc, source_ast.imports).modules
+    if lowered_module is not None and source_ast.modules:
+        source_ast.modules[0].lowered_module = lowered_module
+    source_ast.text = text
+    return source_ast
 
 def desugar_module_text(text: str, base_dir: Path | str = ".") -> str:
     return run(text, base_dir).text
@@ -177,12 +218,17 @@ class ModuleDesugarer:
         self.fresh_index = 0
 
     def render_module(self, module: Module, scope: ScopeState, indent: int) -> str:
+        desugared = self.desugar_module(module, scope)
+        return "" if desugared is None else self.render_structural_module(desugared, indent)
+
+    def desugar_module(self, module: Module, scope: ScopeState) -> Module | None:
         output_syms, body_output_syms, predicate_statements = self.extract_function_output_markers(module.predicate_statements)
         output_sym_set = set(output_syms)
         body_output_sym_set = set(body_output_syms)
         declaration_sym_set = set(module.declaration_syms)
         inferred_syms = [] if module.suppress_inferred_syms else self.infer_statement_syms(predicate_statements)
         original_syms = dedupe([*module.syms, *inferred_syms])
+        original_locs = self.bound_locs_for(module, original_syms)
         ancestor_bound_syms = set(scope.ancestor_bound_syms)
         visible_class_names = set(scope.visible_class_names) | set(module.declared_classes)
         local_bindings: list[BindingInfo] = []
@@ -196,10 +242,12 @@ class ModuleDesugarer:
 
         current_scope = ScopeState(ancestor_bound_syms | local_syms_set, visible_class_names)
         local_syms = [binding.name for binding in local_bindings]
-        rendered_predicates = [self.render_statement(statement, current_scope) for statement in predicate_statements]
-        rendered_targets: list[str] = []
+        desugared_predicates = [self.desugar_statement(statement, current_scope) for statement in predicate_statements]
+        rendered_predicates = [self.render_structural_statement(statement, 0) for statement in desugared_predicates]
+        desugared_targets: list[Statement] = []
         for statement in module.target_statements:
-            rendered_targets.extend(self.render_target_statement(statement, current_scope))
+            desugared_targets.extend(self.desugar_target_statement(statement, current_scope))
+        rendered_targets = [self.render_structural_statement(statement, 0) for statement in desugared_targets]
         target_inheritance_rhs = inheritance_rhs_names(rendered_targets)
         premise_binding_lhs = set() if body_output_sym_set else leading_premise_binding_lhs_names(rendered_predicates)
         target_binding_names = output_sym_set | declaration_sym_set
@@ -212,22 +260,37 @@ class ModuleDesugarer:
             and binding.name not in target_inheritance_rhs
         ]
         output_bindings = [binding for binding in local_bindings if binding.name in target_binding_names]
-        predicates = self.implicit_predicates(premise_bindings, visible_class_names, rendered_predicates)
-        target_inheritance = self.implicit_predicates(output_bindings, visible_class_names, rendered_targets)
-        targets = [*target_inheritance, *rendered_targets]
-        predicates.extend(rendered_predicates)
-        predicates.extend(self.local_wrapper_predicates(rendered_predicates + targets))
-        predicates = dedupe_statements([predicate for predicate in predicates if predicate])
-        if module.suppress_inferred_syms:
-            predicates = [BRANCH_MODULE_MARKER, *predicates]
-        targets = [target for target in targets if target]
+        predicates = self.implicit_predicates(premise_bindings, visible_class_names, rendered_predicates, current_scope)
+        target_inheritance = self.implicit_predicates(output_bindings, visible_class_names, rendered_targets, current_scope)
+        class_targets = dedupe_statement_nodes([Statement(render_infix(SYMBOL_SOURCE, "~", class_name)) for class_name in module.declared_classes])
+        targets = [*class_targets, *target_inheritance, *desugared_targets]
+        predicates.extend(desugared_predicates)
+        predicates.extend(self.local_wrapper_predicates(rendered_predicates + [self.render_structural_statement(statement, 0) for statement in targets]))
+        predicates = dedupe_statement_nodes([predicate for predicate in predicates if predicate.text.strip()])
+        targets = [target for target in targets if target.text.strip()]
         if output_sym_set and len(output_syms) > 1 and not targets:
-            targets.append(f"{DECL_OUTPUT_MARKER}({', '.join(output_syms)})")
+            targets.append(Statement(f"{DECL_OUTPUT_MARKER}({', '.join(output_syms)})"))
         if output_sym_set and len(output_syms) == 1 and not targets:
-            return ""
+            return None
 
-        opener = module.quantifier + "{" if module.type == "quantifier" else "{"
-        return self.format_module(opener, local_syms, predicates, targets, indent)
+        return Module(
+            type=module.type,
+            syms=local_syms,
+            predicate_statements=predicates,
+            target_statements=targets,
+            quantifier=module.quantifier,
+            declared_classes=module.declared_classes,
+            declaration_syms=module.declaration_syms,
+            suppress_inferred_syms=module.suppress_inferred_syms,
+            bound_sym_locs=original_locs,
+        )
+
+    def bound_locs_for(self, module: Module, syms: list[str]) -> list[dict[str, object] | None]:
+        loc_by_sym: dict[str, dict[str, object] | None] = {}
+        for index, sym in enumerate(module.syms):
+            if sym not in loc_by_sym:
+                loc_by_sym[sym] = module.bound_sym_locs[index] if index < len(module.bound_sym_locs) else None
+        return [loc_by_sym.get(sym) for sym in syms]
 
     def extract_function_output_markers(self, statements: list[Statement]) -> tuple[list[str], list[str], list[Statement]]:
         declaration_output_syms: list[str] = []
@@ -257,52 +320,77 @@ class ModuleDesugarer:
     def infer_statement_syms(self, statements: list[Statement]) -> list[str]:
         return infer_syms([statement.text for statement in statements])
 
-    def render_statement(self, statement: Statement, scope: ScopeState) -> str:
+    def desugar_statement(self, statement: Statement, scope: ScopeState) -> Statement:
         text = self.rewrite_statement_text(statement, scope)
+        sub_modules: list[Module] = []
         for index, submodule in enumerate(statement.sub_modules):
-            rendered = self.render_module(submodule, scope, indent=0)
-            text = text.replace(f"$module{index}", rendered)
-        return text
+            desugared = self.desugar_module(submodule, scope)
+            old_placeholder = f"$module{index}"
+            if desugared is None:
+                text = text.replace(old_placeholder, "")
+                continue
+            new_placeholder = f"$module{len(sub_modules)}"
+            text = text.replace(old_placeholder, new_placeholder)
+            sub_modules.append(desugared)
+        return Statement(text=text, sub_modules=sub_modules)
 
-    def render_target_statement(self, statement: Statement, scope: ScopeState) -> list[str]:
+    def desugar_target_statement(self, statement: Statement, scope: ScopeState) -> list[Statement]:
         if not statement.sub_modules and self.function_output_marker_name(statement.text.strip()) is not None:
             return []
-        return [self.render_statement(statement, scope)]
+        return [self.desugar_statement(statement, scope)]
 
     def rewrite_statement_text(self, statement: Statement, scope: ScopeState) -> str:
         return normalize_legacy_wrapper_statement(lower_member_calls(statement.text))
 
-    def implicit_predicates(self, bindings: list[BindingInfo], visible_syms: set[str], authored_predicates: list[str]) -> list[str]:
-        predicates: list[str] = []
+    def implicit_predicates(
+        self,
+        bindings: list[BindingInfo],
+        visible_syms: set[str],
+        authored_predicates: list[str],
+        scope: ScopeState,
+    ) -> list[Statement]:
+        predicates: list[Statement] = []
         for binding in bindings:
             if is_generated_sym(binding.name) or binding.name in CANONICAL_INFIX_OPERATORS:
                 continue
-            specific_predicates = self.naming_inheritance(binding.name, visible_syms)
+            specific_predicates = self.naming_inheritance(binding.name, visible_syms, scope)
             predicates.extend(specific_predicates)
 
-        inherited_rhs = inheritance_rhs_names([*authored_predicates, *predicates])
+        inherited_rhs = inheritance_rhs_names(
+            [*authored_predicates, *[self.render_structural_statement(predicate, 0) for predicate in predicates]]
+        )
         for binding in bindings:
             if is_generated_sym(binding.name) or binding.name in CANONICAL_INFIX_OPERATORS:
                 continue
             if binding.name not in inherited_rhs:
-                predicates.append(render_infix(SYMBOL_SOURCE, "~", binding.name))
+                predicates.append(Statement(render_infix(SYMBOL_SOURCE, "~", binding.name)))
         return predicates
 
-    def naming_inheritance(self, sym: str, visible_syms: set[str]) -> list[str]:
-        predicates: list[str] = []
+    def naming_inheritance(self, sym: str, visible_syms: set[str], scope: ScopeState) -> list[Statement]:
+        predicates: list[Statement] = []
         if is_bool_predicate_sym(sym):
-            predicates.append(render_infix("Bool", "~", sym))
+            predicates.append(Statement(render_infix("Bool", "~", sym)))
             return predicates
 
         source_sym = selected_inheritance_source(sym, visible_syms)
         if source_sym is not None and source_sym != sym:
-            predicates.append(render_infix(source_sym, "~", sym))
+            predicates.append(Statement(render_infix(source_sym, "~", sym)))
 
         collection = self.collection_inheritance(sym, visible_syms)
         if collection is not None:
             item = self.fresh_sym(f"{sym}_item")
-            predicates.append(render_infix(collection[0], "~", sym))
-            predicates.append(f"∀{{| {item} | {render_infix(item, '∈', sym)} | {render_infix(collection[1], '~', item)}}}")
+            predicates.append(Statement(render_infix(collection[0], "~", sym)))
+            item_module = Module(
+                type="quantifier",
+                syms=[item],
+                predicate_statements=[Statement(render_infix(item, "∈", sym))],
+                target_statements=[Statement(render_infix(collection[1], "~", item))],
+                quantifier="∀",
+                bound_sym_locs=[None],
+            )
+            desugared_item_module = self.desugar_module(item_module, scope)
+            if desugared_item_module is not None:
+                predicates.append(Statement("$module0", sub_modules=[desugared_item_module]))
         return predicates
 
     def collection_inheritance(self, sym: str, visible_syms: set[str]) -> tuple[str, str] | None:
@@ -316,12 +404,12 @@ class ModuleDesugarer:
                 return ("Set", source)
         return None
 
-    def local_wrapper_predicates(self, texts: list[str]) -> list[str]:
-        predicates: list[str] = []
+    def local_wrapper_predicates(self, texts: list[str]) -> list[Statement]:
+        predicates: list[Statement] = []
         for text in texts:
             predicate = wrapper_predicate_for_expression(text)
             if predicate:
-                predicates.append(predicate)
+                predicates.append(Statement(predicate))
         return predicates
 
     def fresh_sym(self, preferred: str) -> str:
@@ -351,6 +439,21 @@ class ModuleDesugarer:
             lines.extend(format_section_line(target, inner, prefix=""))
         lines.append(pad + "}")
         return "\n".join(lines)
+
+    def render_structural_module(self, module: Module, indent: int) -> str:
+        opener = module.quantifier + "{" if module.type == "quantifier" else "{"
+        predicates = [self.render_structural_statement(statement, 0) for statement in module.predicate_statements]
+        if module.suppress_inferred_syms:
+            predicates = [BRANCH_MODULE_MARKER, *predicates]
+        targets = [self.render_structural_statement(statement, 0) for statement in module.target_statements]
+        return self.format_module(opener, module.syms, predicates, targets, indent)
+
+    def render_structural_statement(self, statement: Statement, indent: int) -> str:
+        text = statement.text
+        for index, submodule in enumerate(statement.sub_modules):
+            rendered = self.render_structural_module(submodule, indent)
+            text = text.replace(f"$module{index}", rendered)
+        return text
 
 
 def wrapper_predicate_for_expression(text: str) -> str | None:
@@ -492,6 +595,33 @@ def dedupe_statements(values: list[str]) -> list[str]:
         seen.add(key)
         output.append(value)
     return output
+
+
+def dedupe_statement_nodes(values: list[Statement]) -> list[Statement]:
+    seen: set[str] = set()
+    output: list[Statement] = []
+    for value in values:
+        key = canonical_statement_key(render_statement_key(value))
+        if key in seen:
+            continue
+        seen.add(key)
+        output.append(value)
+    return output
+
+
+def render_statement_key(statement: Statement) -> str:
+    text = statement.text
+    for index, submodule in enumerate(statement.sub_modules):
+        text = text.replace(f"$module{index}", render_module_key(submodule))
+    return text
+
+
+def render_module_key(module: Module) -> str:
+    parts = [module.type, module.quantifier or "", ",".join(module.syms)]
+    parts.extend(render_statement_key(statement) for statement in module.predicate_statements)
+    parts.append("|")
+    parts.extend(render_statement_key(statement) for statement in module.target_statements)
+    return "{" + ";".join(parts) + "}"
 
 
 def inheritance_rhs_names(statements: list[str]) -> set[str]:

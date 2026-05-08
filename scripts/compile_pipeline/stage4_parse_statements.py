@@ -12,6 +12,7 @@ SCRIPTS_DIR = Path(__file__).resolve().parents[1]
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
+from compile_pipeline.ast_nodes import SourceFileAst
 from compile_pipeline.errors import CompileError
 from compile_pipeline.module_sections import Module
 from compile_pipeline.stage3_parse_module_sections import ParsedModuleSections, run as parse_sections
@@ -20,6 +21,7 @@ from compile_pipeline.stage3_parse_module_sections import ParsedModuleSections, 
 @dataclass(frozen=True)
 class ParsedStatements:
     module: Module
+    ast: SourceFileAst | None = None
 
     def summary(self) -> str:
         lines = ["stage: stage4_parse_statements"]
@@ -27,10 +29,10 @@ class ParsedStatements:
         return "\n".join(lines)
 
 
-def run(parsed: ParsedModuleSections | str) -> ParsedStatements:
-    if isinstance(parsed, str):
+def run(parsed: ParsedModuleSections | str | SourceFileAst | object) -> ParsedStatements:
+    if not isinstance(parsed, ParsedModuleSections):
         parsed = parse_sections(parsed)
-    return ParsedStatements(module=parsed.module)
+    return ParsedStatements(module=parsed.module, ast=parsed.ast)
 
 
 def summarize_statements(module: Module, lines: list[str], indent: int) -> None:

@@ -29,6 +29,7 @@ FRESH_PREFIX = "^logic_language_out"
 DECL_OUTPUT_MARKER = "__compiler_function_outputs"
 DECL_BODY_OUTPUT_MARKER = "__compiler_function_body_outputs"
 BRANCH_MODULE_MARKER = "__compiler_branch_module"
+CLASS_DECL_MARKER = "__compiler_class_decl"
 INTRINSIC_SYMS = tuple(sorted(CAPITAL_INTRINSIC_SYMS | {"true", "false"}))
 INDENT_WIDTH = 4
 INDENTATION_BODY_OWNER_ERROR = "indentation body is only allowed after quantifier, branch, declaration, or class declaration"
@@ -210,9 +211,7 @@ class ModuleCompiler:
         if header.startswith("|-"):
             branch_ps = header[2:].strip()
             return ["∀{\n| " + BRANCH_MODULE_MARKER + "\n| " + branch_ps + "\n" + self.lower_nested_block(block, visible_classes) + "\n}"]
-        if class_header_sym(header) is not None and explicit_class_header_sym(header) is None:
-            raise CompileError(invalid_class_declaration_name_reason(header.strip()))
-        class_sym = explicit_class_header_sym(header)
+        class_sym = class_header_sym(header)
         if class_sym is not None:
             return self.lower_class_block(header, class_sym, block, visible_classes)
         declaration = parse_declaration(header)
@@ -455,6 +454,13 @@ class ModuleCompiler:
         return left, literal
 
     def lower_literal_assignment(self, sym: str, literal: LiteralValue) -> list[str]:
+        if sym.startswith(GENERATED_SYM_PREFIX):
+            if literal.kind == "char":
+                return [f"{sym} = {encode_char_literal(literal.value)}"]
+            return [
+                f"{sym}.size = {len(literal.value)}",
+                *(f"{sym}[{index}] = {encode_char_literal(char)}" for index, char in enumerate(literal.value)),
+            ]
         if literal.kind == "char":
             return [f"Char~{sym}", f"{sym} = {encode_char_literal(literal.value)}"]
         statements = [f"String~{sym}", f"{sym}.size = {len(literal.value)}"]
@@ -812,19 +818,32 @@ def infer_syms(predicate_texts: list[str]) -> list[str]:
     return dedupe(syms)
 
 
+def class_declaration_marker(name: str) -> str:
+    return f"{CLASS_DECL_MARKER}({name})"
+
+
+def class_declaration_from_marker(text: str) -> str | None:
+    match = re.fullmatch(rf"{re.escape(CLASS_DECL_MARKER)}\((?P<name>[^\s()]+)\)", text.strip())
+    if match is None:
+        return None
+    name = match.group("name")
+    return name if is_plain_sym(name) else None
+
+
 def class_declaration_from_plain_target(text: str) -> str | None:
     stripped = text.strip()
+    marker_name = class_declaration_from_marker(stripped)
+    if marker_name is not None:
+        return marker_name
     if not is_plain_sym(stripped):
         return None
     class_name = explicit_class_header_sym(stripped)
-    if class_name is None:
-        raise CompileError(invalid_class_declaration_name_reason(stripped))
     return class_name
 
 
 def class_header_sym(header: str) -> str | None:
     header = header.strip()
-    if is_plain_sym(header):
+    if is_plain_sym(header) and re.fullmatch(r"[^\W\d]\w*'*", header, flags=re.UNICODE) is not None:
         return header
     return None
 
@@ -847,14 +866,16 @@ def direct_class_header_names(lines: list[str]) -> set[str]:
         indent, content = split_indent(line)
         if indent != 0:
             continue
-        class_name = explicit_class_header_sym(content)
+        class_name = class_header_sym(content)
         if class_name is not None:
             class_names.add(class_name)
     return class_names
 
 
 def class_block_prefix_lines(header: str, class_sym: str) -> list[str]:
-    return [class_sym]
+    if explicit_class_header_sym(class_sym) is not None:
+        return [class_sym]
+    return [class_declaration_marker(class_sym)]
 
 
 def class_member_owner_name(text: str) -> str | None:

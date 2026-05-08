@@ -18,8 +18,10 @@ from compile_pipeline.module_sections import (
     INDENTATION_LEVEL_ERROR,
     brace_delta,
     call_text,
+    class_declaration_marker,
     class_declaration_from_plain_target,
     class_block_prefix_lines,
+    class_header_sym,
     class_member_owner_name,
     collect_indented_block,
     coloncolon_field_declaration,
@@ -748,9 +750,7 @@ class LocatedModuleParser:
                     ]
                 )
             ]
-        if is_plain_sym(header.text) and explicit_class_header_sym(header.text) is None:
-            raise_located_error(invalid_class_declaration_name_reason(header.text.strip()), header, width=len(header.text.strip()))
-        class_sym = explicit_class_header_sym(header.text)
+        class_sym = class_header_sym(header.text)
         if class_sym is not None:
             return self.lower_class_block(header, class_sym, block, visible_classes)
         declaration = parse_declaration(header.text)
@@ -1166,7 +1166,9 @@ def reject_unsupported_coloncolon_located(located: LocatedText) -> None:
 
 
 def class_block_prefix_lines_located(header: LocatedText, class_sym: str) -> list[LocatedText]:
-    return [synthetic_text(class_sym, header.positions[0])]
+    if explicit_class_header_sym(class_sym) is not None:
+        return [synthetic_text(class_sym, header.positions[0])]
+    return [synthetic_text(class_declaration_marker(class_sym), header.positions[0])]
 
 
 def direct_class_header_names_located(lines: list[LocatedText]) -> set[str]:
@@ -1175,7 +1177,7 @@ def direct_class_header_names_located(lines: list[LocatedText]) -> set[str]:
         indent, content = split_indent_located(line)
         if indent != 0:
             continue
-        class_name = explicit_class_header_sym(content.text)
+        class_name = class_header_sym(content.text)
         if class_name is not None:
             class_names.add(class_name)
     return class_names

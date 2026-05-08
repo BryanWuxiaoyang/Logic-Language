@@ -11,6 +11,8 @@ const CALLABLE_SYMBOL_COLOR = "#DCDCAA";
 const IMPORT_CANDIDATE_LIMIT = 100;
 const LATEX_CANDIDATE_LIMIT = 200;
 const LATEX_TRIGGER_CHARACTERS = ["\\"];
+const SYMBOL_CANDIDATE_LIMIT = 300;
+const INDENT_WIDTH = 4;
 
 function activate(context) {
   const diagnostics = vscode.languages.createDiagnosticCollection(DIAGNOSTIC_SOURCE);
@@ -790,6 +792,401 @@ function activate(context) {
       }));
   }
 
+  function isSymbolName(name) {
+    return /^[A-Za-z_][A-Za-z0-9_']*$/.test(name || "");
+  }
+
+  function isClassName(name) {
+    return /^[A-Z][A-Za-z0-9_']*$/.test(name || "");
+  }
+
+  function isSymbolNameCharacter(char) {
+    return /[A-Za-z0-9_']/.test(char || "");
+  }
+
+  function indentationWidth(text) {
+    let width = 0;
+    for (const char of text) {
+      if (char === " ") {
+        width += 1;
+      } else if (char === "\t") {
+        width += INDENT_WIDTH;
+      } else {
+        break;
+      }
+    }
+    return width;
+  }
+
+  function stripCompletionComment(text) {
+    return stripImportLineComment(text).replace(/\s+$/, "");
+  }
+
+  function uniquePush(target, seen, values) {
+    for (const value of values) {
+      if (!value || seen.has(value)) {
+        continue;
+      }
+      seen.add(value);
+      target.push(value);
+    }
+  }
+
+  function parseSignatureTerms(text) {
+    return text
+      .split(",")
+      .map((part) => part.trim().replace(/^\((.*)\)$/, "$1").trim())
+      .filter((part) => isSymbolName(part));
+  }
+
+  function parseBinderNames(stripped) {
+    if (!stripped.startsWith("|") || stripped.startsWith("|-") || stripped.includes(":")) {
+      return [];
+    }
+    const body = stripped.slice(1).trim();
+    if (!body || /[~=><(){}[\]]/.test(body)) {
+      return [];
+    }
+    const names = parseSignatureTerms(body);
+    return names.length > 0 ? names : [];
+  }
+
+  function parseDeclarationHeader(stripped) {
+    const header = stripped.startsWith("|") && !stripped.startsWith("|-") ? stripped.slice(1).trim() : stripped;
+    const match = header.match(/^(?:(?<className>[A-Za-z_][A-Za-z0-9_']*)::|::)?(?<name>[^\s:]+)\s*:\s*(?<signature>.*)$/);
+    if (!match || !match.groups) {
+      return undefined;
+    }
+    const signature = match.groups.signature || "";
+    const arrowIndex = signature.indexOf("=>");
+    const inputText = arrowIndex >= 0 ? signature.slice(0, arrowIndex) : signature;
+    const outputText = arrowIndex >= 0 ? signature.slice(arrowIndex + 2) : "";
+    return {
+      className: match.groups.className || undefined,
+      shorthandClass: header.startsWith("::"),
+      inputs: parseSignatureTerms(inputText),
+      outputs: parseSignatureTerms(outputText)
+    };
+  }
+
+  function parseClassHeader(stripped) {
+    return isClassName(stripped) ? stripped : undefined;
+  }
+
+  function ensureScopeFrame(stack, indent) {
+    let frame = stack.find((candidate) => candidate.indent === indent);
+    if (!frame) {
+      frame = { indent, boundSyms: [], kind: "scope" };
+      stack.push(frame);
+      stack.sort((left, right) => left.indent - right.indent);
+    }
+    return frame;
+  }
+
+  function activeClassName(stack) {
+    for (let index = stack.length - 1; index >= 0; index -= 1) {
+      if (stack[index].className) {
+        return stack[index].className;
+      }
+    }
+    return undefined;
+  }
+
+  function trimScopeStack(stack, indent) {
+    while (stack.length && stack[stack.length - 1].indent > indent) {
+      stack.pop();
+    }
+  }
+
+  function collectLiveCompletionContext(document, position) {
+    const stack = [];
+
+    for (let lineNo = 0; lineNo < position.line; lineNo += 1) {
+      const rawLine = document.lineAt(lineNo).text;
+      const line = stripCompletionComment(rawLine);
+      const stripped = line.trim();
+      if (!stripped) {
+        continue;
+      }
+      const indent = indentationWidth(line);
+      trimScopeStack(stack, indent);
+      const frame = ensureScopeFrame(stack, indent);
+      uniquePush(frame.boundSyms, new Set(frame.boundSyms), parseBinderNames(stripped));
+
+      const declaration = parseDeclarationHeader(stripped);
+      if (declaration) {
+        const className = declaration.className || (declaration.shorthandClass ? activeClassName(stack) : undefined);
+        const boundSyms = [];
+        uniquePush(boundSyms, new Set(), [...declaration.inputs, ...declaration.outputs]);
+        stack.push({
+          indent: indent + INDENT_WIDTH,
+          boundSyms,
+          kind: "decl_body",
+          className
+        });
+        stack.sort((left, right) => left.indent - right.indent);
+        continue;
+      }
+
+      const className = parseClassHeader(stripped);
+      if (className) {
+        stack.push({
+          indent: indent + INDENT_WIDTH,
+          boundSyms: [],
+          kind: "class_body",
+          className
+        });
+        stack.sort((left, right) => left.indent - right.indent);
+      }
+    }
+
+    const currentLine = document.lineAt(position.line).text;
+    const currentIndent = indentationWidth(currentLine);
+    trimScopeStack(stack, currentIndent);
+    const currentFrame = ensureScopeFrame(stack, currentIndent);
+    const linePrefix = stripCompletionComment(currentLine.slice(0, position.character)).trim();
+    uniquePush(currentFrame.boundSyms, new Set(currentFrame.boundSyms), parseBinderNames(linePrefix));
+
+    const currentBoundSyms = [];
+    const currentSeen = new Set();
+    const ancestorBoundSyms = [];
+    const ancestorSeen = new Set();
+    for (const frame of stack) {
+      if (frame.indent === currentIndent) {
+        uniquePush(currentBoundSyms, currentSeen, frame.boundSyms || []);
+      } else if (frame.indent < currentIndent) {
+        uniquePush(ancestorBoundSyms, ancestorSeen, frame.boundSyms || []);
+      }
+    }
+    ancestorBoundSyms.reverse();
+
+    return {
+      currentBoundSyms,
+      ancestorBoundSyms,
+      activeClassName: activeClassName(stack),
+      inDeclBody: stack.some((frame) => frame.kind === "decl_body")
+    };
+  }
+
+  function symbolTokenContextAt(document, position) {
+    if (!isLogicLanguageDocument(document)) {
+      return undefined;
+    }
+    const line = document.lineAt(position.line);
+    const text = line.text;
+    const character = Math.min(position.character, text.length);
+    const state = lineStateAt(text, character);
+    if (state.inComment || state.inQuote) {
+      return undefined;
+    }
+
+    let start = character;
+    while (start > 0 && isSymbolNameCharacter(text[start - 1])) {
+      start -= 1;
+    }
+    let end = character;
+    while (end < text.length && isSymbolNameCharacter(text[end])) {
+      end += 1;
+    }
+    const prefix = text.slice(start, character);
+    if (prefix.startsWith("\\")) {
+      return undefined;
+    }
+    return {
+      prefix,
+      insertRange: new vscode.Range(position.line, start, position.line, end)
+    };
+  }
+
+  function memberTokenContextAt(document, position) {
+    const tokenContext = symbolTokenContextAt(document, position);
+    if (!tokenContext) {
+      return undefined;
+    }
+    const text = document.lineAt(position.line).text;
+    const start = tokenContext.insertRange.start.character;
+    let dotIndex = start - 1;
+    while (dotIndex >= 0 && /\s/.test(text[dotIndex])) {
+      dotIndex -= 1;
+    }
+    if (dotIndex < 0 || text[dotIndex] !== ".") {
+      return undefined;
+    }
+    let receiverEnd = dotIndex;
+    while (receiverEnd > 0 && /\s/.test(text[receiverEnd - 1])) {
+      receiverEnd -= 1;
+    }
+    let receiverStart = receiverEnd;
+    while (receiverStart > 0 && isSymbolNameCharacter(text[receiverStart - 1])) {
+      receiverStart -= 1;
+    }
+    const receiver = text.slice(receiverStart, receiverEnd);
+    if (!isSymbolName(receiver)) {
+      return undefined;
+    }
+    return { ...tokenContext, receiver };
+  }
+
+  function classMethodReceiverSuggestion(document, position, liveContext) {
+    const beforeCursor = stripCompletionComment(document.lineAt(position.line).text.slice(0, position.character));
+    const match = beforeCursor.match(/^\s*(?:\|\s*)?(?:(?<className>[A-Za-z_][A-Za-z0-9_']*)::|::)(?<method>[^\s:]*):(?<signature>.*)$/);
+    if (!match || !match.groups || match.groups.signature.includes("=>") || match.groups.signature.includes(",")) {
+      return undefined;
+    }
+    const className = match.groups.className || liveContext.activeClassName;
+    if (!className || !isClassName(className)) {
+      return undefined;
+    }
+    return `_${className.toLowerCase()}`;
+  }
+
+  function symbolCompletionKind(type, kind) {
+    if (type === "class") {
+      return vscode.CompletionItemKind.Class;
+    }
+    if (kind === "callable_decl" && type === "func") {
+      return vscode.CompletionItemKind.Method;
+    }
+    if (type === "func" || type === "pred") {
+      return vscode.CompletionItemKind.Function;
+    }
+    return vscode.CompletionItemKind.Variable;
+  }
+
+  function completionSymbolEntries(payload) {
+    if (payload && Array.isArray(payload.completion_symbols)) {
+      return payload.completion_symbols;
+    }
+    if (payload && Array.isArray(payload.symbols)) {
+      return payload.symbols;
+    }
+    return [];
+  }
+
+  function classMemberEntries(payload) {
+    return payload && payload.class_members && typeof payload.class_members === "object"
+      ? payload.class_members
+      : {};
+  }
+
+  function symbolClassEntries(payload) {
+    return payload && payload.symbol_classes && typeof payload.symbol_classes === "object"
+      ? payload.symbol_classes
+      : {};
+  }
+
+  function completionMatchesPrefix(name, filterText, prefix) {
+    if (!prefix) {
+      return true;
+    }
+    const normalizedPrefix = prefix.toLowerCase();
+    return (
+      name.toLowerCase().startsWith(normalizedPrefix) ||
+      String(filterText || "").toLowerCase().startsWith(normalizedPrefix)
+    );
+  }
+
+  function collectSymbolCompletions(document, position) {
+    const memberContext = memberTokenContextAt(document, position);
+    if (memberContext) {
+      return collectMemberCompletions(document, memberContext);
+    }
+
+    const tokenContext = symbolTokenContextAt(document, position);
+    if (!tokenContext) {
+      return undefined;
+    }
+
+    const liveContext = collectLiveCompletionContext(document, position);
+    const candidates = new Map();
+
+    function addCandidate(name, rank, detail, type = "pure", kind = "generic", filterText) {
+      if (!isSymbolName(name) || !completionMatchesPrefix(name, filterText || name, tokenContext.prefix)) {
+        return;
+      }
+      const existing = candidates.get(name);
+      if (existing && existing.rank <= rank) {
+        return;
+      }
+      candidates.set(name, { name, rank, detail, type, kind, filterText: filterText || name });
+    }
+
+    const receiverSuggestion = classMethodReceiverSuggestion(document, position, liveContext);
+    if (receiverSuggestion) {
+      addCandidate(receiverSuggestion, 0, "implicit class-method receiver", "pure", "class_method_receiver", receiverSuggestion.replace(/^_/, ""));
+    }
+
+    for (const name of liveContext.currentBoundSyms) {
+      const filterText = liveContext.inDeclBody && !tokenContext.prefix.startsWith("_") ? name.replace(/^_/, "") : name;
+      addCandidate(name, 1, "current statement bound symbol", "pure", "bound_sym", filterText);
+    }
+    for (const name of liveContext.ancestorBoundSyms) {
+      const filterText = liveContext.inDeclBody && !tokenContext.prefix.startsWith("_") ? name.replace(/^_/, "") : name;
+      addCandidate(name, 2, "ancestor statement bound symbol", "pure", "bound_sym", filterText);
+    }
+
+    const payload = cachedSymbolPayload(document);
+    for (const entry of completionSymbolEntries(payload)) {
+      const name = entry && entry.name;
+      if (!name || name.startsWith("^")) {
+        continue;
+      }
+      const type = entry.type || "pure";
+      const rank = type === "class" ? 3 : type === "func" || type === "pred" ? 4 : 5;
+      addCandidate(name, rank, "free/global symbol", type, entry.kind || "generic", name);
+    }
+
+    return [...candidates.values()]
+      .sort((left, right) => left.rank - right.rank || left.name.localeCompare(right.name))
+      .slice(0, SYMBOL_CANDIDATE_LIMIT)
+      .map((candidate) => {
+        const item = new vscode.CompletionItem(candidate.name, symbolCompletionKind(candidate.type, candidate.kind));
+        item.range = tokenContext.insertRange;
+        item.insertText = candidate.name;
+        item.filterText = candidate.filterText;
+        item.detail = candidate.detail;
+        item.sortText = `${String(candidate.rank).padStart(2, "0")}-${candidate.name.toLowerCase()}`;
+        return item;
+      });
+  }
+
+  function collectMemberCompletions(document, memberContext) {
+    const payload = cachedSymbolPayload(document);
+    if (!payload) {
+      return [];
+    }
+    const classesBySymbol = symbolClassEntries(payload);
+    const memberEntries = classMemberEntries(payload);
+    const ownerClasses = Array.isArray(classesBySymbol[memberContext.receiver])
+      ? classesBySymbol[memberContext.receiver]
+      : [];
+    const candidates = new Map();
+    for (const className of ownerClasses) {
+      const entries = Array.isArray(memberEntries[className]) ? memberEntries[className] : [];
+      for (const entry of entries) {
+        const name = entry && entry.name;
+        if (!name || !completionMatchesPrefix(name, name, memberContext.prefix)) {
+          continue;
+        }
+        if (!candidates.has(name)) {
+          candidates.set(name, { ...entry, owner_class: entry.owner_class || className });
+        }
+      }
+    }
+    return [...candidates.values()]
+      .sort((left, right) => String(left.name).localeCompare(String(right.name)))
+      .slice(0, SYMBOL_CANDIDATE_LIMIT)
+      .map((candidate) => {
+        const item = new vscode.CompletionItem(candidate.name, symbolCompletionKind(candidate.type, candidate.kind));
+        item.range = memberContext.insertRange;
+        item.insertText = candidate.name;
+        item.filterText = candidate.name;
+        item.detail = `${candidate.owner_class || "class"} member`;
+        item.sortText = `00-${String(candidate.name).toLowerCase()}`;
+        return item;
+      });
+  }
+
   context.subscriptions.push(
     vscode.languages.registerDefinitionProvider("logic-language", {
       async provideDefinition(document, position) {
@@ -853,7 +1250,7 @@ function activate(context) {
 
           const latexContext = latexContextAt(document, position);
           if (!latexContext) {
-            return undefined;
+            return collectSymbolCompletions(document, position);
           }
 
           try {
@@ -880,7 +1277,7 @@ function activate(context) {
             showWarningOnce(
               `Logic Language latex completions are unavailable: ${error instanceof Error ? error.message : String(error)}`
             );
-            return undefined;
+            return collectSymbolCompletions(document, position);
           }
         }
       },
@@ -888,7 +1285,10 @@ function activate(context) {
       ...LATEX_TRIGGER_CHARACTERS,
       "\"",
       "'",
-      "."
+      ".",
+      ":",
+      ",",
+      "_"
     )
   );
 
