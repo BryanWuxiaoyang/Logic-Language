@@ -53,6 +53,14 @@ def binding(dst: str = "y", src: dict | None = None) -> dict:
     }
 
 
+def value_literal(value: str = "1") -> dict:
+    return {
+        "kind": "Value_literal_stmt",
+        "source_loc": loc(),
+        "value": value,
+    }
+
+
 def module(bound_syms: list[dict], *, premise_bindings: list[dict] | None = None, premise_pss: list[dict] | None = None, target_pss: list[dict] | None = None) -> dict:
     return {
         "kind": "Quantified_stmt",
@@ -158,7 +166,26 @@ def test_binding_stmt_in_premise_pss_is_invalid() -> None:
 
 def test_binding_stmt_in_target_pss_is_invalid() -> None:
     diagnostics = FinalAstChecker().check(module([], target_pss=[binding()]))
-    assert any(entry["code"] == "invalid_binding_stmt_location" for entry in diagnostics)
+    assert any(
+        entry["code"] == "invalid_target_proposition_stmt"
+        and entry["reason"] == "target_proposition_stmts must contain only proposition statements"
+        for entry in diagnostics
+    )
+
+
+def test_target_sym_is_invalid() -> None:
+    diagnostics = FinalAstChecker().check(module([], target_pss=[sym("x")]))
+    assert any(entry["code"] == "invalid_target_proposition_stmt" for entry in diagnostics)
+
+
+def test_target_literal_is_invalid() -> None:
+    diagnostics = FinalAstChecker().check(module([], target_pss=[value_literal()]))
+    assert any(entry["code"] == "invalid_target_proposition_stmt" for entry in diagnostics)
+
+
+def test_target_func_stmt_and_quantified_stmt_are_valid() -> None:
+    assert FinalAstChecker().check(module([], target_pss=[func("=", sym("x"), sym("x"))])) == []
+    assert FinalAstChecker().check(module([], target_pss=[module([sym("x")])])) == []
 
 
 def test_binding_stmt_as_root_is_invalid() -> None:
@@ -211,6 +238,9 @@ def main() -> int:
         test_binding_stmt_in_premise_bindings_is_valid,
         test_binding_stmt_in_premise_pss_is_invalid,
         test_binding_stmt_in_target_pss_is_invalid,
+        test_target_sym_is_invalid,
+        test_target_literal_is_invalid,
+        test_target_func_stmt_and_quantified_stmt_are_valid,
         test_binding_stmt_as_root_is_invalid,
         test_function_output_premise_rule_is_not_final_ast_check,
         test_cli_stdin_and_file,

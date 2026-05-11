@@ -508,40 +508,36 @@ The AST is intended as a precise intermediate logic form that can support human-
     - `image-set-text` is a derived `module-text`
     - it does not introduce a new `module` kind
     - it rewrites to `set-module-text` before parsing by `M(...)`
-    - it introduces a fresh `sym` that does not appear anywhere in the source `module-text`
+    - it introduces fresh `sym`s that do not appear anywhere in the source `module-text`
     - syntax:
-        `{| syms | PSs => target}`
+        `{| syms | PSs | TSs => FS}`
         M(
         "
         {
-        | sym
+        | syms
         | PS
-        => FS, sym
+        TS
+        => FS
         }
         "
-        ) = M("{| sym | PS => (FS, sym)}")
-
-    - single-target `image-set-text`
-        M("{| syms | PSs => target }") = M(
+        ) = M("{| syms | PS | TS => FS}")
+    - `image-set-text` maps every element of the source set `{| syms | PSs | TSs}` to `FS`.
+        M("{| syms | PSs | TSs => FS}") = M(
         "
         {
             | out
-            ∃{| syms | PSs | out = target }
+            | source_set = {| syms | PSs | TSs}
+            ∃{
+                | syms
+                syms ∈ source_set
+                FS = out
+            }
         }
         "
         )
-        where `out` is a fresh `sym`
-
-    - tuple-target `image-set-text`
-        M("{| syms | PSs => (target1, target2, ...) }") = M(
-        "
-        {
-            | out
-            ∃{| syms | PSs | out = (target1, target2, ...) }
-        }
-        "
-        )
-        where `out` is a fresh `sym`
+        where `out` and `source_set` are fresh `sym`s.
+    - if `syms` contains multiple syms, `syms ∈ source_set` uses the tuple element represented by existing `set-module-text` semantics.
+    - shorthand source forms such as `{| sym ∈ set => FS}` and `{| sym => FS}` are first normalized to an explicit source set before this rewrite.
 
     - `=>` is part of surface `module-text` only. After rewrite, `image-set-text` is represented by ordinary `set-module-text`.
 

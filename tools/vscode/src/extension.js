@@ -2,6 +2,13 @@ const childProcess = require("child_process");
 const fs = require("fs");
 const path = require("path");
 const vscode = require("vscode");
+const {
+  classMethodFirstParamCompletionContext,
+  completionFilterText,
+  completionRankForSymbol,
+  parseBinderNames,
+  parseSignatureTerms
+} = require("./completion_helpers");
 
 const DIAGNOSTIC_DELAY_MS = 350;
 const DIAGNOSTIC_SOURCE = "logic-language";
@@ -832,25 +839,6 @@ function activate(context) {
     }
   }
 
-  function parseSignatureTerms(text) {
-    return text
-      .split(",")
-      .map((part) => part.trim().replace(/^\((.*)\)$/, "$1").trim())
-      .filter((part) => isSymbolName(part));
-  }
-
-  function parseBinderNames(stripped) {
-    if (!stripped.startsWith("|") || stripped.startsWith("|-") || stripped.includes(":")) {
-      return [];
-    }
-    const body = stripped.slice(1).trim();
-    if (!body || /[~=><(){}[\]]/.test(body)) {
-      return [];
-    }
-    const names = parseSignatureTerms(body);
-    return names.length > 0 ? names : [];
-  }
-
   function parseDeclarationHeader(stripped) {
     const header = stripped.startsWith("|") && !stripped.startsWith("|-") ? stripped.slice(1).trim() : stripped;
     const match = header.match(/^(?:(?<className>[A-Za-z_][A-Za-z0-9_']*)::|::)?(?<name>[^\s:]+)\s*:\s*(?<signature>.*)$/);
@@ -1027,19 +1015,6 @@ function activate(context) {
     return { ...tokenContext, receiver };
   }
 
-  function classMethodReceiverSuggestion(document, position, liveContext) {
-    const beforeCursor = stripCompletionComment(document.lineAt(position.line).text.slice(0, position.character));
-    const match = beforeCursor.match(/^\s*(?:\|\s*)?(?:(?<className>[A-Za-z_][A-Za-z0-9_']*)::|::)(?<method>[^\s:]*):(?<signature>.*)$/);
-    if (!match || !match.groups || match.groups.signature.includes("=>") || match.groups.signature.includes(",")) {
-      return undefined;
-    }
-    const className = match.groups.className || liveContext.activeClassName;
-    if (!className || !isClassName(className)) {
-      return undefined;
-    }
-    return `_${className.toLowerCase()}`;
-  }
-
   function symbolCompletionKind(type, kind) {
     if (type === "class") {
       return vscode.CompletionItemKind.Class;
@@ -1061,6 +1036,73 @@ function activate(context) {
       return payload.symbols;
     }
     return [];
+  }
+
+  function completionScopeEntries(payload) {
+    return payload && Array.isArray(payload.completion_scopes) ? payload.completion_scopes : [];
+  }
+
+  function completionScopeSymbolNames(scope) {
+    const syms = Array.isArray(scope && scope.bound_syms) ? scope.bound_syms : [];
+    return syms
+      .map((entry) => (typeof entry === "string" ? entry : entry && entry.name))
+      .filter((name) => isSymbolName(name));
+  }
+
+  function scopeFileMatchesDocument(scope, document) {
+    return scope && scope.file === document.uri.fsPath;
+  }
+
+  function positionInCompletionScope(scope, position) {
+    const startLine = Number(scope.start_lineno);
+    const startCol = Number(scope.start_col_no || 0);
+    const endLine = Number(scope.end_lineno);
+    const endCol = Number(scope.end_col_no || 0);
+    if (!Number.isFinite(startLine) || !Number.isFinite(endLine)) {
+      return false;
+    }
+    if (position.line < startLine || position.line > endLine) {
+      return false;
+    }
+    if (position.line === startLine && position.character < startCol) {
+      return false;
+    }
+    if (position.line === endLine && endCol > 0 && position.character > endCol) {
+      return false;
+    }
+    return true;
+  }
+
+  function completionScopeSize(scope) {
+    const startLine = Number(scope.start_lineno || 0);
+    const endLine = Number(scope.end_lineno || startLine);
+    const startCol = Number(scope.start_col_no || 0);
+    const endCol = Number(scope.end_col_no || startCol);
+    return (endLine - startLine) * 100000 + (endCol - startCol);
+  }
+
+  function collectCompiledCompletionContext(document, position) {
+    const payload = cachedSymbolPayload(document);
+    const scopes = completionScopeEntries(payload)
+      .filter((scope) => scopeFileMatchesDocument(scope, document) && positionInCompletionScope(scope, position))
+      .sort((left, right) => {
+        const sizeDelta = completionScopeSize(right) - completionScopeSize(left);
+        if (sizeDelta !== 0) {
+          return sizeDelta;
+        }
+        return Number(left.start_lineno || 0) - Number(right.start_lineno || 0);
+      });
+    if (!scopes.length) {
+      return { currentBoundSyms: [], ancestorBoundSyms: [] };
+    }
+    const currentScope = scopes[scopes.length - 1];
+    const currentBoundSyms = completionScopeSymbolNames(currentScope);
+    const ancestorBoundSyms = [];
+    const seen = new Set(currentBoundSyms);
+    for (const scope of scopes.slice(0, -1).reverse()) {
+      uniquePush(ancestorBoundSyms, seen, completionScopeSymbolNames(scope));
+    }
+    return { currentBoundSyms, ancestorBoundSyms };
   }
 
   function classMemberEntries(payload) {
@@ -1098,7 +1140,13 @@ function activate(context) {
     }
 
     const liveContext = collectLiveCompletionContext(document, position);
+    const compiledContext = collectCompiledCompletionContext(document, position);
     const candidates = new Map();
+    const classFirstParamContext = classMethodFirstParamCompletionContext(
+      document.lineAt(position.line).text,
+      position.character,
+      liveContext.activeClassName
+    );
 
     function addCandidate(name, rank, detail, type = "pure", kind = "generic", filterText) {
       if (!isSymbolName(name) || !completionMatchesPrefix(name, filterText || name, tokenContext.prefix)) {
@@ -1111,18 +1159,25 @@ function activate(context) {
       candidates.set(name, { name, rank, detail, type, kind, filterText: filterText || name });
     }
 
-    const receiverSuggestion = classMethodReceiverSuggestion(document, position, liveContext);
-    if (receiverSuggestion) {
-      addCandidate(receiverSuggestion, 0, "implicit class-method receiver", "pure", "class_method_receiver", receiverSuggestion.replace(/^_/, ""));
-    }
-
     for (const name of liveContext.currentBoundSyms) {
-      const filterText = liveContext.inDeclBody && !tokenContext.prefix.startsWith("_") ? name.replace(/^_/, "") : name;
-      addCandidate(name, 1, "current statement bound symbol", "pure", "bound_sym", filterText);
+      const filterText = completionFilterText(name, tokenContext.prefix);
+      const rank = completionRankForSymbol("pure", "current_bound", tokenContext.prefix);
+      addCandidate(name, rank, "current statement bound symbol", "pure", "bound_sym", filterText);
+    }
+    for (const name of compiledContext.currentBoundSyms) {
+      const filterText = completionFilterText(name, tokenContext.prefix);
+      const rank = completionRankForSymbol("pure", "current_bound", tokenContext.prefix);
+      addCandidate(name, rank, "current compiled-scope bound symbol", "pure", "bound_sym", filterText);
     }
     for (const name of liveContext.ancestorBoundSyms) {
-      const filterText = liveContext.inDeclBody && !tokenContext.prefix.startsWith("_") ? name.replace(/^_/, "") : name;
-      addCandidate(name, 2, "ancestor statement bound symbol", "pure", "bound_sym", filterText);
+      const filterText = completionFilterText(name, tokenContext.prefix);
+      const rank = completionRankForSymbol("pure", "ancestor_bound", tokenContext.prefix);
+      addCandidate(name, rank, "ancestor statement bound symbol", "pure", "bound_sym", filterText);
+    }
+    for (const name of compiledContext.ancestorBoundSyms) {
+      const filterText = completionFilterText(name, tokenContext.prefix);
+      const rank = completionRankForSymbol("pure", "ancestor_bound", tokenContext.prefix);
+      addCandidate(name, rank, "ancestor compiled-scope bound symbol", "pure", "bound_sym", filterText);
     }
 
     const payload = cachedSymbolPayload(document);
@@ -1132,11 +1187,27 @@ function activate(context) {
         continue;
       }
       const type = entry.type || "pure";
-      const rank = type === "class" ? 3 : type === "func" || type === "pred" ? 4 : 5;
+      const rank = completionRankForSymbol(type, "global", tokenContext.prefix);
       addCandidate(name, rank, "free/global symbol", type, entry.kind || "generic", name);
     }
 
-    return [...candidates.values()]
+    const items = [];
+    if (classFirstParamContext) {
+      const item = new vscode.CompletionItem(classFirstParamContext.label, vscode.CompletionItemKind.Variable);
+      item.range = new vscode.Range(
+        position.line,
+        classFirstParamContext.replaceStart,
+        position.line,
+        classFirstParamContext.replaceEnd
+      );
+      item.insertText = classFirstParamContext.insertText;
+      item.filterText = classFirstParamContext.filterText;
+      item.detail = "class-method first receiver parameter";
+      item.sortText = "00-000-class-method-first-receiver";
+      items.push(item);
+    }
+
+    items.push(...[...candidates.values()]
       .sort((left, right) => left.rank - right.rank || left.name.localeCompare(right.name))
       .slice(0, SYMBOL_CANDIDATE_LIMIT)
       .map((candidate) => {
@@ -1147,7 +1218,8 @@ function activate(context) {
         item.detail = candidate.detail;
         item.sortText = `${String(candidate.rank).padStart(2, "0")}-${candidate.name.toLowerCase()}`;
         return item;
-      });
+      }));
+    return items;
   }
 
   function collectMemberCompletions(document, memberContext) {

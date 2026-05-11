@@ -15,16 +15,18 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import compile_module as compile_module_script
 import module_check
 import resolve_sym_type
-from AST import Call_expr, Func_stmt, Inherit_stmt, Source_loc, Sym, Sym_expr
+from AST import Call_expr, ClassDecl, ClassFieldDecl, ClassMethodDecl, Func_stmt, FunctionDecl, Inherit_stmt, Source_loc, Sym, Sym_expr
 from compile_module import CompileError, run_compile_pipeline
 from compile_pipeline.source_utils import expand_imports
 from compile_pipeline.front_end_source_loader import run as run_stage1
+from compile_pipeline.stage1_front_end import parse_front_end_ast, run as run_front_end
 from compile_pipeline.front_end_desugar import run as run_stage2
 from compile_pipeline.back_end_sections import run as run_stage3
 from compile_pipeline.back_end_statements import run as run_stage4
 from compile_pipeline.back_end_lower_object import run as run_stage5
 from semantic_check import collect_semantic_diagnostics_from_text
 from translate_AST_to_source import translate_ast_to_source
+from front_end_AST_organizer import organize_module_text
 
 SKILL_DIR = Path(__file__).resolve().parents[2]
 SCRIPTS_DIR = SKILL_DIR / "scripts"
@@ -538,6 +540,24 @@ def test_class_field_shorthand_desugars_in_premise_section() -> None:
     assert "A ~ ^_a" in source
     assert "Symbol ~ ^_field" in source
 
+
+def test_class_field_assignment_lowers_to_field_declaration_and_axiom() -> None:
+    source = translate_ast_to_source(compile_text("Value\nField\nClass\nValue ~ value\nClass\n    ::field = value"))
+    assert "Function ~ field" in source
+    assert "^_field = field(^_class)" in source
+    assert "Class ~ ^_class" in source
+    assert "^tmpfunc_stmt0 = field(^_class)" in source
+    assert "^tmpfunc_stmt0 = value" in source
+
+
+def test_class_field_assignment_premise_lowers_to_premise_artifacts() -> None:
+    source = translate_ast_to_source(compile_text("Class\n| Class::field = value"))
+    assert "| Function ~ field" in source
+    assert "| ∀{" in source
+    assert "^tmpfunc_stmt0 = field(^_class)" in source
+    assert "^tmpfunc_stmt0 = value" in source
+
+
 def test_prime_suffix_names_compile_and_infer_from_base() -> None:
     source = translate_ast_to_source(compile_text("List\n∀{| _list', _x'', _y | _y = _list'}"))
     assert "\n    | ^_list', ^_x'', ^_y\n" in source
@@ -797,14 +817,49 @@ def test_stage2_attaches_authoritative_desugared_module() -> None:
     assert "Symbol ~ _sym" in [statement_text(statement) for statement in signature_module.target_statements]
 
 
+def test_stage1_parse_ast_preserves_class_and_function_decls() -> None:
+    source = "Val\nClass\n    ::field\n    ::func: (_class, _val) => _out\n        | P(_class)\n        Q(_out)\n"
+    parsed = parse_front_end_ast(source, ".", allow_imports=False)
+    module = parsed.modules[0]
+
+    assert module.lowered_module is None
+    assert [(class_decl.name.name, [type(member).__name__ for member in class_decl.members]) for class_decl in module.classes] == [
+        ("Val", []),
+        ("Class", ["ClassFieldDecl", "ClassMethodDecl"]),
+    ]
+    method = module.classes[1].members[1]
+    assert isinstance(method, ClassMethodDecl)
+    assert method.decl.owner is not None and method.decl.owner.name == "Class"
+    assert method.decl.body_premise_proposition_stmts
+    assert method.decl.body_target_proposition_stmts
+
+
+def test_stage1_run_exposes_parse_desugar_and_lowered_ast() -> None:
+    result = run_front_end("Class\nClass::field", ".", allow_imports=False)
+    assert result.parse_ast.modules[0].lowered_module is None
+    assert result.desugar_ast.modules[0].lowered_module is None
+    assert result.ast.modules[0].lowered_module is not None
+
+
+def test_front_end_ast_organizer_groups_source_structure() -> None:
+    source = "Val\nClass::b: _class => _b\nClass\nClass::a: _class => _a\ng: _x => _y\nf: _x => _y\ng: _z => _w\n"
+    organized = organize_module_text(source, ".", allow_imports=False)
+    assert "Class\n    ::b: _class => _b\n    ::a: _class => _a" in organized
+    assert organized.index("g: _x => _y") < organized.index("g: _z => _w") < organized.index("f: _x => _y")
+    assert compile_text(source) == compile_text(organized)
+
+
 def test_compile_stages_are_ast_only_and_no_render_fallbacks() -> None:
     front_end_desugar_module = importlib.import_module("compile_pipeline.front_end_desugar")
+    module_parser_module = importlib.import_module("compile_pipeline.module_parser")
     back_end_sections_module = importlib.import_module("compile_pipeline.back_end_sections")
     back_end_statements_module = importlib.import_module("compile_pipeline.back_end_statements")
     back_end_lower_object_module = importlib.import_module("compile_pipeline.back_end_lower_object")
 
     for removed in ["render_source_ast", "render_statement", "render_module_key", "desugar_module_text", "canonical_statement_key"]:
         assert not hasattr(front_end_desugar_module, removed), removed
+    for removed in ["parse_located_module_text", "check_module_to_module", "synthetic_marker_statement"]:
+        assert not hasattr(module_parser_module, removed), removed
     for removed_module in [
         "syntax_check_common",
         "compile_pipeline.typed_module_parser",
@@ -1135,9 +1190,8 @@ def test_premise_nested_declaration_expands_in_function_body() -> None:
         Path("."),
         is_file=False,
     )
-    assert payload["summary"]["error_count"] == 1
-    assert payload["entries"][0]["code"] == "naming_error"
-    assert "invalid_bound_sym_name" in payload["entries"][0]["reason"]
+    assert payload["summary"]["error_count"] == 0
+    assert all(entry["code"] != "naming_error" for entry in payload["entries"])
 
 
 def test_no_body_premise_declaration_expands_signature() -> None:
@@ -1147,9 +1201,8 @@ def test_no_body_premise_declaration_expands_signature() -> None:
         Path("."),
         is_file=False,
     )
-    assert payload["summary"]["error_count"] == 1
-    assert payload["entries"][0]["code"] == "naming_error"
-    assert "invalid_bound_sym_name" in payload["entries"][0]["reason"]
+    assert payload["summary"]["error_count"] == 0
+    assert all(entry["code"] != "naming_error" for entry in payload["entries"])
 
 
 def test_bool_declarations_emit_predicate_fact() -> None:
@@ -1163,9 +1216,8 @@ def test_bool_declarations_emit_predicate_fact() -> None:
         Path("."),
         is_file=False,
     )
-    assert payload["summary"]["error_count"] == 1
-    assert payload["entries"][0]["code"] == "naming_error"
-    assert "invalid_bound_sym_name" in payload["entries"][0]["reason"]
+    assert payload["summary"]["error_count"] == 0
+    assert all(entry["code"] != "naming_error" for entry in payload["entries"])
 
 
 def test_duplicate_binders_deduplicate() -> None:
@@ -1479,12 +1531,28 @@ def test_multiline_binding_rhs_disassembly_is_indented() -> None:
     text = "sym = {| ^sym | ^sym >= 0 => ^sym + 1}"
     first_source = translate_ast_to_source(compile_text(text))
     second_source = translate_ast_to_source(compile_text(first_source))
-    assert "\n  | ^tmp03 = {\n    | ^logic_language_out0\n" in first_source
-    assert "\n    ∃{\n      | ^sym, ^tmp00, ^tmp11, ^tmpadd2\n" in first_source
-    assert "\n      Value ~ ^tmp00\n      Value ~ ^tmp11\n      ^logic_language_out0 = ^tmpadd2\n" in first_source
+    assert "\n  | ^tmp03 = {\n    | ^logic_language_out0, ^logic_language_out1\n" in first_source
+    assert "\n    | ^logic_language_out1 = {\n      | ^sym, ^tmp00\n" in first_source
+    assert "\n    ∃{\n      | ^sym, ^tmp11, ^tmpfunc_stmt2\n" in first_source
+    assert "\n      ^sym ∈ ^logic_language_out1\n      ^tmpfunc_stmt2 = ^logic_language_out0\n" in first_source
     assert "\n    }\n  }\n  sym = ^tmp03\n" in first_source
     assert "\n}\n  sym = ^tmp03\n" not in first_source
     assert second_source == first_source
+
+
+def test_image_set_maps_source_set_members_not_premise_implication() -> None:
+    single_source = translate_ast_to_source(compile_text("result = {| _x | P(_x) => F(_x)}"))
+    assert "^logic_language_out1 = {\n      | ^_x" in single_source
+    assert single_source.count("P(^_x)") == 1
+    assert "^_x ∈ ^logic_language_out1" in single_source
+    assert "^tmpfunc_stmt0 = ^logic_language_out0" in single_source
+    assert "P(^_x)" not in single_source.split("∃{", 1)[1]
+
+    multi_source = translate_ast_to_source(compile_text("result = {| _x, _y | P(_x, _y) => F(_x, _y)}"))
+    assert "^logic_language_out1 = {\n      | ^_x, ^_y" in multi_source
+    assert "^tmptuple0 = (^_x, ^_y)" in multi_source
+    assert "^tmptuple0 ∈ ^logic_language_out1" in multi_source
+    assert "^tmpfunc_stmt1 = ^logic_language_out0" in multi_source
 
 
 def test_disassembled_final_ast_preserves_target_placement() -> None:
@@ -1701,6 +1769,35 @@ def test_module_check_set_module_syntax_still_reports_located_errors() -> None:
     assert entry["code"] == "set_module_missing_syms"
     assert entry["lineno"] == 0
     assert entry["col_start_no"] == 0
+
+
+def test_module_check_multiline_module_braces_reject_trailing_content() -> None:
+    invalid_opener = "_threads = {|\n  | _thread\n  _thread ∈ _threads\n}\n"
+    payload = module_check.check_module(invalid_opener, module_check.STDIN_FILE, Path("."), is_file=False)
+    assert payload["summary"]["error_count"] == 1
+    entry = payload["entries"][0]
+    assert entry["code"] == "invalid_multiline_module_brace"
+    assert entry["reason"].startswith("multiline module opener")
+    assert entry["lineno"] == 0
+    assert entry["col_start_no"] == invalid_opener.index("{")
+
+    invalid_closer = "{\n  | _x\n  _x = _x\n} Q(_x)\n"
+    payload = module_check.check_module(invalid_closer, module_check.STDIN_FILE, Path("."), is_file=False)
+    assert payload["summary"]["error_count"] == 1
+    entry = payload["entries"][0]
+    assert entry["code"] == "invalid_multiline_module_brace"
+    assert entry["reason"].startswith("multiline module closer")
+
+
+def test_module_check_multiline_module_braces_allow_brace_only_and_inline_forms() -> None:
+    for source in [
+        "_threads = {\n  | _thread\n  _thread ∈ _threads\n}\n",
+        "_threads = {| _thread | _thread ∈ _threads}\n",
+        "∀{| _x | _x = _x}\n",
+        "∀{\n  | _x\n  _x = _x\n}\n",
+    ]:
+        payload = module_check.check_module(source, module_check.STDIN_FILE, Path("."), is_file=False)
+        assert payload["summary"]["error_count"] == 0, (source, payload)
 
 
 def test_module_check_warning_only_bare_index_operator_symbol_exits_clean() -> None:
@@ -1948,6 +2045,34 @@ def test_module_check_final_ast_diagnostics_keep_location_and_code() -> None:
     assert {**diagnostic, "stage": "final_ast"} in payload["entries"]
 
 
+def test_compile_rejects_bare_sym_target_final_ast() -> None:
+    source = "{\n  | _thread\n  _thread\n}\n"
+    try:
+        compile_text(source)
+    except compile_module_script.FinalAstValidationCompileError as error:
+        assert any(entry["code"] == "invalid_target_proposition_stmt" for entry in error.diagnostics)
+    else:
+        raise AssertionError("expected bare target Sym to fail final AST validation")
+
+    payload = module_check.check_module(source, module_check.STDIN_FILE, Path("."), is_file=False)
+    assert payload["summary"]["error_count"] == 1
+    entry = next(entry for entry in payload["entries"] if entry["stage"] == "final_ast")
+    assert entry["code"] == "invalid_target_proposition_stmt"
+    assert entry["reason"] == "target_proposition_stmts must contain only proposition statements"
+    assert entry["lineno"] == 2
+    assert entry["col_start_no"] == source.splitlines()[2].index("_thread")
+
+
+def test_compile_allows_proposition_targets() -> None:
+    for source in [
+        "{\n  | _thread\n  _thread = _thread\n}\n",
+        "∀{| _thread | P(_thread)}",
+    ]:
+        payload = module_check.check_module(source, module_check.STDIN_FILE, Path("."), is_file=False)
+        assert payload["summary"]["error_count"] == 0, (source, payload)
+        compile_text(source)
+
+
 def test_module_check_final_ast_plain_declaration_conflict_uses_input_location() -> None:
     source = "∀\n    | _x\n    f: _x => _y\n"
     payload = module_check.check_module(source, "/tmp/input.lp", Path("."), is_file=False)
@@ -2110,6 +2235,55 @@ def test_resolve_sym_type_class_func_pred_and_alias_evidence() -> None:
     assert any(entry["colorable"] for entry in resolved_occurrences(payload, "Class"))
     assert any(entry["colorable"] for entry in resolved_occurrences(payload, "f"))
     assert any(entry["colorable"] for entry in resolved_occurrences(payload, "p"))
+
+
+def test_resolve_sym_type_completion_scopes_include_expanded_bound_syms() -> None:
+    payload = resolve_sym_type.resolve_text(
+        "\n".join(
+            [
+                "Coord",
+                "Val",
+                "f: _val => _out",
+                "    | _raw_coord = coord(_val)",
+                "    _out = _raw_coord",
+            ]
+        )
+    )
+    scope_names = {
+        sym["name"]
+        for scope in payload["completion_scopes"]
+        for sym in scope["bound_syms"]
+    }
+    assert {"_val", "_out", "_raw_coord"} <= scope_names
+    assert all(entry["name"] != "_raw_coord" for entry in payload["completion_symbols"])
+    nested_payload = resolve_sym_type.resolve_text("∀\n    | _nested\n    P(_nested)")
+    nested_scope_names = {
+        sym["name"]
+        for scope in nested_payload["completion_scopes"]
+        for sym in scope["bound_syms"]
+    }
+    assert "_nested" in nested_scope_names
+
+    image_set_payload = resolve_sym_type.resolve_text(
+        "\n".join(
+            [
+                "Wave",
+                "f: _waves => _pairs",
+                "    _pairs = {",
+                "        | _wave ∈ _waves",
+                "        | _instr = cur_instr(_wave)",
+                "        ",
+                "    }",
+            ]
+        )
+    )
+    image_set_scopes = [
+        scope
+        for scope in image_set_payload["completion_scopes"]
+        if any(sym["name"] == "_wave" for sym in scope["bound_syms"])
+    ]
+    assert image_set_scopes
+    assert any(scope["start_lineno"] <= 5 <= scope["end_lineno"] for scope in image_set_scopes)
 
 
 def test_resolve_sym_type_predicate_wins_over_function() -> None:
@@ -2480,6 +2654,30 @@ def test_resolve_sym_type_bare_class_field_in_premise_section_is_function() -> N
     assert occurrence["colorable"] is True
 
 
+def test_resolve_sym_type_class_field_assignment_is_function() -> None:
+    payload = resolve_sym_type.resolve_text("Class\n    ::field = value")
+    symbol = resolved_symbol(payload, "field")
+    assert symbol["type"] == "func"
+    occurrence = occurrence_on_line(payload, "field", 1)
+    assert occurrence["colorable"] is True
+
+
+def test_resolve_sym_type_member_call_uses_class_field_assignment_definition() -> None:
+    payload = resolve_sym_type.resolve_text(
+        "\n".join(
+            [
+                "Class",
+                "    ::field = value",
+                "Class ~ _receiver",
+                "_y = _receiver.field",
+            ]
+        )
+    )
+    definition = occurrence_on_line(payload, "field", 3)["definition"]
+    assert definition["lineno"] == 1
+    assert definition["col_start_no"] == len("    ::")
+
+
 def test_resolve_sym_type_member_call_falls_back_to_function_declaration() -> None:
     payload = resolve_sym_type.resolve_text(
         "\n".join(
@@ -2530,7 +2728,7 @@ def test_resolve_sym_type_definition_prefers_current_file() -> None:
 
 def test_resolve_sym_type_invalid_source_returns_empty_success_payload() -> None:
     payload = resolve_sym_type.resolve_text("∀{| x | x = x")
-    assert payload == {"summary": {"symbol_count": 0, "occurrence_count": 0}, "symbols": [], "occurrences": []}
+    assert payload == {"summary": {"symbol_count": 0, "occurrence_count": 0}, "symbols": [], "completion_scopes": [], "occurrences": []}
 
 
 def test_resolve_sym_type_cli_modes() -> None:
@@ -2636,6 +2834,8 @@ def main() -> int:
         test_class_field_shorthand_compiles,
         test_class_field_shorthand_uses_underscore_receiver_and_output_names,
         test_class_field_shorthand_desugars_in_premise_section,
+        test_class_field_assignment_lowers_to_field_declaration_and_axiom,
+        test_class_field_assignment_premise_lowers_to_premise_artifacts,
         test_prime_suffix_names_compile_and_infer_from_base,
         test_class_method_body_is_preserved,
         test_function_declaration_and_body_are_separate_rules,
@@ -2727,6 +2927,7 @@ def main() -> int:
         test_authored_target_literal_classifier_dedupes_generated_target,
         test_target_module_assignment_normalized,
         test_multiline_binding_rhs_disassembly_is_indented,
+        test_image_set_maps_source_set_members_not_premise_implication,
         test_disassembled_final_ast_preserves_target_placement,
         test_round_trip_disassembly_is_idempotent,
         test_generated_temp_round_trip_is_idempotent,
@@ -2740,6 +2941,8 @@ def main() -> int:
         test_module_check_set_literals_are_not_set_modules,
         test_module_check_supports_set_union_infix_with_set_literal,
         test_module_check_set_module_syntax_still_reports_located_errors,
+        test_module_check_multiline_module_braces_reject_trailing_content,
+        test_module_check_multiline_module_braces_allow_brace_only_and_inline_forms,
         test_module_check_warning_only_bare_index_operator_symbol_exits_clean,
         test_module_check_positioned_branch_error_avoids_file_start_fallback,
         test_module_check_positioned_unsupported_coloncolon_errors,
@@ -2753,6 +2956,8 @@ def main() -> int:
         test_module_check_compile_error_uses_entry_file_start,
         test_module_check_compile_error_uses_source_fragment_location,
         test_module_check_final_ast_diagnostics_keep_location_and_code,
+        test_compile_rejects_bare_sym_target_final_ast,
+        test_compile_allows_proposition_targets,
         test_module_check_final_ast_plain_declaration_conflict_uses_input_location,
         test_module_check_final_ast_class_method_body_conflict_uses_declaration_location,
         test_module_check_text_import_resolves_standard_library_from_skill_dir,
@@ -2763,6 +2968,7 @@ def main() -> int:
         test_expand_module_cli_stdin_mode,
         test_expand_module_cli_invalid_input,
         test_resolve_sym_type_class_func_pred_and_alias_evidence,
+        test_resolve_sym_type_completion_scopes_include_expanded_bound_syms,
         test_resolve_sym_type_predicate_wins_over_function,
         test_resolve_sym_type_class_wins_over_callable_evidence,
         test_resolve_sym_type_operator_symbols_are_not_colorable,
@@ -2791,6 +2997,8 @@ def main() -> int:
         test_resolve_sym_type_member_call_uses_indented_class_method_definition,
         test_resolve_sym_type_member_call_uses_bare_class_field_definition,
         test_resolve_sym_type_bare_class_field_in_premise_section_is_function,
+        test_resolve_sym_type_class_field_assignment_is_function,
+        test_resolve_sym_type_member_call_uses_class_field_assignment_definition,
         test_resolve_sym_type_member_call_falls_back_to_function_declaration,
         test_resolve_sym_type_imported_definition_locations,
         test_resolve_sym_type_definition_prefers_current_file,

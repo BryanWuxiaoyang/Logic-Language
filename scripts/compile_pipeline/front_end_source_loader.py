@@ -21,7 +21,7 @@ from compile_pipeline.module_parser import (
     LocatedText,
     make_located_text,
     normalize_latex_located,
-    parse_located_module_text,
+    parse_located_source_module_text,
     remove_comments_located,
     strip_leading_bom,
     strip_outer_blank_lines_located,
@@ -31,6 +31,27 @@ STDIN_SOURCE = "__stdin__"
 
 
 def run(text: str, base_dir: Path | str = ".", *, source: str = STDIN_SOURCE, allow_imports: bool = True) -> SourceFileAst:
+    parse_ast = run_parse_ast(text, base_dir, source=source, allow_imports=allow_imports)
+    from compile_pipeline.stage1_front_end import lower_source_file_ast
+
+    return lower_source_file_ast(parse_ast)
+
+
+def run_parse_ast(text: str, base_dir: Path | str = ".", *, source: str = STDIN_SOURCE, allow_imports: bool = True) -> SourceFileAst:
+    cleaned, expanded, imports = prepare_located_source(text, base_dir, source=source, allow_imports=allow_imports)
+    ast = build_source_file_ast(cleaned, source, imports, include_lowered=False)
+    ast.import_count = len({position.file for position in expanded.positions if position.import_origin})
+    ast.line_count = len(cleaned.text.splitlines())
+    return ast
+
+
+def prepare_located_source(
+    text: str,
+    base_dir: Path | str = ".",
+    *,
+    source: str = STDIN_SOURCE,
+    allow_imports: bool = True,
+) -> tuple[LocatedText, LocatedText, list[str]]:
     if not allow_imports and any(IMPORT_RE.match(line) for line in text.splitlines()):
         raise CompileError("$import is not supported when reading module text from stdin")
     tokens = load_tokens()
@@ -38,16 +59,20 @@ def run(text: str, base_dir: Path | str = ".", *, source: str = STDIN_SOURCE, al
     normalized = normalize_latex_located(root, tokens)
     expanded = expand_for_checking(normalized, base_dir=Path(base_dir).resolve(), seen=set())
     cleaned = strip_outer_blank_lines_located(remove_comments_located(expanded))
-    ast = build_source_file_ast(cleaned, source, import_paths(text, Path(base_dir).resolve()))
-    ast.import_count = len({position.file for position in expanded.positions if position.import_origin})
-    ast.line_count = len(cleaned.text.splitlines())
-    return ast
+    return cleaned, expanded, import_paths(text, Path(base_dir).resolve())
 
 
-def build_source_file_ast(located: LocatedText, source: str, imports: list[str] | None = None) -> SourceFileAst:
-    parsed = parse_located_module_text(located)
-    root = SourceFileAst(source=source, source_loc=parsed.source_loc, imports=imports or [], line_count=len(located.text.splitlines()))
-    root.modules.append(SourceModule(type="source_file", source_loc=parsed.source_loc, lowered_module=parsed.module))
+def build_source_file_ast(
+    located: LocatedText,
+    source: str,
+    imports: list[str] | None = None,
+    *,
+    include_lowered: bool = True,
+) -> SourceFileAst:
+    parsed_source = parse_located_source_module_text(located)
+    root = SourceFileAst(source=source, source_loc=parsed_source.source_loc, imports=imports or [], line_count=len(located.text.splitlines()))
+    module = parsed_source.module
+    root.modules.append(module)
     return root
 
 

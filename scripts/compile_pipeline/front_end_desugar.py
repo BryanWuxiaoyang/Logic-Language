@@ -273,6 +273,7 @@ class ModuleDesugarer:
             predicate_statements=predicates,
             target_statements=targets,
             quantifier=module.quantifier,
+            source_loc=module.source_loc,
             declared_classes=module.declared_classes,
             declaration_syms=module.declaration_syms,
             suppress_inferred_syms=module.suppress_inferred_syms,
@@ -379,6 +380,7 @@ class ModuleDesugarer:
                 predicate_statements=[infix_statement(item, "∈", sym, loc)],
                 target_statements=[infix_statement(collection[1], "~", item, loc)],
                 quantifier="∀",
+                source_loc=loc,
                 bound_sym_locs=[None],
             )
             desugared_item_module = self.desugar_module(item_module, scope)
@@ -447,6 +449,9 @@ def infer_syms_from_expr(expr: ExprNode | None) -> list[str]:
     if op in {"=", ">", "<", ">=", "<=", "≤", "≥", "∈", "∉", "⊂", "⊄", "⊆", "⊈", "≠"} and expr.args:
         return expr_binder_names(expr.args[0])
     if op == "~" and len(expr.args) == 2:
+        lhs = expr.args[0]
+        if isinstance(lhs, Sym_expr) and lhs.sym is not None and lhs.sym.name in {"Function", "Predicate"}:
+            return []
         rhs = expr.args[1]
         if isinstance(rhs, Sym_expr) and rhs.sym is not None and is_plain_sym(rhs.sym.name):
             return [rhs.sym.name]

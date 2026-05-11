@@ -49,7 +49,8 @@
     }
   },
   "scripts": {
-    "package": "vsce package --allow-missing-repository --out ../../../../artifacts/logic-language.vsix"
+    "package": "vsce package --allow-missing-repository --out ../../../../artifacts/logic-language.vsix",
+    "test": "node test/completion_helpers.test.js"
   },
   "devDependencies": {
     "@vscode/vsce": "^3.9.1"

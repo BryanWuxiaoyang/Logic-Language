@@ -19,13 +19,18 @@ from AST import (
     INDENTATION_LEVEL_ERROR,
     Call_expr,
     Char_literal_expr,
+    ClassDecl,
+    ClassFieldAssign,
+    ClassFieldDecl,
+    ClassMethodDecl,
     Empty_expr,
     ExprNode,
-    Module,
+    FunctionDecl,
     Module_ref_expr,
     Raw_expr,
     SourceLoc,
-    Statement,
+    SourceModule,
+    SourceStatement,
     Set_expr,
     String_literal_expr,
     SymNode,
@@ -44,6 +49,7 @@ from compile_pipeline.source_syntax import (
     class_header_sym,
     class_member_owner_name,
     coloncolon_field_declaration,
+    declaration_colon_index,
     erase_coloncolon_statement_head,
     explicit_class_header_sym,
     find_matching,
@@ -83,6 +89,8 @@ from compile_pipeline.source_utils import (
 
 STDIN_FILE = "__stdin__"
 QUANTIFIERS = {"∀", "∃"}
+MULTILINE_MODULE_OPENER_ERROR = "multiline module opener must end after '{'; use a following '| ...' line for premises"
+MULTILINE_MODULE_CLOSER_ERROR = "multiline module closer must be alone on its line"
 
 
 class CheckError(CompileError):
@@ -279,6 +287,7 @@ def analyze_module_text(
     cleaned = strip_outer_blank_lines_located(remove_comments_located(expanded))
     if not cleaned.text.strip():
         raise CheckError("empty module text")
+    validate_multiline_module_brace_layout_located(cleaned)
     parser = LocatedModuleParser(visible_class_names=import_class_names)
     ast = parser.parse_module(cleaned, default_quantifier="∀")
     return CheckResult(
@@ -661,8 +670,10 @@ class LocatedModuleParser:
         while index < len(lines):
             line = lines[index]
             indent, content = split_indent_located(line)
+            force_line_quantifier = False
             if content.text.startswith("@"):
                 content = synthetic_text("∀", content.positions[0])
+                force_line_quantifier = True
             self.record_class_member_owner(content, visible_classes)
             class_field_assignment = parse_class_field_assignment_located(content)
             if index + 1 < len(lines):
@@ -983,10 +994,20 @@ class LocatedModuleParser:
     def parse_image_set(self, body: LocatedText) -> CheckModule:
         source, target = split_top_level_once_located(body, "=>")
         out_origin = target.strip().positions[0] if target.strip() else source.strip().positions[0]
+        source = normalize_image_set_source_body(source, out_origin)
         out = Binder(self.fresh_sym(source.text + target.text), out_origin)
-        exists_body = concat_located([source, synthetic_text(" | ", out_origin), synthetic_text(out.text + " = ", out_origin), target.strip()])
+        source_set = self.fresh_sym(source.text + target.text + out.text)
+        self.build_module("set", None, source)
+        source_set_binding = image_set_source_set_binding(source, source_set, out_origin)
+        exists_body = image_set_exists_body(source, target, out.text, source_set, out_origin)
         submodule = self.build_module("quantifier", "∃", exists_body)
-        return CheckModule(type="set", binders=[out], predicate_statements=[], target_statements=[CheckStatement("$module0", [submodule])])
+        return CheckModule(
+            type="set",
+            binders=[out],
+            predicate_statements=[],
+            premise_binding_statements=[self.compile_statement(source_set_binding)],
+            target_statements=[CheckStatement("$module0", [submodule])],
+        )
 
     def compile_statement(self, located: LocatedText) -> CheckStatement:
         text, submodules = self.extract_sub_modules(located.strip())
@@ -1247,6 +1268,72 @@ def split_sections_located(body: LocatedText) -> list[LocatedText]:
     return [section.strip() for section in sections if section.text.strip()]
 
 
+def image_set_source_set_binding(source: LocatedText, source_set: str, origin: SourcePosition) -> LocatedText:
+    return concat_located([
+        synthetic_text(source_set + " = {", origin),
+        source,
+        synthetic_text("}", origin),
+    ]).strip()
+
+
+def image_set_exists_body(
+    source: LocatedText,
+    target: LocatedText,
+    out: str,
+    source_set: str,
+    origin: SourcePosition,
+) -> LocatedText:
+    binder_section = image_set_binder_section(source)
+    binder_line = concat_located([synthetic_text("| ", first_position(binder_section) or origin), binder_section])
+    element = image_set_element_expr(binder_section, origin)
+    membership = concat_located([element, synthetic_text(" ∈ " + source_set, origin)])
+    equality = concat_located([target.strip(), synthetic_text(" = " + out, origin)])
+    return join_lines_located([binder_line, membership, equality])
+
+
+def normalize_image_set_source_body(source: LocatedText, origin: SourcePosition) -> LocatedText:
+    source = source.strip()
+    sections = split_sections_located(source)
+    if sections and parse_binder_list_located(sections[0]) is not None and len(sections) > 1:
+        return source
+    if len(sections) == 1:
+        binders = parse_binder_list_located(sections[0])
+        if binders is not None:
+            binder_section = binder_section_from_binders(binders, origin)
+            element = image_set_element_expr(binder_section, origin)
+            tautology = concat_located([element, synthetic_text(" = ", origin), element])
+            return join_lines_located([concat_located([synthetic_text("| ", first_position(binder_section) or origin), binder_section]), tautology])
+    inference_source = sections[0] if len(sections) == 1 else source
+    inferred = infer_binders(split_terms_located(inference_source))
+    if inferred:
+        binder_section = binder_section_from_binders(inferred, origin)
+        return join_lines_located([concat_located([synthetic_text("| ", first_position(binder_section) or origin), binder_section]), inference_source])
+    return source
+
+
+def binder_section_from_binders(binders: list[Binder], origin: SourcePosition) -> LocatedText:
+    parts: list[LocatedText] = []
+    for index, binder in enumerate(binders):
+        if index:
+            parts.append(synthetic_text(", ", origin))
+        parts.append(synthetic_text(binder.text, binder.position))
+    return concat_located(parts).strip()
+
+
+def image_set_binder_section(source: LocatedText) -> LocatedText:
+    sections = split_sections_located(source)
+    if not sections:
+        return source.strip()
+    return sections[0].strip()
+
+
+def image_set_element_expr(binder_section: LocatedText, origin: SourcePosition) -> LocatedText:
+    binders = parse_binder_list_located(binder_section) or []
+    if len(binders) <= 1:
+        return binder_section
+    return concat_located([synthetic_text("(", origin), binder_section, synthetic_text(")", origin)])
+
+
 def split_multiline_sections_located(body: LocatedText) -> list[LocatedText]:
     sections: list[LocatedText] = []
     target_lines: list[LocatedText] = []
@@ -1417,80 +1504,495 @@ def located_name_from_header(header: LocatedText, name: str) -> LocatedText:
     if match is None:
         return synthetic_text(name, header.positions[0])
     return header.slice(match.start(), match.end())
+
 @dataclass(frozen=True)
-class TypedParseResult:
-    module: Module
+class SourceParseResult:
+    module: SourceModule
     source_loc: SourceLoc
 
 
-def parse_located_module_text(
+def parse_located_source_module_text(
     located: LocatedText,
     *,
     visible_class_names: Iterable[str] = (),
-) -> TypedParseResult:
+) -> SourceParseResult:
+    """Parse located text into the source-preserving front-end AST.
+
+    This parser intentionally runs before declaration/class desugaring.  It
+    preserves function declarations, class declarations, and class members so
+    tools such as the front-end AST organizer can work from source structure
+    instead of reconstructing ownership from lowered quantified statements.
+    """
+
     if not located.text:
         raise CompileError("empty module text")
-    parser = LocatedModuleParser(visible_class_names=visible_class_names)
-    check_module = parser.parse_module(located, default_quantifier="∀")
-    return TypedParseResult(module=check_module_to_module(check_module), source_loc=source_loc_from_located(located))
+    validate_multiline_module_brace_layout_located(located)
+    parser = SourceStructureParser(visible_class_names=visible_class_names)
+    module = parser.parse_module(located, default_quantifier="∀")
+    return SourceParseResult(module=module, source_loc=source_loc_from_located(located))
 
 
-def check_module_to_module(check_module: CheckModule) -> Module:
-    syms = dedupe([binder.text for binder in check_module.binders])
-    binder_locs_by_name: dict[str, dict[str, object]] = {}
-    for binder in check_module.binders:
-        binder_locs_by_name.setdefault(binder.text, loc_from_position(binder.position, len(binder.text)))
-    predicate_statements = [check_statement_to_statement(statement) for statement in check_module.premise_binding_statements]
-    predicate_statements.extend(check_statement_to_statement(statement) for statement in check_module.predicate_statements)
-    target_statements = [check_statement_to_statement(statement) for statement in check_module.target_statements]
-    declaration_syms: list[str] = []
-    if check_module.declaration is not None:
-        declaration_syms = [sym for sym in check_module.declaration.outputs if sym in syms]
-        marker_name = DECL_BODY_OUTPUT_MARKER if target_statements else DECL_OUTPUT_MARKER
-        predicate_statements.insert(0, synthetic_marker_statement(marker_name, list(check_module.declaration.outputs)))
-    return Module(
-        type=check_module.type,
-        syms=syms,
-        predicate_statements=predicate_statements,
-        target_statements=target_statements,
-        quantifier=check_module.quantifier,
-        declared_classes=dedupe([declaration.name for declaration in check_module.class_declarations]),
-        declaration_syms=dedupe(declaration_syms),
-        suppress_inferred_syms=check_module.suppress_inferred_syms,
-        bound_sym_locs=[binder_locs_by_name.get(sym) for sym in syms],
-        bound_sym_source_names=[source_name_for_bound_sym(sym) for sym in syms],
-        declared_class_locs={
-            declaration.name: loc_from_position(declaration.position, len(declaration.name))
-            for declaration in check_module.class_declarations
-        },
-    )
+def validate_multiline_module_brace_layout_located(located: LocatedText) -> None:
+    index = 0
+    while index < len(located.text):
+        start = find_next_module_start(located.text, index)
+        if start is None:
+            return
+        module_start = start + 1 if located.text[start] in QUANTIFIERS else start
+        try:
+            close = find_matching(located.text, module_start, "{", "}")
+        except CompileError:
+            index = module_start + 1
+            continue
+        if same_physical_line(located, module_start, close):
+            index = close + 1
+            continue
+        open_line_end = line_end_index(located.text, module_start)
+        opener_tail = located.text[module_start + 1 : open_line_end]
+        if opener_tail.strip():
+            raise CheckError(
+                MULTILINE_MODULE_OPENER_ERROR,
+                position=located.positions[module_start],
+                width=2 if opener_tail.lstrip().startswith("|") else 1,
+            )
+        close_line_start = line_start_index(located.text, close)
+        close_line_end = line_end_index(located.text, close)
+        closer_prefix = located.text[close_line_start:close]
+        closer_tail = located.text[close + 1 : close_line_end]
+        if closer_prefix.strip() or closer_tail.strip():
+            raise CheckError(
+                MULTILINE_MODULE_CLOSER_ERROR,
+                position=located.positions[close],
+                width=1,
+            )
+        index = close + 1
 
 
-def check_statement_to_statement(check_statement: CheckStatement) -> Statement:
-    located = check_statement.located
-    source_loc = loc_from_located(located) if located is not None else None
-    submodules = [check_module_to_module(module) for module in check_statement.sub_modules]
-    if located is not None and check_statement.text.strip():
-        expr = parse_expr_located(located)
-    elif check_statement.text.startswith("$module") and submodules:
-        expr = Module_ref_expr(source_loc, value="0")
-    else:
-        expr = None
-    return Statement(
-        sub_modules=submodules,
-        source_loc=source_loc,
-        sym_locs=sym_locs_from_expr(expr),
-        source_name=None,
-        expr=expr,
-    )
+def same_physical_line(located: LocatedText, left: int, right: int) -> bool:
+    return located.positions[left].line == located.positions[right].line
 
 
-def synthetic_marker_statement(marker: str, syms: list[str]) -> Statement:
-    return Statement(
-        source_loc={"source": "__generated__", "line": 1, "column": 1, "end_line": 1, "end_column": 1},
-        marker=marker,
-        marker_syms=syms,
-    )
+def line_start_index(text: str, index: int) -> int:
+    return text.rfind("\n", 0, index) + 1
+
+
+def line_end_index(text: str, index: int) -> int:
+    newline = text.find("\n", index)
+    return len(text) if newline < 0 else newline
+
+
+class SourceStructureParser:
+    def __init__(self, *, visible_class_names: Iterable[str] = ()) -> None:
+        self.visible_class_names = set(visible_class_names)
+        self.fresh_index = 0
+
+    def parse_module(self, located: LocatedText, default_quantifier: str = "∀") -> SourceModule:
+        located = strip_outer_blank_lines_located(located).strip()
+        wrapped = self.try_parse_wrapped_module(located)
+        if wrapped is not None:
+            return wrapped
+        return self.parse_line_module(located, default_quantifier)
+
+    def try_parse_wrapped_module(self, located: LocatedText) -> SourceModule | None:
+        located = located.strip()
+        quantifier: str | None = None
+        body_start = 0
+        if located.text.startswith(("∀", "∃")):
+            quantifier = located.text[0]
+            body_start = 1
+        if body_start >= len(located.text) or located.text[body_start] != "{":
+            return None
+        close = find_matching(located.text, body_start, "{", "}")
+        if close != len(located.text) - 1:
+            return None
+        body = located.slice(body_start + 1, close)
+        if self.is_image_set_body(body.text):
+            module = self.parse_image_set(body)
+            module.source_loc = source_loc_from_located(located)
+            return module
+        module_type = "quantifier" if quantifier else "set"
+        module = self.parse_section_body(module_type, quantifier, body)
+        module.source_loc = source_loc_from_located(located)
+        return module
+
+    def parse_line_module(self, located: LocatedText, quantifier: str) -> SourceModule:
+        lines = logical_lines_located(located)
+        validate_indentation_levels_located(lines)
+        module = SourceModule(
+            type="quantifier",
+            source_loc=source_loc_from_located(located),
+            quantifier=sym_node_from_text(synthetic_text(quantifier, located.positions[0] if located.positions else SourcePosition(STDIN_FILE, 1, 1))),
+        )
+        self.parse_lines_into_module(module, lines, visible_class_names=self.visible_class_names)
+        return module
+
+    def parse_section_body(self, module_type: str, quantifier: str | None, body: LocatedText) -> SourceModule:
+        module = SourceModule(
+            type=module_type,
+            source_loc=source_loc_from_located(body) if body.text.strip() else None,
+            quantifier=sym_node_from_text(synthetic_text(quantifier, body.positions[0])) if quantifier and body.positions else None,
+        )
+        sections = split_sections_located(body)
+        if not sections:
+            return module
+        target_section = sections[-1]
+        before_target = sections[:-1]
+        for section in before_target:
+            binders = parse_binder_list_located(section)
+            if binders is not None:
+                for binder in binders:
+                    module.bound_syms.append(SymNode(binder.text, loc_from_position(binder.position, len(binder.text))))
+            else:
+                module.premise_proposition_stmts.extend(self.parse_statement_terms(section, premise=True))
+        for statement in self.parse_statement_terms(target_section, premise=False):
+            class_decl = source_class_decl_from_statement(statement)
+            if class_decl is not None:
+                module.classes.append(class_decl)
+            else:
+                module.target_proposition_stmts.append(statement)
+        module.statements = [*module.premise_proposition_stmts, *module.target_proposition_stmts]
+        return module
+
+    def parse_lines_into_module(
+        self,
+        module: SourceModule,
+        lines: list[LocatedText],
+        *,
+        visible_class_names: Iterable[str],
+    ) -> None:
+        visible_classes = set(visible_class_names) | direct_class_header_names_located(lines)
+        index = 0
+        while index < len(lines):
+            line = lines[index]
+            indent, content = split_indent_located(line)
+            force_line_quantifier = False
+            if content.text.startswith("@"):
+                content = synthetic_text("∀", content.positions[0])
+                force_line_quantifier = True
+            block: list[LocatedText] = []
+            next_index = index + 1
+            if index + 1 < len(lines):
+                block, next_index = collect_indented_block_located(lines, index + 1, indent)
+
+            class_assignment = parse_class_field_assignment_located(content)
+            if class_assignment is not None:
+                assignment, rhs = class_assignment
+                module.classes.append(
+                    ClassDecl(
+                        name=sym_node_from_name(assignment.class_name, content),
+                        members=[
+                            ClassFieldAssign(
+                                name=sym_node_from_name(assignment.field_name, content),
+                                owner=sym_node_from_name(assignment.class_name, content),
+                                rhs=parse_expr_located(rhs),
+                                source_loc=loc_from_located(content),
+                                premise=assignment.premise,
+                            )
+                        ],
+                        source_loc=loc_from_located(content),
+                    )
+                )
+                index += 1
+                continue
+
+            if block:
+                unindented = unindent_block_located(block)
+                if content.text in QUANTIFIERS:
+                    child = self.parse_line_module(unindented, content.text) if force_line_quantifier else self.parse_quantifier_block(content.text, unindented)
+                    child.source_loc = source_loc_from_located(concat_located([content, synthetic_text("\n", content.positions[0]), unindented]))
+                    module.target_proposition_stmts.append(SourceStatement(loc_from_located(content), sub_modules=[child]))
+                    module.children.append(child)
+                    index = next_index
+                    continue
+                premise_quantifier = premise_quantifier_header(content.text)
+                if premise_quantifier is not None:
+                    child = self.parse_quantifier_block(premise_quantifier, unindented)
+                    child.source_loc = source_loc_from_located(concat_located([content, synthetic_text("\n", content.positions[0]), unindented]))
+                    module.premise_proposition_stmts.append(SourceStatement(loc_from_located(content), sub_modules=[child]))
+                    module.children.append(child)
+                    index = next_index
+                    continue
+                if content.text.startswith("|-"):
+                    child = self.parse_line_module(unindented, "∀")
+                    child.suppress_inferred_syms = True
+                    branch_ps = content.slice(2).strip()
+                    if branch_ps.text != "else":
+                        child.premise_proposition_stmts.insert(0, parse_source_statement(branch_ps, premise=True))
+                        child.statements = [*child.premise_proposition_stmts, *child.target_proposition_stmts]
+                    module.target_proposition_stmts.append(SourceStatement(loc_from_located(content), sub_modules=[child]))
+                    module.children.append(child)
+                    index = next_index
+                    continue
+                class_sym = class_header_sym(content.text)
+                if class_sym is not None:
+                    module.classes.append(self.parse_class_block(content, class_sym, unindented, visible_classes))
+                    index = next_index
+                    continue
+                premise_decl = parse_premise_declaration(content.text)
+                if premise_decl is not None:
+                    module.declarations.append(self.parse_function_decl(content.slice(1).strip(), premise_decl, unindented, premise=True))
+                    index = next_index
+                    continue
+                declaration = parse_declaration(content.text)
+                if declaration is not None:
+                    module.declarations.append(self.parse_function_decl(content, declaration, unindented, premise=False))
+                    index = next_index
+                    continue
+                raise_located_error(INDENTATION_BODY_OWNER_ERROR, content)
+
+            if content.text.startswith("|-"):
+                raise_located_error("branch header requires an indented block", content, width=2)
+            if content.text.startswith("|") and not content.text.startswith("|-"):
+                binder_text = content.slice(1).strip()
+                binders = parse_binder_list_located(binder_text)
+                if binders is not None:
+                    for binder in binders:
+                        module.bound_syms.append(SymNode(binder.text, loc_from_position(binder.position, len(binder.text))))
+                    index += 1
+                    continue
+            premise_decl = parse_premise_declaration(content.text)
+            if premise_decl is not None:
+                module.declarations.append(self.parse_function_decl(content.slice(1).strip(), premise_decl, None, premise=True))
+                index += 1
+                continue
+            if content.text.startswith("|") and not content.text.startswith("|-"):
+                module.premise_proposition_stmts.extend(self.parse_statement_terms(content, premise=True))
+                index += 1
+                continue
+            declaration = parse_declaration(content.text)
+            if declaration is not None:
+                module.declarations.append(self.parse_function_decl(content, declaration, None, premise=False))
+                index += 1
+                continue
+            if is_bare_coloncolon_field_shorthand(content.text):
+                owner, field_name = (part.strip() for part in content.text.split("::", 1))
+                module.classes.append(
+                    ClassDecl(
+                        name=sym_node_from_name(owner, content),
+                        members=[ClassFieldDecl(sym_node_from_name(field_name, content), owner=sym_node_from_name(owner, content), source_loc=loc_from_located(content))],
+                        source_loc=loc_from_located(content),
+                    )
+                )
+                index += 1
+                continue
+            class_name = class_declaration_from_plain_target_located(content)
+            if class_name is not None:
+                module.classes.append(ClassDecl(sym_node_from_name(class_name.name, content), source_loc=loc_from_position(class_name.position, len(class_name.name))))
+                index += 1
+                continue
+            module.target_proposition_stmts.extend(self.parse_statement_terms(content, premise=False))
+            index += 1
+
+        module.statements = [*module.premise_proposition_stmts, *module.target_proposition_stmts]
+
+    def parse_class_block(
+        self,
+        header: LocatedText,
+        class_sym: str,
+        block: LocatedText,
+        visible_classes: Iterable[str],
+    ) -> ClassDecl:
+        members: list[ClassMethodDecl | ClassFieldDecl | ClassFieldAssign] = []
+        body_lines = logical_lines_located(block)
+        index = 0
+        while index < len(body_lines):
+            line = body_lines[index]
+            indent, content = split_indent_located(line)
+            if indent != 0 or not content.text.startswith("::"):
+                raise_located_error("class-declaration body line must start with '::'", content)
+            if content.text.startswith(":::") or content.text.strip() == "::":
+                raise_located_error("class-declaration body line must start with '::' followed by a declaration", content)
+            explicit = concat_located([synthetic_text(class_sym, content.positions[0]), content])
+            nested, next_index = collect_indented_block_located(body_lines, index + 1, indent)
+            if nested and (is_bare_coloncolon_field_shorthand(explicit.text) or parse_class_field_assignment_located(explicit) is not None):
+                raise_located_error(
+                    "class-field shorthand cannot have a function body; use Class::field: input => output for an explicit function declaration",
+                    content,
+                    width=2,
+                )
+            unindented = unindent_block_located(nested) if nested else None
+            member = self.parse_class_member(explicit, class_sym, unindented)
+            members.append(member)
+            index = next_index
+        return ClassDecl(sym_node_from_name(class_sym, header), members=members, source_loc=loc_from_located(header))
+
+    def parse_class_member(
+        self,
+        content: LocatedText,
+        class_sym: str,
+        block: LocatedText | None,
+    ) -> ClassMethodDecl | ClassFieldDecl | ClassFieldAssign:
+        class_assignment = parse_class_field_assignment_located(content)
+        if class_assignment is not None:
+            assignment, rhs = class_assignment
+            return ClassFieldAssign(
+                name=sym_node_from_name(assignment.field_name, content),
+                owner=sym_node_from_name(assignment.class_name, content),
+                rhs=parse_expr_located(rhs),
+                source_loc=loc_from_located(content),
+                premise=assignment.premise,
+            )
+        declaration = parse_declaration(content.text)
+        if declaration is not None:
+            return ClassMethodDecl(self.parse_function_decl(content, declaration, block, premise=False), source_loc=loc_from_located(content))
+        if is_bare_coloncolon_field_shorthand(content.text):
+            _, field_name = (part.strip() for part in content.text.split("::", 1))
+            return ClassFieldDecl(sym_node_from_name(field_name, content), owner=sym_node_from_name(class_sym, content), source_loc=loc_from_located(content))
+        raise_located_error("class-declaration body line must start with '::' followed by a declaration", content)
+
+    def parse_function_decl(
+        self,
+        header: LocatedText,
+        declaration: tuple[str, list[str], list[str], str],
+        block: LocatedText | None,
+        *,
+        premise: bool,
+    ) -> FunctionDecl:
+        name, inputs, outputs, arrow = declaration
+        if arrow != "=>":
+            raise_located_token_error("function-assign '->' is not supported; use '=>' with an indented function body", header, "->")
+        owner_name = owner_name_from_declaration_header(header.text)
+        body_premises: list[SourceStatement] = []
+        body_targets: list[SourceStatement] = []
+        body_flat: list[SourceStatement] = []
+        if block is not None:
+            body_module = self.parse_line_module(block, "∀")
+            body_premises = body_module.premise_proposition_stmts
+            body_targets = body_module.target_proposition_stmts
+            body_flat = [*body_premises, *body_targets]
+        return FunctionDecl(
+            name=sym_node_from_name(name, header),
+            inputs=[sym_node_from_name(sym, header) for sym in inputs],
+            outputs=[sym_node_from_name(sym, header) for sym in outputs],
+            owner=sym_node_from_name(owner_name, header) if owner_name is not None else None,
+            body=body_flat,
+            body_premise_proposition_stmts=body_premises,
+            body_target_proposition_stmts=body_targets,
+            body_module=body_module if block is not None else None,
+            source_loc=loc_from_located(header),
+            premise=premise,
+        )
+
+    def parse_statement_terms(self, located: LocatedText, *, premise: bool) -> list[SourceStatement]:
+        return [parse_source_statement(term, premise=premise) for term in split_terms_located(located)]
+
+    def parse_quantifier_block(self, quantifier: str, block: LocatedText) -> SourceModule:
+        if any(line_block_requires_source_structure(split_indent_located(line)[1].text) for line in logical_lines_located(block)):
+            return self.parse_line_module(block, quantifier)
+        return self.parse_section_body("quantifier", quantifier, block)
+
+    def parse_image_set(self, body: LocatedText) -> SourceModule:
+        source, target = split_top_level_once_located(body, "=>")
+        out_origin = target.strip().positions[0] if target.strip() else source.strip().positions[0]
+        source = normalize_image_set_source_body(source, out_origin)
+        out = self.fresh_sym(source.text + target.text)
+        source_set = self.fresh_sym(source.text + target.text + out)
+        self.parse_section_body("set", None, source)
+        source_set_binding = image_set_source_set_binding(source, source_set, out_origin)
+        source_set_statement = parse_source_statement(source_set_binding, premise=True)
+        exists_body = image_set_exists_body(source, target, out, source_set, out_origin)
+        submodule = self.parse_section_body("quantifier", "∃", exists_body)
+        return SourceModule(
+            type="set",
+            source_loc=source_loc_from_located(body),
+            bound_syms=[SymNode(out, loc_from_position(out_origin, len(out)), generated=True, source_name=out.removeprefix(GENERATED_SYM_PREFIX))],
+            premise_proposition_stmts=[source_set_statement],
+            target_proposition_stmts=[SourceStatement(loc_from_position(out_origin, len(out)), sub_modules=[submodule])],
+            children=[*source_set_statement.sub_modules, submodule],
+        )
+
+    def is_image_set_body(self, body: str) -> bool:
+        return body.lstrip().startswith("|") and has_top_level(body, "=>")
+
+    def fresh_sym(self, seed: str) -> str:
+        while True:
+            sym = f"{FRESH_PREFIX}{self.fresh_index}"
+            self.fresh_index += 1
+            if sym not in seed:
+                return sym
+
+
+def parse_source_statement(located: LocatedText, *, premise: bool) -> SourceStatement:
+    stripped = located.strip()
+    if premise and stripped.text.startswith("|") and not stripped.text.startswith("|-"):
+        stripped = stripped.slice(1).strip()
+    wrapped_parser = SourceStructureParser()
+    wrapped = wrapped_parser.try_parse_wrapped_module(stripped)
+    if wrapped is not None:
+        return SourceStatement(loc_from_located(stripped), sub_modules=[wrapped])
+    expr_text, submodules = extract_source_sub_modules(stripped)
+    return SourceStatement(loc_from_located(stripped), expr=parse_expr_located(expr_text), sub_modules=submodules)
+
+
+def line_block_requires_source_structure(text: str) -> bool:
+    stripped = text.strip()
+    if stripped.startswith("|-") or stripped.startswith("@") or stripped in QUANTIFIERS or premise_quantifier_header(stripped) is not None:
+        return True
+    if parse_premise_declaration(stripped) is not None:
+        return True
+    try:
+        if parse_declaration(stripped) is not None:
+            return True
+    except CompileError:
+        return True
+    if not stripped.startswith("|") and class_header_sym(stripped) is not None:
+        return True
+    if "::" in stripped:
+        return True
+    return False
+
+
+def extract_source_sub_modules(located: LocatedText) -> tuple[LocatedText, list[SourceModule]]:
+    output: list[LocatedText] = []
+    submodules: list[SourceModule] = []
+    index = 0
+    parser = SourceStructureParser()
+    while index < len(located.text):
+        start = find_next_module_start(located.text, index)
+        if start is None:
+            output.append(located.slice(index))
+            break
+        output.append(located.slice(index, start))
+        module_start = start + 1 if located.text[start] in QUANTIFIERS else start
+        end = find_matching(located.text, module_start, "{", "}")
+        module_text = located.slice(start, end + 1)
+        submodules.append(parser.parse_module(module_text))
+        output.append(synthetic_text(f"$module{len(submodules) - 1}", located.positions[start]))
+        index = end + 1
+    return concat_located(output).strip(), submodules
+
+
+def source_class_decl_from_statement(statement: SourceStatement) -> ClassDecl | None:
+    expr = statement.expr
+    if isinstance(expr, Sym_expr) and expr.sym is not None:
+        name = explicit_class_header_sym(expr.sym.name)
+        if name is not None:
+            return ClassDecl(expr.sym, source_loc=statement.source_loc)
+    return None
+
+
+def sym_node_from_text(text: LocatedText) -> SymNode:
+    stripped = text.strip()
+    return SymNode(stripped.text, loc_from_located(stripped))
+
+
+def sym_node_from_name(name: str, located: LocatedText) -> SymNode:
+    stripped = located.strip()
+    index = stripped.text.find(name)
+    if index >= 0 and index < len(stripped.positions):
+        return SymNode(name, loc_from_position(stripped.positions[index], len(name)))
+    return SymNode(name, loc_from_located(stripped))
+
+
+def owner_name_from_declaration_header(text: str) -> str | None:
+    colon_index = declaration_colon_index(text)
+    if colon_index is None:
+        return None
+    head = text[:colon_index].strip()
+    if "::" not in head:
+        return None
+    owner = head.split("::", 1)[0].strip()
+    return owner or None
 
 
 def source_name_for_bound_sym(sym: str) -> str | None:

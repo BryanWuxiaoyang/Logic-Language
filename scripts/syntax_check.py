@@ -339,6 +339,8 @@ def code_for_reason(reason: str) -> str:
         return "set_module_missing_syms"
     if reason.startswith("unknown latex code"):
         return "unknown_latex_code"
+    if reason.startswith("multiline module opener") or reason.startswith("multiline module closer"):
+        return "invalid_multiline_module_brace"
     if reason.startswith("unclosed"):
         return "unclosed_brace"
     if reason == "parse error":

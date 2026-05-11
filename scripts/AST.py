@@ -245,6 +245,11 @@ class FunctionDecl:
     outputs: list[SymNode]
     owner: SymNode | None = None
     body: list[SourceStatement] = field(default_factory=list)
+    premise_proposition_stmts: list[SourceStatement] = field(default_factory=list)
+    target_proposition_stmts: list[SourceStatement] = field(default_factory=list)
+    body_premise_proposition_stmts: list[SourceStatement] = field(default_factory=list)
+    body_target_proposition_stmts: list[SourceStatement] = field(default_factory=list)
+    body_module: Any | None = None
     source_loc: SourceLoc | Json | None = None
     premise: bool = False
 
@@ -318,6 +323,7 @@ class Module:
     predicate_statements: list[Statement]
     target_statements: list[Statement]
     quantifier: str | None = None
+    source_loc: Json | None = None
     declared_classes: list[str] = field(default_factory=list)
     declaration_syms: list[str] = field(default_factory=list)
     suppress_inferred_syms: bool = False
@@ -356,10 +362,14 @@ class SourceModule:
     type: str
     source_loc: SourceLoc | Json | None = None
     quantifier: SymNode | None = None
+    bound_syms: list[SymNode] = field(default_factory=list)
+    premise_proposition_stmts: list[SourceStatement] = field(default_factory=list)
+    target_proposition_stmts: list[SourceStatement] = field(default_factory=list)
     statements: list[SourceStatement] = field(default_factory=list)
     declarations: list[FunctionDecl] = field(default_factory=list)
     classes: list[ClassDecl] = field(default_factory=list)
     children: list["SourceModule"] = field(default_factory=list)
+    suppress_inferred_syms: bool = False
     lowered_module: Any | None = None
 
 

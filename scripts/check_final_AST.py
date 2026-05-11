@@ -15,6 +15,7 @@ from AST import (
     Func_stmt,
     Literal_stmt,
     Module_stmt,
+    Proposition_stmt,
     Set_literal_stmt,
     Stmt,
     Sym,
@@ -108,6 +109,9 @@ class FinalAstChecker:
         for stmt in node.premise_proposition_stmts:
             self.visit_stmt(stmt, child_ancestors, binding_allowed=False)
         for stmt in node.target_proposition_stmts:
+            if not is_target_proposition_stmt(stmt):
+                self.emit_invalid_target_proposition_stmt(stmt)
+                continue
             self.visit_stmt(stmt, child_ancestors, binding_allowed=False)
 
     def check_bound_sym(self, sym_node: Sym, owner_stmt: Module_stmt) -> str | None:
@@ -149,6 +153,20 @@ class FinalAstChecker:
                 reason="binding_stmt is only valid in premise_binding_stmts",
             )
         )
+
+    def emit_invalid_target_proposition_stmt(self, stmt_node: Stmt) -> None:
+        self.diagnostics.append(
+            make_diagnostic(
+                stmt_node,
+                stmt_node,
+                code="invalid_target_proposition_stmt",
+                reason="target_proposition_stmts must contain only proposition statements",
+            )
+        )
+
+
+def is_target_proposition_stmt(node: Stmt) -> bool:
+    return isinstance(node, (Proposition_stmt, Func_stmt))
 
 
 def is_valid_bound_sym_name(name: str) -> bool:

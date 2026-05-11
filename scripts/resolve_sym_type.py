@@ -12,9 +12,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
 
-from AST import Binding_stmt, Func_stmt, Inherit_stmt, Module_stmt, Stmt, Sym, object_ast_from_json
-from compile_module import run_compile_pipeline
+from AST import Binding_stmt, Func_stmt, Inherit_stmt, Module as FrontEndModule, Module_stmt, SourceFileAst, Statement as FrontEndStatement, Stmt, Sym
 from compile_pipeline.errors import CompileError
+from compile_pipeline.stage1_front_end import run as run_front_end
+from compile_pipeline.stage2_back_end import run as run_back_end
 from compile_pipeline.source_syntax import is_generated_sym_name, is_plain_sym, parse_declaration, parse_premise_declaration
 from compile_pipeline.source_utils import find_quoted_literal_end, is_literal_quote_start, load_tokens
 from inheritance_sources import inheritance_candidate_chain
@@ -185,7 +186,7 @@ class DisjointSet:
 
 
 def empty_payload() -> dict[str, Any]:
-    return {"summary": {"symbol_count": 0, "occurrence_count": 0}, "symbols": [], "occurrences": []}
+    return {"summary": {"symbol_count": 0, "occurrence_count": 0}, "symbols": [], "completion_scopes": [], "occurrences": []}
 
 
 def resolve_text(
@@ -196,7 +197,8 @@ def resolve_text(
 ) -> dict[str, Any]:
     base_path = Path(base_dir).resolve()
     try:
-        ast = object_ast_from_json(run_compile_pipeline(text, base_path, source=file_label, allow_imports=True).ast)
+        front_end = run_front_end(text, base_path, source=file_label, allow_imports=True)
+        ast = run_back_end(front_end).ast
         expanded = located_import_expansion(text, file_label, base_path)
     except (CompileError, OSError, ValueError):
         return empty_payload()
@@ -204,7 +206,7 @@ def resolve_text(
     evidence = collect_type_evidence(ast)
     definitions = collect_definitions(expanded, evidence, ast)
     occurrences = scan_source_occurrences(text, file_label)
-    return build_payload(occurrences, evidence, definitions, ast)
+    return build_payload(occurrences, evidence, definitions, ast, front_end.ast, file_label)
 
 
 def resolve_file(file_path: Path) -> dict[str, Any]:
@@ -592,7 +594,7 @@ def collect_explicit_class_definitions(line: LocatedText, order: int) -> list[De
 
 
 def declaration_owner_class(line_text: str, class_stack: list[tuple[int, str]]) -> str | None:
-    match = re.match(r"^(?P<class>[^\s:]+)::.+?:", line_text)
+    match = re.match(r"^(?P<class>[^\s:]+)::.+?(?::|=)", line_text)
     if match is not None and is_plain_sym(match.group("class")):
         return match.group("class")
     if line_text.startswith("::") and class_stack:
@@ -653,18 +655,19 @@ def collect_class_field_definition(
     order: int,
     owner_class: str | None,
 ) -> list[tuple[str, str, Occurrence, int, int, str, str | None]]:
-    if owner_class is None:
-        return []
-    match = re.fullmatch(r"(?:(?P<class>[^\s:]+)::|::)(?P<name>[^\s:]+)", line.text)
+    match = re.fullmatch(r"(?:(?P<class>[^\s:]+)::|::)(?P<name>[^\s:=]+)(?:\s*=\s*.+)?", line.text)
     if match is None:
         return []
     name = match.group("name")
     if not is_plain_sym(name):
         return []
+    owner = match.group("class") or owner_class
+    if owner is None:
+        return []
     occurrence = occurrence_from_located(line, name)
     if occurrence is None:
         return []
-    return [(CLASSIFIER_FUNCTION, name, occurrence, order, 0, "callable_decl", owner_class)]
+    return [(CLASSIFIER_FUNCTION, name, occurrence, order, 0, "callable_decl", owner)]
 
 
 def collect_classifier_fact_candidates(
@@ -1079,6 +1082,8 @@ def build_payload(
     evidence: dict[str, set[str]],
     definitions: dict[str, list[Definition]],
     ast: Stmt | None = None,
+    front_end_ast: SourceFileAst | None = None,
+    file_label: str | None = None,
 ) -> dict[str, Any]:
     entries: list[dict[str, Any]] = []
     counts: Counter[str] = Counter()
@@ -1115,10 +1120,142 @@ def build_payload(
         "summary": {"symbol_count": len(symbols), "occurrence_count": len(entries)},
         "symbols": symbols,
         "completion_symbols": serialize_completion_symbols(definitions, evidence),
+        "completion_scopes": serialize_completion_scopes(front_end_ast, file_label),
         "class_members": serialize_class_members(definitions, evidence),
         "symbol_classes": serialize_symbol_classes(definitions, ast),
         "occurrences": entries,
     }
+
+
+def serialize_completion_scopes(source_ast: SourceFileAst | None, file_label: str | None) -> list[dict[str, Any]]:
+    if source_ast is None or file_label is None:
+        return []
+    scopes: list[dict[str, Any]] = []
+    for source_module in source_ast.modules:
+        module = source_module.lowered_module
+        if isinstance(module, FrontEndModule):
+            collect_completion_scopes(module, file_label, scopes)
+    scopes.sort(
+        key=lambda item: (
+            str(item.get("file", "")),
+            int(item.get("start_lineno", 0)),
+            int(item.get("start_col_no", 0)),
+            -int(item.get("end_lineno", 0)),
+            -int(item.get("end_col_no", 0)),
+        )
+    )
+    return scopes
+
+
+def collect_completion_scopes(module: FrontEndModule, file_label: str, scopes: list[dict[str, Any]]) -> None:
+    bound_syms = completion_bound_syms(module, file_label)
+    scope_range = completion_scope_range(module, file_label)
+    if bound_syms and scope_range is not None:
+        scopes.append(
+            {
+                "file": file_label,
+                **scope_range,
+                "bound_syms": bound_syms,
+            }
+        )
+    for statement in [*module.predicate_statements, *module.target_statements]:
+        for submodule in statement.sub_modules:
+            collect_completion_scopes(submodule, file_label, scopes)
+
+
+def completion_bound_syms(module: FrontEndModule, file_label: str) -> list[dict[str, Any]]:
+    output: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for index, name in enumerate(module.syms):
+        source_name = module.bound_sym_source_names[index] if index < len(module.bound_sym_source_names) else None
+        completion_name = source_name or name
+        if is_generated_sym_name(name) and source_name is None:
+            continue
+        if not is_source_symbol_name(completion_name):
+            continue
+        loc = module.bound_sym_locs[index] if index < len(module.bound_sym_locs) else None
+        if loc is not None and loc_file(loc) != file_label:
+            continue
+        if completion_name in seen:
+            continue
+        seen.add(completion_name)
+        entry: dict[str, Any] = {"name": completion_name}
+        if loc is not None:
+            entry["definition"] = loc_to_completion_range(loc, completion_name)
+        output.append(entry)
+    return output
+
+
+def completion_scope_range(module: FrontEndModule, file_label: str) -> dict[str, int] | None:
+    locs = module_locs_for_file(module, file_label)
+    if not locs:
+        return None
+    start = min(locs, key=lambda loc: (loc_line(loc), loc_column(loc)))
+    end = max(locs, key=lambda loc: (loc_end_line(loc), loc_end_column(loc)))
+    return {
+        "start_lineno": max(loc_line(start) - 1, 0),
+        "start_col_no": max(loc_column(start) - 1, 0),
+        "end_lineno": max(loc_end_line(end) - 1, 0),
+        "end_col_no": max(loc_end_column(end), 0),
+    }
+
+
+def module_locs_for_file(module: FrontEndModule, file_label: str) -> list[dict[str, object]]:
+    locs: list[dict[str, object]] = []
+    module_loc = getattr(module, "source_loc", None)
+    if module_loc is not None and loc_file(module_loc) == file_label:
+        locs.append(module_loc)
+    for loc in module.bound_sym_locs:
+        if loc is not None and loc_file(loc) == file_label:
+            locs.append(loc)
+    for statement in [*module.predicate_statements, *module.target_statements]:
+        collect_statement_locs_for_file(statement, file_label, locs)
+    return locs
+
+
+def collect_statement_locs_for_file(statement: FrontEndStatement, file_label: str, locs: list[dict[str, object]]) -> None:
+    if statement.source_loc is not None and loc_file(statement.source_loc) == file_label:
+        locs.append(statement.source_loc)
+    for loc in statement.sym_locs.values():
+        if loc_file(loc) == file_label:
+            locs.append(loc)
+    for submodule in statement.sub_modules:
+        locs.extend(module_locs_for_file(submodule, file_label))
+
+
+def loc_to_completion_range(loc: dict[str, object], name: str) -> dict[str, Any]:
+    return {
+        "file": loc_file(loc),
+        "lineno": max(loc_line(loc) - 1, 0),
+        "col_start_no": max(loc_column(loc) - 1, 0),
+        "col_end_no": max(loc_end_column(loc), max(loc_column(loc) - 1, 0) + len(name)),
+        "name": name,
+        "type": "pure",
+    }
+
+
+def loc_file(loc: dict[str, object]) -> str:
+    return str(loc.get("file_path", loc.get("source", STDIN_FILE)))
+
+
+def loc_line(loc: dict[str, object]) -> int:
+    return positive_int(loc.get("line", loc.get("start_line_id")), 1)
+
+
+def loc_column(loc: dict[str, object]) -> int:
+    return positive_int(loc.get("column", loc.get("start_col_id")), 1)
+
+
+def loc_end_line(loc: dict[str, object]) -> int:
+    return positive_int(loc.get("end_line", loc.get("end_line_id")), loc_line(loc))
+
+
+def loc_end_column(loc: dict[str, object]) -> int:
+    return positive_int(loc.get("end_column", loc.get("end_col_id")), loc_column(loc))
+
+
+def positive_int(value: object, default: int) -> int:
+    return value if isinstance(value, int) and value > 0 else default
 
 
 def serialize_class_members(
