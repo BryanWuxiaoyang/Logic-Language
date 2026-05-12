@@ -1771,7 +1771,7 @@ def test_module_check_set_module_syntax_still_reports_located_errors() -> None:
     assert entry["col_start_no"] == 0
 
 
-def test_module_check_multiline_module_braces_reject_trailing_content() -> None:
+def test_module_check_multiline_module_braces_reject_invalid_opener() -> None:
     invalid_opener = "_threads = {|\n  | _thread\n  _thread ∈ _threads\n}\n"
     payload = module_check.check_module(invalid_opener, module_check.STDIN_FILE, Path("."), is_file=False)
     assert payload["summary"]["error_count"] == 1
@@ -1781,23 +1781,33 @@ def test_module_check_multiline_module_braces_reject_trailing_content() -> None:
     assert entry["lineno"] == 0
     assert entry["col_start_no"] == invalid_opener.index("{")
 
-    invalid_closer = "{\n  | _x\n  _x = _x\n} Q(_x)\n"
-    payload = module_check.check_module(invalid_closer, module_check.STDIN_FILE, Path("."), is_file=False)
-    assert payload["summary"]["error_count"] == 1
-    entry = payload["entries"][0]
-    assert entry["code"] == "invalid_multiline_module_brace"
-    assert entry["reason"].startswith("multiline module closer")
-
 
 def test_module_check_multiline_module_braces_allow_brace_only_and_inline_forms() -> None:
     for source in [
         "_threads = {\n  | _thread\n  _thread ∈ _threads\n}\n",
+        "_threads = update({\n  | _thread\n  _thread ∈ _threads\n})\n",
         "_threads = {| _thread | _thread ∈ _threads}\n",
         "∀{| _x | _x = _x}\n",
         "∀{\n  | _x\n  _x = _x\n}\n",
     ]:
         payload = module_check.check_module(source, module_check.STDIN_FILE, Path("."), is_file=False)
         assert payload["summary"]["error_count"] == 0, (source, payload)
+
+
+def test_module_check_wrapped_set_target_quantifier_block_is_not_binder_section() -> None:
+    source = """∀{
+    | _out
+    _out = min({
+        | _candidate
+        ∀
+            | _i
+            | _candidate = _i
+            _i = _candidate
+    })
+}
+"""
+    payload = module_check.check_module(source, module_check.STDIN_FILE, Path("."), is_file=False)
+    assert payload["summary"]["error_count"] == 0, payload
 
 
 def test_module_check_warning_only_bare_index_operator_symbol_exits_clean() -> None:
@@ -2941,8 +2951,9 @@ def main() -> int:
         test_module_check_set_literals_are_not_set_modules,
         test_module_check_supports_set_union_infix_with_set_literal,
         test_module_check_set_module_syntax_still_reports_located_errors,
-        test_module_check_multiline_module_braces_reject_trailing_content,
+        test_module_check_multiline_module_braces_reject_invalid_opener,
         test_module_check_multiline_module_braces_allow_brace_only_and_inline_forms,
+        test_module_check_wrapped_set_target_quantifier_block_is_not_binder_section,
         test_module_check_warning_only_bare_index_operator_symbol_exits_clean,
         test_module_check_positioned_branch_error_avoids_file_start_fallback,
         test_module_check_positioned_unsupported_coloncolon_errors,

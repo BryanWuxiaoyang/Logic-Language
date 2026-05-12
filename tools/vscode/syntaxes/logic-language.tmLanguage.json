@@ -83,7 +83,7 @@
               "name": "entity.name.function.method.logic-language"
             }
           },
-          "match": "(?<=::)\\s*([a-z][A-Za-z0-9_]*)\\s*(?=:)"
+          "match": "(?<=::)\\s*([a-z][A-Za-z0-9_']*)\\s*(?=:)"
         },
         {
           "captures": {
@@ -91,7 +91,7 @@
               "name": "entity.name.function.logic-language"
             }
           },
-          "match": "(?<!:)\\b([a-z][A-Za-z0-9_]*)\\s*(?=:)"
+          "match": "(?<!:)(?<![A-Za-z0-9_'])([a-z][A-Za-z0-9_']*)\\s*(?=:)"
         },
         {
           "captures": {
@@ -99,7 +99,7 @@
               "name": "variable.other.member.logic-language"
             }
           },
-          "match": "(?<=::)\\s*([a-z][A-Za-z0-9_]*)\\b(?!\\s*:)"
+          "match": "(?<=::)\\s*([a-z][A-Za-z0-9_']*)(?![A-Za-z0-9_'])(?!\\s*:)"
         }
       ]
     },
@@ -111,7 +111,7 @@
               "name": "variable.other.member.logic-language"
             }
           },
-          "match": "\\.\\s*([A-Za-z_][A-Za-z0-9_]*)"
+          "match": "\\.\\s*([A-Za-z_][A-Za-z0-9_']*)"
         }
       ]
     },
@@ -123,7 +123,7 @@
               "name": "entity.name.function.logic-language"
             }
           },
-          "match": "\\b([a-z][A-Za-z0-9_]*)\\s*(?=\\()"
+          "match": "(?<![A-Za-z0-9_'])([a-z][A-Za-z0-9_']*)\\s*(?=\\()"
         }
       ]
     },
@@ -151,11 +151,11 @@
       "patterns": [
         {
           "name": "entity.name.type.class.logic-language",
-          "match": "\\b[A-Z][A-Za-z0-9_]*\\b"
+          "match": "(?<![A-Za-z0-9_'])[A-Z][A-Za-z0-9_']*(?![A-Za-z0-9_'])"
         },
         {
           "name": "variable.other.local.logic-language",
-          "match": "\\b_[a-z][A-Za-z0-9_]*\\b"
+          "match": "(?<![A-Za-z0-9_'])_[a-z][A-Za-z0-9_']*(?![A-Za-z0-9_'])"
         }
       ]
     },

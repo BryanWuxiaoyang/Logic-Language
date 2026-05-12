@@ -5,6 +5,8 @@ const {
   classMethodFirstParamCompletionContext,
   completionFilterText,
   completionRankForSymbol,
+  isLiteralQuoteStart,
+  lineStateAt,
   parseBinderNames,
   parseSignatureTerms
 } = require("../src/completion_helpers");
@@ -62,6 +64,31 @@ assert.deepStrictEqual(parseBinderNames("| _id1 < _id2"), []);
 
 assert.strictEqual(completionFilterText("_unit_group", "unit_group"), "unit_group");
 assert.strictEqual(completionFilterText("_unit_group", "_unit_group"), "_unit_group");
+
+assert.strictEqual(isLiteralQuoteStart("_scheduler' = \\all", 10), false);
+assert.strictEqual(isLiteralQuoteStart("'a' = _x", 0), true);
+assert.strictEqual(isLiteralQuoteStart("\"text\"", 0), true);
+
+assert.deepStrictEqual(lineStateAt("                _scheduler' = \\all", "                _scheduler' = \\all".length), {
+  inComment: false,
+  inQuote: false
+});
+assert.deepStrictEqual(lineStateAt("                _sym'' = \\all", "                _sym'' = \\all".length), {
+  inComment: false,
+  inQuote: false
+});
+assert.deepStrictEqual(lineStateAt("                'a' = \\all", "                'a' = \\all".length), {
+  inComment: false,
+  inQuote: false
+});
+assert.deepStrictEqual(lineStateAt("                _x = \"text \\all", "                _x = \"text \\all".length), {
+  inComment: false,
+  inQuote: true
+});
+assert.deepStrictEqual(lineStateAt("                _x = _y # \\all", "                _x = _y # \\all".length), {
+  inComment: true,
+  inQuote: false
+});
 
 assert(
   completionRankForSymbol("pure", "current_bound", "unit_group") <

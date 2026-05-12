@@ -90,7 +90,6 @@ from compile_pipeline.source_utils import (
 STDIN_FILE = "__stdin__"
 QUANTIFIERS = {"∀", "∃"}
 MULTILINE_MODULE_OPENER_ERROR = "multiline module opener must end after '{'; use a following '| ...' line for premises"
-MULTILINE_MODULE_CLOSER_ERROR = "multiline module closer must be alone on its line"
 
 
 class CheckError(CompileError):
@@ -1335,43 +1334,51 @@ def image_set_element_expr(binder_section: LocatedText, origin: SourcePosition) 
 
 
 def split_multiline_sections_located(body: LocatedText) -> list[LocatedText]:
+    logical_lines = logical_lines_located(body)
+    if not logical_lines:
+        return []
+
     sections: list[LocatedText] = []
     target_lines: list[LocatedText] = []
-    section_lines: list[LocatedText] = []
-    balance = 0
-    for raw_line in split_lines_located(body):
-        line = raw_line.strip()
-        if not line.text:
+    base_indent = min(split_indent_located(line)[0] for line in logical_lines if line.text.strip())
+    index = 0
+    while index < len(logical_lines):
+        line = logical_lines[index]
+        indent, content = split_indent_located(line)
+        if not content.text:
+            index += 1
             continue
-        if section_lines:
-            section_lines.append(line)
-            balance += brace_delta(line.text)
-            if balance <= 0:
-                sections.append(join_lines_located(section_lines))
-                section_lines = []
-                balance = 0
-            continue
-        if balance == 0 and line.text.startswith("|"):
+        block, next_index = collect_indented_block_located(logical_lines, index + 1, indent)
+        if indent == base_indent and content.text.startswith("|"):
             if target_lines:
                 sections.append(join_lines_located(target_lines))
                 target_lines = []
-            section = line.slice(1).strip()
+            section = content.slice(1).strip()
             if section.text:
-                balance = brace_delta(section.text)
-                if balance > 0:
-                    section_lines = [section]
-                else:
-                    sections.append(section)
-        else:
-            target_lines.append(line)
-            balance += brace_delta(line.text)
-            if balance < 0:
-                balance = 0
-    if section_lines:
-        sections.append(join_lines_located(section_lines))
+                sections.append(build_multiline_section_term_located(section, block))
+            index = next_index
+            continue
+        target_lines.append(build_multiline_section_term_located(content, block))
+        index = next_index
     if target_lines:
         sections.append(join_lines_located(target_lines))
     return sections
+
+
+def build_multiline_section_term_located(header: LocatedText, block: list[LocatedText]) -> LocatedText:
+    header = header.strip()
+    if not block:
+        return header
+    quantifier = "∀" if header.text.startswith("@") else header.text if header.text in QUANTIFIERS else None
+    if quantifier is not None:
+        return concat_located(
+            [
+                synthetic_text(quantifier + "{\n", header.positions[0]),
+                unindent_block_located(block),
+                synthetic_text("\n}", header.positions[0]),
+            ]
+        )
+    return join_lines_located([header, *block])
 
 
 def split_terms_located(located: LocatedText) -> list[LocatedText]:
@@ -1554,16 +1561,6 @@ def validate_multiline_module_brace_layout_located(located: LocatedText) -> None
                 MULTILINE_MODULE_OPENER_ERROR,
                 position=located.positions[module_start],
                 width=2 if opener_tail.lstrip().startswith("|") else 1,
-            )
-        close_line_start = line_start_index(located.text, close)
-        close_line_end = line_end_index(located.text, close)
-        closer_prefix = located.text[close_line_start:close]
-        closer_tail = located.text[close + 1 : close_line_end]
-        if closer_prefix.strip() or closer_tail.strip():
-            raise CheckError(
-                MULTILINE_MODULE_CLOSER_ERROR,
-                position=located.positions[close],
-                width=1,
             )
         index = close + 1
 

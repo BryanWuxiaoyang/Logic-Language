@@ -6,6 +6,7 @@ const {
   classMethodFirstParamCompletionContext,
   completionFilterText,
   completionRankForSymbol,
+  lineStateAt,
   parseBinderNames,
   parseSignatureTerms
 } = require("./completion_helpers");
@@ -712,38 +713,6 @@ function activate(context) {
     const payload = await runSymbolResolver(document);
     symbolPayloads.set(key, { stateKey, payload });
     return payload;
-  }
-
-  function lineStateAt(text, character) {
-    let quote = "";
-    let escaped = false;
-
-    for (let index = 0; index < character; index += 1) {
-      const current = text[index];
-      if (quote) {
-        if (escaped) {
-          escaped = false;
-          continue;
-        }
-        if (current === "\\") {
-          escaped = true;
-          continue;
-        }
-        if (current === quote) {
-          quote = "";
-        }
-        continue;
-      }
-
-      if (current === "#") {
-        return { inComment: true, inQuote: false };
-      }
-      if (current === "\"" || current === "'") {
-        quote = current;
-      }
-    }
-
-    return { inComment: false, inQuote: quote !== "" };
   }
 
   function isLatexTokenCharacter(char) {

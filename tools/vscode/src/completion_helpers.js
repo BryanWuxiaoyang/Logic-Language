@@ -12,6 +12,53 @@ function isSymbolName(name) {
   return /^[A-Za-z_][A-Za-z0-9_']*$/.test(name || "");
 }
 
+function isLiteralQuoteStart(text, index) {
+  if (index < 0 || index >= String(text || "").length) {
+    return false;
+  }
+  const current = text[index];
+  if (current === "\"") {
+    return true;
+  }
+  if (current !== "'") {
+    return false;
+  }
+  const previous = index > 0 ? text[index - 1] : "";
+  return !(/[A-Za-z0-9]/.test(previous) || previous === "_" || previous === "$" || previous === "'");
+}
+
+function lineStateAt(text, character) {
+  let quote = "";
+  let escaped = false;
+
+  for (let index = 0; index < character; index += 1) {
+    const current = text[index];
+    if (quote) {
+      if (escaped) {
+        escaped = false;
+        continue;
+      }
+      if (current === "\\") {
+        escaped = true;
+        continue;
+      }
+      if (current === quote) {
+        quote = "";
+      }
+      continue;
+    }
+
+    if (current === "#") {
+      return { inComment: true, inQuote: false };
+    }
+    if (isLiteralQuoteStart(text, index)) {
+      quote = current;
+    }
+  }
+
+  return { inComment: false, inQuote: quote !== "" };
+}
+
 function isCapitalHeadPrefix(prefix) {
   return /^[A-Z]/.test(prefix || "");
 }
@@ -156,6 +203,8 @@ module.exports = {
   completionFilterText,
   completionRankForSymbol,
   isClassName,
+  isLiteralQuoteStart,
+  lineStateAt,
   parseBinderNames,
   parseSignatureTerms
 };
