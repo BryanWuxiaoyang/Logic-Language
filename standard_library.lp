@@ -14,6 +14,8 @@ Symbol
 Sym
 Sym = Symbol
 
+Symbol ~ null
+
 Bool
 Bool ~ true
 Bool ~ false
@@ -74,6 +76,8 @@ List
         _list2.size = (_list.size + _list1.size)
         ∀{| _id | 0 ≤ _id < _list.size | _list2[_id] = _list[_id]}
         ∀{| _id | 0 ≤ _id < _list1.size | _list2[_list.size + _id] = _list1[_id]}
+    ::back: (_list) => _sym
+        _sym = _list[_list.size - 1]
 List = Tuple
 
 [:]: (_val1, _val2) => _list
