@@ -2094,7 +2094,7 @@ def parse_tuple_or_list_items_located(located: LocatedText) -> list[LocatedText]
     if not inner.text:
         return [] if text[0] == "(" else None
     items = [part.strip() for part in split_top_level_located(inner, ",") if part.text.strip()]
-    if len(items) <= 1 and "," not in inner.text:
+    if text[0] == "(" and len(items) <= 1 and "," not in inner.text:
         return None
     return items
 

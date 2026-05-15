@@ -107,7 +107,7 @@ class AstLowerer:
             premise_bindings.extend(bindings)
             for node in nodes:
                 if isinstance(node, Binding_stmt):
-                    raise CompileError("target_proposition_stmts cannot contain Binding_stmt")
+                    raise self.located_error("target_proposition_stmts cannot contain Binding_stmt", statement)
                 target_pss.append(node)
 
         generated_premise_pss = self.generated_premise_stack.pop()
@@ -173,7 +173,7 @@ class AstLowerer:
                 target_section=target_section,
                 suppress_generated_classifiers=suppress_generated_classifiers,
             )
-        raise CompileError("back_end_lower_object requires typed expression or typed marker for every statement")
+        raise self.located_error("back_end_lower_object requires typed expression or typed marker for every statement", statement)
 
     def lower_typed_statement(
         self,
@@ -225,7 +225,7 @@ class AstLowerer:
                     rhs_sym = self.ensure_sym(rhs_expr, bindings, preferred=preferred_expr_node_name(rhs))
                     return bindings, [func_stmt("=", [sym_node(lhs.sym.name, lhs_loc), rhs_sym], stmt_loc)]
                 return bindings, [binding_stmt(lhs.sym.name, rhs_expr, stmt_loc, dst_loc=lhs_loc)]
-            raise CompileError(f"unsupported assignment RHS: {rhs.kind}")
+            raise self.located_error(f"unsupported assignment RHS: {rhs.kind}", statement, rhs)
         bindings = []
         lhs_sym = self.ensure_sym(self.expr_node_to_ast(lhs, statement, bindings), bindings)
         rhs_sym = self.ensure_sym(self.expr_node_to_ast(rhs, statement, bindings), bindings)
@@ -265,7 +265,7 @@ class AstLowerer:
             else:
                 bindings.append(binding_stmt(lhs.name, index_call, self.statement_loc(statement), dst_loc=lhs.loc))
         if not lhs_items:
-            raise CompileError("empty tuple/list assignment left-hand side")
+            raise self.located_error("empty tuple/list assignment left-hand side", statement)
         return bindings, target_nodes
 
     def expr_node_to_ast(self, expr: ExprNode, statement: Statement, bindings: list[AstNode]) -> AstNode:
@@ -297,8 +297,14 @@ class AstLowerer:
                 call_loc=loc_for_sym_node(expr.call_sym, loc),
             )
         if isinstance(expr, Empty_expr):
-            raise CompileError("empty statement")
-        raise CompileError(f"unsupported expression: {expr.kind}")
+            raise self.located_error("empty statement", statement, expr)
+        raise self.located_error(f"unsupported expression: {expr.kind}", statement, expr)
+
+    def located_error(self, message: str, statement: Statement | None = None, expr: ExprNode | None = None) -> CompileError:
+        loc = expr_loc_json(expr) if expr is not None else None
+        if loc is None and statement is not None:
+            loc = self.statement_loc(statement)
+        return CompileError(message, source_loc=loc or self.loc)
 
     def ensure_sym(
         self,

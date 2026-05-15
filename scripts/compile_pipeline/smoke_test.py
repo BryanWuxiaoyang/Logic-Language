@@ -255,6 +255,7 @@ def test_literals() -> None:
         ("∀{| _x | _x = 'a'}", "Char_literal_stmt"),
         ("∀{| _x | _x = 1}", "Value_literal_stmt"),
         ("∀{| _x, _a, _b | _x = (_a, _b)}", "Tuple_literal_stmt"),
+        ("∀{| _x, _a | _x = [_a]}", "Tuple_literal_stmt"),
         ("∀{| _x, _a, _b | _x = {_a, _b}}", "Set_literal_stmt"),
         ("∀{| _x | _x = {}}", "Set_literal_stmt"),
         ("∀{| _x | _x = [,]}", "Tuple_literal_stmt"),
@@ -262,9 +263,10 @@ def test_literals() -> None:
         ast = compile_text(text)
         assert any(node.get("kind") == kind for node in all_nodes(ast)), (text, kind)
     assert any(node.get("kind") == "Tuple_literal_stmt" and node.get("item_stmts") == [] for node in all_nodes(compile_text("_x = [,]")))
+    assert any(node.get("kind") == "Tuple_literal_stmt" and len(node.get("item_stmts", [])) == 1 for node in all_nodes(compile_text("_x = [_a]")))
     assert any(node.get("kind") == "Set_literal_stmt" and node.get("item_stmts") == [] for node in all_nodes(compile_text("_x = {}")))
     assert any(node.get("kind") == "Sym" and node.get("name") == "[]" for node in all_nodes(compile_text("_x = []")))
-    for text in ["P({})", "P({1, 2})", "P([,])"]:
+    for text in ["P({})", "P({1, 2})", "P([,])", "P([_a])"]:
         compile_text(text)
 
 
@@ -1775,7 +1777,7 @@ def test_module_check_multiline_module_braces_reject_invalid_opener() -> None:
     invalid_opener = "_threads = {|\n  | _thread\n  _thread ∈ _threads\n}\n"
     payload = module_check.check_module(invalid_opener, module_check.STDIN_FILE, Path("."), is_file=False)
     assert payload["summary"]["error_count"] == 1
-    entry = payload["entries"][0]
+    entry = next(entry for entry in payload["entries"] if entry["type"] == "error")
     assert entry["code"] == "invalid_multiline_module_brace"
     assert entry["reason"].startswith("multiline module opener")
     assert entry["lineno"] == 0
@@ -1995,7 +1997,7 @@ def test_module_check_semantic_warning_continues_to_compile() -> None:
     assert payload["summary"] == {"error_count": 0, "warning_count": 1}
 
 
-def test_module_check_compile_error_uses_entry_file_start() -> None:
+def test_module_check_compile_error_fallback_uses_first_source_line() -> None:
     original_run_compile_pipeline = module_check.run_compile_pipeline
 
     def compile_fails(*args, **kwargs):
@@ -2016,6 +2018,30 @@ def test_module_check_compile_error_uses_entry_file_start() -> None:
     assert entry["code"] == "compile_error"
 
 
+def test_module_check_compile_error_uses_structured_source_location() -> None:
+    original_run_compile_pipeline = module_check.run_compile_pipeline
+
+    def compile_fails(*args, **kwargs):
+        raise CompileError(
+            "lowering failed",
+            source_loc={"source": "/tmp/source.lp", "line": 2, "column": 5, "end_line": 2, "end_column": 9},
+        )
+
+    module_check.run_compile_pipeline = compile_fails
+    try:
+        payload = module_check.check_module("A\nB\n", "/tmp/input.lp", Path("."), is_file=False)
+    finally:
+        module_check.run_compile_pipeline = original_run_compile_pipeline
+
+    entry = next(entry for entry in payload["entries"] if entry["stage"] == "compile")
+    assert payload["summary"]["error_count"] == 1
+    assert entry["file"] == "/tmp/source.lp"
+    assert entry["lineno"] == 1
+    assert entry["col_start_no"] == 4
+    assert entry["col_end_no"] == 8
+    assert entry["reason"] == "lowering failed"
+
+
 def test_module_check_compile_error_uses_source_fragment_location() -> None:
     payload = module_check.check_module("x = a ??? b\n", "/tmp/input.lp", Path("."), is_file=False)
 
@@ -2025,8 +2051,23 @@ def test_module_check_compile_error_uses_source_fragment_location() -> None:
     assert entry["file"] == "/tmp/input.lp"
     assert entry["reason"] == "unsupported expression: raw"
     assert entry["lineno"] == 0
-    assert entry["col_start_no"] == 0
-    assert entry["col_end_no"] == 1
+    assert entry["col_start_no"] == 4
+    assert entry["col_end_no"] == 11
+    assert entry["code"] == "compile_error"
+
+
+def test_module_check_compile_error_inside_decl_body_uses_body_line() -> None:
+    source = "f: _x => _y\n    | _z = _x + (bad ??? raw)\n    _y = _z\n"
+    payload = module_check.check_module(source, "/tmp/input.lp", Path("."), is_file=False)
+
+    assert payload["summary"]["error_count"] == 1
+    entry = payload["entries"][0]
+    assert entry["stage"] == "compile"
+    assert entry["file"] == "/tmp/input.lp"
+    assert entry["reason"] == "unsupported expression: raw"
+    assert entry["lineno"] == 1
+    assert entry["col_start_no"] == 17
+    assert entry["col_end_no"] == 28
     assert entry["code"] == "compile_error"
 
 
@@ -2964,8 +3005,10 @@ def main() -> int:
         test_module_check_undeclared_class_member_owner_is_semantic_error,
         test_module_check_semantic_error_stops_before_compile,
         test_module_check_semantic_warning_continues_to_compile,
-        test_module_check_compile_error_uses_entry_file_start,
+        test_module_check_compile_error_fallback_uses_first_source_line,
+        test_module_check_compile_error_uses_structured_source_location,
         test_module_check_compile_error_uses_source_fragment_location,
+        test_module_check_compile_error_inside_decl_body_uses_body_line,
         test_module_check_final_ast_diagnostics_keep_location_and_code,
         test_compile_rejects_bare_sym_target_final_ast,
         test_compile_allows_proposition_targets,
