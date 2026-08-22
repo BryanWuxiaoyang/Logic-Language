@@ -2043,14 +2043,14 @@ def parse_expr_located(located: LocatedText) -> ExprNode:
     grouped = strip_outer_grouping_parens_located(located)
     if grouped is not None:
         return parse_expr_located(grouped)
-    member = parse_member_call_located(located)
-    if member is not None:
-        name, call_loc, args = member
-        return Call_expr(loc_from_located(located), call_sym=SymNode(name, call_loc), args=[parse_expr_located(arg) for arg in args])
     infix = parse_infix_located(located)
     if infix is not None:
         op, op_loc, lhs, rhs = infix
         return Call_expr(loc_from_located(located), call_sym=SymNode(op, op_loc), args=[parse_expr_located(lhs), parse_expr_located(rhs)])
+    member = parse_member_call_located(located)
+    if member is not None:
+        name, call_loc, args = member
+        return Call_expr(loc_from_located(located), call_sym=SymNode(name, call_loc), args=[parse_expr_located(arg) for arg in args])
     prefix = parse_prefix_unary_located(located)
     if prefix is not None:
         op, op_loc, operand = prefix
