@@ -56,6 +56,10 @@ assert.deepStrictEqual(parseSignatureTerms("(_shader_env, _unit_group)"), ["_sha
 assert.deepStrictEqual(parseSignatureTerms("_shader_env"), ["_shader_env"]);
 assert.deepStrictEqual(parseSignatureTerms("(_shader_env, _unit_group) => _unused"), []);
 assert.deepStrictEqual(parseBinderNames("| _raw_coord = _ldibk_instr.raw_coord(_gpu_mem, _thread)"), ["_raw_coord"]);
+assert.deepStrictEqual(parseBinderNames("| (_val_vector, _gate_vector) = _glu.split(_x_vector)"), [
+  "_val_vector",
+  "_gate_vector"
+]);
 assert.deepStrictEqual(parseBinderNames("| _id1, _id2"), ["_id1", "_id2"]);
 assert.deepStrictEqual(parseBinderNames("| _wave ∈ _waves"), ["_wave"]);
 assert.deepStrictEqual(parseBinderNames("| _wave \\in _waves"), ["_wave"]);

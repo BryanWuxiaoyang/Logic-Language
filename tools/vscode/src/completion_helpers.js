@@ -93,7 +93,7 @@ function parseBinderNames(stripped) {
   const equalsIndex = body.indexOf("=");
   if (equalsIndex >= 0) {
     const lhs = body.slice(0, equalsIndex).trim();
-    return isSymbolName(lhs) ? [lhs] : [];
+    return parseSignatureTerms(lhs);
   }
   const membershipMatch = body.match(/^([A-Za-z_][A-Za-z0-9_']*)\s*(?:∈|\\in\b)/);
   if (membershipMatch) {
