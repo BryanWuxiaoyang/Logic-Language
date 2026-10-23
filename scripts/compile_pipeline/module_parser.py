@@ -1291,7 +1291,8 @@ def image_set_exists_body(
 
 
 def normalize_image_set_source_body(source: LocatedText, origin: SourcePosition) -> LocatedText:
-    source = source.strip()
+    source_lines = logical_lines_located(source)
+    source = unindent_block_located(source_lines).strip() if len(source_lines) > 1 else source.strip()
     sections = split_sections_located(source)
     if sections and parse_binder_list_located(sections[0]) is not None and len(sections) > 1:
         return source

@@ -1556,6 +1556,21 @@ def test_image_set_maps_source_set_members_not_premise_implication() -> None:
     assert "^tmptuple0 ∈ ^logic_language_out1" in multi_source
     assert "^tmpfunc_stmt1 = ^logic_language_out0" in multi_source
 
+    multiline_explicit_source = """
+P_list
+List ~ P_list
+P_list::is_valid: (_p_list) => _bool
+    _bool = true
+P_list::f: (_p_list) => _size
+    _size = max({
+        | _sub_p_list
+        _sub_p_list ∈ _p_list.sublists
+        _sub_p_list.is_valid
+        => _sub_p_list.size})
+"""
+    multiline_explicit_ast = compile_text(multiline_explicit_source)
+    assert multiline_explicit_ast["target_proposition_stmts"]
+
 
 def test_disassembled_final_ast_preserves_target_placement() -> None:
     ast = compile_text("Val ~ min_val\n∀{| _val1 | _val1 ≥ min_val}")
