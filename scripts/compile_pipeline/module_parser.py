@@ -2150,7 +2150,7 @@ INFIX_OPERATORS: tuple[tuple[str, str], ...] = (
     (">=", ">="), ("≥", ">="), ("<=", "<="), ("≤", "<="), ("∉", "∉"), ("∈", "∈"),
     ("⊄", "⊄"), ("⊂", "⊂"), ("⊈", "⊈"), ("⊆", "⊆"), ("=", "="), (">", ">"),
     ("<", "<"), ("~", "~"), ("∪", "∪"), ("+", "+"), ("-", "-"), ("∩", "∩"),
-    ("*", "*"), ("/", "/"),
+    ("*", "*"), ("/", "/"), ("%", "%"),
 )
 
 
@@ -2290,7 +2290,7 @@ def is_operator_match(text: str, index: int, raw: str) -> bool:
     if raw in {"+", "-", "*"}:
         previous_token = previous_nonspace_char(text, index)
         next_token = next_nonspace_char(text, next_index)
-        return bool(previous_token and next_token) and previous_token not in "([{!+-*/=<>&|∧∨∪∩~"
+        return bool(previous_token and next_token) and previous_token not in "([{!+-*/%=<>&|∧∨∪∩~"
     if raw == "=":
         return previous not in {"<", ">", "!", "="} and nxt not in {">", "="}
     if raw in {"<", ">"}:

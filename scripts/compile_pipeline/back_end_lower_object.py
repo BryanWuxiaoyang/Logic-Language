@@ -541,6 +541,7 @@ def sanitize_temp_name(value: str) -> str:
         "-": "sub",
         "*": "mul",
         "/": "div",
+        "%": "mod",
         "!": "not",
         "&&": "and",
         "||": "or",

@@ -378,6 +378,39 @@ def test_chained_and_precedence_infix_expressions() -> None:
     assert "^tmpdiv1 = ^tmpdiv0 / ^_c" in division_source
 
 
+def test_modulo_operator() -> None:
+    # Spaced and compact syntax must both produce a binary call, not a raw symbol.
+    for expression in ("_a % _b", "_a%_b", "-_a % -_b", "_a % (_b + _c)"):
+        ast = compile_text("∀{| _x, _a, _b, _c | _x = " + expression + "}")
+        modulo_calls = calls(ast, "%")
+        assert len(modulo_calls) == 1
+        assert len(modulo_calls[0]["arg_sym_list"]) == 2
+        source = translate_ast_to_source(ast)
+        assert " % " in source
+        assert calls(compile_text(source), "%")
+        assert stage2_text(source) == source
+
+    # Preserve the language's existing left-to-right arithmetic grouping.
+    for expression, first, second in (
+        ("_a % _b % _c", "^tmpmod0 = ^_a % ^_b", "^tmpmod1 = ^tmpmod0 % ^_c"),
+        ("_a % _b * _c", "^tmpmod0 = ^_a % ^_b", "^tmpmul1 = ^tmpmod0 * ^_c"),
+        ("_a / _b % _c", "^tmpdiv0 = ^_a / ^_b", "^tmpmod1 = ^tmpdiv0 % ^_c"),
+        ("_a + _b % _c", "^tmpadd0 = ^_a + ^_b", "^tmpmod1 = ^tmpadd0 % ^_c"),
+    ):
+        source = stage2_text("∀{| _x, _a, _b, _c | _x = " + expression + "}")
+        assert first in source
+        assert second in source
+
+    # Operator declarations and explicit function calls remain ordinary symbols.
+    declaration = "%: (_val1, _val2) => _val\n    _val = %(_val1, _val2)"
+    assert calls(compile_text(stage2_text(declaration)), "%")
+    payload = resolve_sym_type.resolve_text(declaration + "\n_x = _a % _b")
+    assert resolved_symbol(payload, "%")["type"] == "func"
+    occurrences = resolved_occurrences(payload, "%")
+    assert any(entry["lineno"] == 2 for entry in occurrences)
+    assert all(not entry["colorable"] for entry in occurrences)
+
+
 def test_boolean_and_ordered_comparison_precedence() -> None:
     land_source = translate_ast_to_source(compile_text("∀{| _bool, _a, _b, _c | _bool = _a \\land _b \\lor _c}"))
     assert "^tmpland0 = ∧(^_a, ^_b)" in land_source
@@ -2887,6 +2920,7 @@ def main() -> int:
         test_missing_infix_support_round_trip,
         test_nested_equality_expressions,
         test_chained_and_precedence_infix_expressions,
+        test_modulo_operator,
         test_boolean_and_ordered_comparison_precedence,
         test_prefix_unary_expressions,
         test_lifted_resolver_equality_expression_compiles,
