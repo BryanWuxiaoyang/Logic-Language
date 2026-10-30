@@ -404,6 +404,9 @@ The AST is intended as a precise intermediate logic form that can support human-
 - introduce `unary-operator` as `sym`, such as `M("-S") = M("-(S)")`
 
 - introduce `binary-operator` as `sym`, such as `M("S1 + S2") = M("+(S1, S2)")`
+    - `%` is supported as a binary numeric operator: `M("a % b") = M("%(a, b)")`.
+    - Arithmetic infix expressions currently group left to right, including `%`,
+      `*`, `/`, `+`, and `-`; use parentheses for the intended grouping.
 
 - introduce `implicit-sym-declaration` rule
     - selected binary-operator `PSs` implicitly add `syms` to current `SMT`/`QMT`.
