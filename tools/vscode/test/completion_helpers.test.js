@@ -62,6 +62,11 @@ assert.deepStrictEqual(parseBinderNames("| (_val_vector, _gate_vector) = _glu.sp
 ]);
 assert.deepStrictEqual(parseBinderNames("| _id1, _id2"), ["_id1", "_id2"]);
 assert.deepStrictEqual(parseBinderNames("| _wave ∈ _waves"), ["_wave"]);
+assert.deepStrictEqual(parseBinderNames("| _id ∈ [0: _output_list.size]"), ["_id"]);
+assert.deepStrictEqual(parseBinderNames("| _id \\in [0: _output_list.size]"), ["_id"]);
+assert.deepStrictEqual(parseBinderNames("| _slice = _list[0: _size]"), ["_slice"]);
+assert.deepStrictEqual(parseBinderNames("| func: (_input) => _output"), []);
+assert.deepStrictEqual(parseBinderNames("| Class::field"), []);
 assert.deepStrictEqual(parseBinderNames("| _wave \\in _waves"), ["_wave"]);
 assert.deepStrictEqual(parseBinderNames("| _instr => _stream_processor.waiting_waves(_instr)"), ["_instr"]);
 assert.deepStrictEqual(parseBinderNames("| _id1 < _id2"), []);

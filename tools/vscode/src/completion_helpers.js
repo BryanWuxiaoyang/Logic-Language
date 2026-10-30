@@ -83,7 +83,8 @@ function parseSignatureTerms(text) {
 }
 
 function parseBinderNames(stripped) {
-  if (!String(stripped || "").startsWith("|") || String(stripped || "").startsWith("|-") || String(stripped || "").includes(":")) {
+  // A colon can belong to a range on the RHS, not just a declaration header.
+  if (!String(stripped || "").startsWith("|") || String(stripped || "").startsWith("|-")) {
     return [];
   }
   const body = String(stripped || "").slice(1).trim();
