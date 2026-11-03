@@ -133,14 +133,14 @@ sym = {| ^sym | ^sym >= 0 => ^sym + 1}
   | ^tmp03 = {
     | ^logic_language_out0
     ∃{
-      | ^sym, ^tmp00, ^tmp11, ^tmpadd2
+      | ^sym, ^tmp00, ^tmp11, ^tmpfunc_stmt2
       | ^tmp00 = 0
       | ^tmp11 = 1
-      | ^tmpadd2 = ^sym + ^tmp11
-      | ^sym ≥ ^tmp00
+      | ^tmpfunc_stmt2 = ^sym + ^tmp11
       Value ~ ^tmp00
       Value ~ ^tmp11
-      ^logic_language_out0 = ^tmpadd2
+      ^sym ≥ ^tmp00
+      ^tmpfunc_stmt2 = ^logic_language_out0
     }
   }
   sym = ^tmp03

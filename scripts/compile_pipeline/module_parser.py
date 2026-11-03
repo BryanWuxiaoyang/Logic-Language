@@ -141,6 +141,8 @@ class CheckModule:
     premise_binding_statements: list[CheckStatement] = field(default_factory=list)
     declaration: CheckDeclaration | None = None
     suppress_inferred_syms: bool = False
+    # Diagnostic-only source metadata; never participates in compiler lowering.
+    explicit_set_premises: list[LocatedText] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -988,24 +990,39 @@ class LocatedModuleParser:
             premise_binding_statements=premise_binding_statements,
             declaration=declaration,
             suppress_inferred_syms=suppress_inferred_syms,
+            explicit_set_premises=predicate_texts if module_type == "set" else [],
         )
 
     def parse_image_set(self, body: LocatedText) -> CheckModule:
         source, target = split_top_level_once_located(body, "=>")
+        # Capture explicit bars before normalization reclassifies the last source
+        # section as a target or introduces auxiliary sets and bindings.
+        explicit_premises = []
+        for section in split_sections_located(source):
+            if parse_binder_list_located(section):
+                continue
+            start = source.positions.index(section.positions[0])
+            if source.text[:start].rstrip().endswith("|"):
+                explicit_premises.extend(split_terms_located(section))
         out_origin = target.strip().positions[0] if target.strip() else source.strip().positions[0]
         source = normalize_image_set_source_body(source, out_origin)
         out = Binder(self.fresh_sym(source.text + target.text), out_origin)
-        source_set = self.fresh_sym(source.text + target.text + out.text)
         self.build_module("set", None, source)
-        source_set_binding = image_set_source_set_binding(source, source_set, out_origin)
-        exists_body = image_set_exists_body(source, target, out.text, source_set, out_origin)
+        exists_body = image_set_exists_body(source, target, out.text, out_origin)
         submodule = self.build_module("quantifier", "∃", exists_body)
+        if any(parse_binder_list_located(section) is None
+               for section in split_sections_located(source)[:-1]):
+            # This generated implication references the existential's variables;
+            # they are not fresh binders inferred from its premise expressions.
+            predicate_module = submodule.target_statements[0].sub_modules[0]
+            predicate_module.binders = []
+            predicate_module.suppress_inferred_syms = True
         return CheckModule(
             type="set",
             binders=[out],
             predicate_statements=[],
-            premise_binding_statements=[self.compile_statement(source_set_binding)],
             target_statements=[CheckStatement("$module0", [submodule])],
+            explicit_set_premises=explicit_premises,
         )
 
     def compile_statement(self, located: LocatedText) -> CheckStatement:
@@ -1267,27 +1284,41 @@ def split_sections_located(body: LocatedText) -> list[LocatedText]:
     return [section.strip() for section in sections if section.text.strip()]
 
 
-def image_set_source_set_binding(source: LocatedText, source_set: str, origin: SourcePosition) -> LocatedText:
-    return concat_located([
-        synthetic_text(source_set + " = {", origin),
-        source,
-        synthetic_text("}", origin),
-    ]).strip()
-
-
 def image_set_exists_body(
     source: LocatedText,
     target: LocatedText,
     out: str,
-    source_set: str,
     origin: SourcePosition,
 ) -> LocatedText:
-    binder_section = image_set_binder_section(source)
-    binder_line = concat_located([synthetic_text("| ", first_position(binder_section) or origin), binder_section])
-    element = image_set_element_expr(binder_section, origin)
-    membership = concat_located([element, synthetic_text(" ∈ " + source_set, origin)])
+    # Inline the source predicate under the existential. An auxiliary source-set
+    # binding at the outer set scope would become another element coordinate.
+    sections = split_sections_located(source)
+    binders: list[Binder] = []
+    premises: list[LocatedText] = []
+    for section in sections[:-1]:
+        candidates = parse_binder_list_located(section)
+        if candidates:
+            binders.extend(candidates)
+        else:
+            premises.append(section)
+    binder_section = binder_section_from_binders(binders, origin)
+    binder_line = concat_located([synthetic_text("| ", origin), binder_section])
+    source_target = sections[-1]
+    if premises:
+        # Preserve PS -> TS as a target predicate, rather than making the
+        # existential itself an implication. With no premises, TS is conjoined.
+        predicate = concat_located([
+            synthetic_text("∀{\n", origin),
+            join_lines_located([
+                *[concat_located([synthetic_text("| ", origin), p]) for p in premises],
+                source_target,
+            ]),
+            synthetic_text("\n}", origin),
+        ])
+    else:
+        predicate = source_target
     equality = concat_located([target.strip(), synthetic_text(" = " + out, origin)])
-    return join_lines_located([binder_line, membership, equality])
+    return join_lines_located([binder_line, predicate, equality])
 
 
 def normalize_image_set_source_body(source: LocatedText, origin: SourcePosition) -> LocatedText:
@@ -1304,7 +1335,8 @@ def normalize_image_set_source_body(source: LocatedText, origin: SourcePosition)
             tautology = concat_located([element, synthetic_text(" = ", origin), element])
             return join_lines_located([concat_located([synthetic_text("| ", first_position(binder_section) or origin), binder_section]), tautology])
     inference_source = sections[0] if len(sections) == 1 else source
-    inferred = infer_binders(split_terms_located(inference_source))
+    inferred = infer_binders([term for section in split_sections_located(inference_source)
+                              for term in split_terms_located(section)])
     if inferred:
         binder_section = binder_section_from_binders(inferred, origin)
         return join_lines_located([concat_located([synthetic_text("| ", first_position(binder_section) or origin), binder_section]), inference_source])
@@ -1318,13 +1350,6 @@ def binder_section_from_binders(binders: list[Binder], origin: SourcePosition) -
             parts.append(synthetic_text(", ", origin))
         parts.append(synthetic_text(binder.text, binder.position))
     return concat_located(parts).strip()
-
-
-def image_set_binder_section(source: LocatedText) -> LocatedText:
-    sections = split_sections_located(source)
-    if not sections:
-        return source.strip()
-    return sections[0].strip()
 
 
 def image_set_element_expr(binder_section: LocatedText, origin: SourcePosition) -> LocatedText:
@@ -1884,19 +1909,15 @@ class SourceStructureParser:
         out_origin = target.strip().positions[0] if target.strip() else source.strip().positions[0]
         source = normalize_image_set_source_body(source, out_origin)
         out = self.fresh_sym(source.text + target.text)
-        source_set = self.fresh_sym(source.text + target.text + out)
         self.parse_section_body("set", None, source)
-        source_set_binding = image_set_source_set_binding(source, source_set, out_origin)
-        source_set_statement = parse_source_statement(source_set_binding, premise=True)
-        exists_body = image_set_exists_body(source, target, out, source_set, out_origin)
+        exists_body = image_set_exists_body(source, target, out, out_origin)
         submodule = self.parse_section_body("quantifier", "∃", exists_body)
         return SourceModule(
             type="set",
             source_loc=source_loc_from_located(body),
             bound_syms=[SymNode(out, loc_from_position(out_origin, len(out)), generated=True, source_name=out.removeprefix(GENERATED_SYM_PREFIX))],
-            premise_proposition_stmts=[source_set_statement],
             target_proposition_stmts=[SourceStatement(loc_from_position(out_origin, len(out)), sub_modules=[submodule])],
-            children=[*source_set_statement.sub_modules, submodule],
+            children=[submodule],
         )
 
     def is_image_set_body(self, body: str) -> bool:

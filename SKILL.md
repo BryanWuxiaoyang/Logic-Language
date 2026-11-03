@@ -529,17 +529,19 @@ The AST is intended as a precise intermediate logic form that can support human-
         "
         {
             | out
-            | source_set = {| syms | PSs | TSs}
             ∃{
                 | syms
-                syms ∈ source_set
+                ∀{| PSs | TSs}
                 FS = out
             }
         }
         "
         )
-        where `out` and `source_set` are fresh `sym`s.
-    - if `syms` contains multiple syms, `syms ∈ source_set` uses the tuple element represented by existing `set-module-text` semantics.
+        where `out` is fresh. The source predicate keeps its implication
+        semantics; when PSs are empty, TSs are conjoined directly with `FS = out`.
+    - Only `out` is bound by the outer set, even for multiple source variables
+      or a tuple-valued FS. All source variables and generated auxiliaries stay
+      inside the existential; they must not become output coordinates.
     - shorthand source forms such as `{| sym ∈ set => FS}` and `{| sym => FS}` are first normalized to an explicit source set before this rewrite.
 
     - `=>` is part of surface `module-text` only. After rewrite, `image-set-text` is represented by ordinary `set-module-text`.
@@ -758,6 +760,14 @@ The AST is intended as a precise intermediate logic form that can support human-
     `null` does not imply any output class predicate such as `out_c~null`.
 
 ## Diagnostics
+
+- `set_stmt_premise` warns on each explicit source premise in a set-stmt,
+  including local value bindings and premises before an image-set's `=>`.
+  Pure binders, targets, and compiler-generated premises are excluded.
+  Nested sets are checked independently, with one warning per source statement.
+  Set premises use implication (`PSs -> TSs`): a false premise makes the
+  predicate true. Put filtering conditions in the target conjunction when that
+  is the intended meaning. The warning does not rewrite or reject the source.
 - `syntax_check` inputs `module-text` or `module-file` and returns syntax warnings/errors.
     - tool: `scripts/syntax_check.py`
 - `semantic_check` inputs `module-text` or `module-file` and returns semantic warnings/errors.
@@ -837,6 +847,7 @@ The AST is intended as a precise intermediate logic form that can support human-
     - path: `scripts/compile_pipeline/smoke_test.py`
     - it must pass before compiler behavior is considered valid.
 - `standard_library.lp` is part of compiler validation.
-    - `module_check.py --file standard_library.lp` must return:
-        `{"error_count": 0, "warning_count": 0}`
-    - this means the standard library must pass syntax, semantic, compile, and final-AST checks with no diagnostics.
+    - `module_check.py --file standard_library.lp` must return zero errors.
+    - Explicit set premises in the standard library receive the same
+      `set_stmt_premise` warnings as user modules; do not suppress them to make
+      the warning count zero. Other diagnostics require investigation.

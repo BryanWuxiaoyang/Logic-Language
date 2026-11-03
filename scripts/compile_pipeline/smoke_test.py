@@ -1283,6 +1283,16 @@ def test_semantic_warning_for_bare_index_operator_symbol() -> None:
         assert any(entry["code"] == "bare_index_operator_symbol" and entry["type"] == "warning" for entry in diagnostics), text
 
 
+def test_semantic_set_premise_warnings() -> None:
+    source = "{| _x | _x ∈ xs | _v = f(_x) => _v}"
+    diagnostics = collect_semantic_diagnostics_from_text(source)
+    warnings = [entry for entry in diagnostics if entry["code"] == "set_stmt_premise"]
+    assert len(warnings) == 2
+    assert all(entry["type"] == "warning" for entry in warnings)
+    diagnostics = collect_semantic_diagnostics_from_text("{| _x => f(_x)}")
+    assert not any(entry["code"] == "set_stmt_premise" for entry in diagnostics)
+
+
 def test_semantic_bare_index_operator_symbol_exempts_definitions() -> None:
     for text in [
         "List\nList::[]: (list, id) => sym",
@@ -1565,44 +1575,45 @@ def test_target_module_assignment_normalized() -> None:
 def test_multiline_binding_rhs_disassembly_is_indented() -> None:
     text = "sym = {| ^sym | ^sym >= 0 => ^sym + 1}"
     first_source = translate_ast_to_source(compile_text(text))
-    second_source = translate_ast_to_source(compile_text(first_source))
-    assert "\n  | ^tmp03 = {\n    | ^logic_language_out0, ^logic_language_out1\n" in first_source
-    assert "\n    | ^logic_language_out1 = {\n      | ^sym, ^tmp00\n" in first_source
-    assert "\n    ∃{\n      | ^sym, ^tmp11, ^tmpfunc_stmt2\n" in first_source
-    assert "\n      ^sym ∈ ^logic_language_out1\n      ^tmpfunc_stmt2 = ^logic_language_out0\n" in first_source
-    assert "\n    }\n  }\n  sym = ^tmp03\n" in first_source
-    assert "\n}\n  sym = ^tmp03\n" not in first_source
-    assert second_source == first_source
+    assert "| ^logic_language_out0\n    ∃{" in first_source
+    assert "logic_language_out1" not in first_source
+    assert "\n  sym = " in first_source
+    assert translate_ast_to_source(compile_text(first_source)) == first_source
 
 
 def test_image_set_maps_source_set_members_not_premise_implication() -> None:
-    single_source = translate_ast_to_source(compile_text("result = {| _x | P(_x) => F(_x)}"))
-    assert "^logic_language_out1 = {\n      | ^_x" in single_source
-    assert single_source.count("P(^_x)") == 1
-    assert "^_x ∈ ^logic_language_out1" in single_source
-    assert "^tmpfunc_stmt0 = ^logic_language_out0" in single_source
-    assert "P(^_x)" not in single_source.split("∃{", 1)[1]
+    examples = [
+        "{| _x | P(_x) => F(_x)}",
+        "{| _x, _y | P(_x, _y) => (F(_x), G(_y))}",
+        "{| _x ∈ xs => F(_x)}",
+        "{| _x | P(_x) | Q(_x) => F(_x)}",
+        "{| _x | _x > 0 | Q(_x) => F(_x)}",
+        "{\n    | _x\n    _x ∈ xs\n    _x > 0\n    => F(_x)\n}",
+    ]
+    for text in examples:
+        ast = compile_text(text)
+        assert ast["kind"] == "Set_stmt"
+        assert len(ast["bound_syms"]) == 1, text
+        assert not ast["premise_binding_stmts"], text
+        assert not ast["premise_proposition_stmts"], text
+        exists = ast["target_proposition_stmts"][0]
+        assert exists["kind"] == "Quantified_stmt"
+        assert exists["quantifier_sym"]["name"] == "∃"
+        source = translate_ast_to_source(ast)
+        assert translate_ast_to_source(compile_text(source)) == source, text
 
-    multi_source = translate_ast_to_source(compile_text("result = {| _x, _y | P(_x, _y) => F(_x, _y)}"))
-    assert "^logic_language_out1 = {\n      | ^_x, ^_y" in multi_source
-    assert "^tmptuple0 = (^_x, ^_y)" in multi_source
-    assert "^tmptuple0 ∈ ^logic_language_out1" in multi_source
-    assert "^tmpfunc_stmt1 = ^logic_language_out0" in multi_source
-
-    multiline_explicit_source = """
-P_list
-List ~ P_list
-P_list::is_valid: (_p_list) => _bool
-    _bool = true
-P_list::f: (_p_list) => _size
-    _size = max({
-        | _sub_p_list
-        _sub_p_list ∈ _p_list.sublists
-        _sub_p_list.is_valid
-        => _sub_p_list.size})
-"""
-    multiline_explicit_ast = compile_text(multiline_explicit_source)
-    assert multiline_explicit_ast["target_proposition_stmts"]
+    ast = compile_text("{\n    | _x\n    _x ∈ xs\n    _x > 0\n    => F(_x)\n}")
+    exists = ast["target_proposition_stmts"][0]
+    assert top_level_calls(exists, "∈", "target_proposition_stmts")
+    assert top_level_calls(exists, ">", "target_proposition_stmts")
+    assert not top_level_calls(exists, "∈", "premise_proposition_stmts")
+    assert not top_level_calls(exists, ">", "premise_proposition_stmts")
+    ast = compile_text("{| _x | P(_x) | Q(_x) => F(_x)}")
+    exists = ast["target_proposition_stmts"][0]
+    implication = next(stmt for stmt in exists["target_proposition_stmts"] if stmt["kind"] == "Quantified_stmt")
+    assert top_level_calls(implication, "P", "premise_proposition_stmts")
+    assert top_level_calls(implication, "Q", "target_proposition_stmts")
+    assert not top_level_calls(exists, "P", "premise_proposition_stmts")
 
 
 def test_disassembled_final_ast_preserves_target_placement() -> None:
@@ -2109,7 +2120,9 @@ def test_module_check_compile_error_inside_decl_body_uses_body_line() -> None:
     payload = module_check.check_module(source, "/tmp/input.lp", Path("."), is_file=False)
 
     assert payload["summary"]["error_count"] == 1
-    entry = payload["entries"][0]
+    errors = [entry for entry in payload["entries"] if entry["type"] == "error"]
+    assert len(errors) == 1
+    entry = errors[0]
     assert entry["stage"] == "compile"
     assert entry["file"] == "/tmp/input.lp"
     assert entry["reason"] == "unsupported expression: raw"
@@ -2216,18 +2229,19 @@ def test_module_check_text_import_resolves_standard_library_from_skill_dir() -> 
     assert result.returncode in {0, 1}, result.stderr or result.stdout
     payload = json.loads(result.stdout)
     assert not any(entry["code"] == "missing_import" for entry in payload["entries"])
-    assert payload["summary"] == {"error_count": 0, "warning_count": 0}
+    assert payload["summary"] == {"error_count": 0, "warning_count": 3}
+    assert all(entry["code"] == "set_stmt_premise" for entry in payload["entries"])
 
 
-def test_module_check_standard_library_is_clean() -> None:
+def test_module_check_standard_library_has_only_set_premise_warnings() -> None:
     payload = module_check.check_module(
         (SKILL_DIR / "standard_library.lp").read_text(encoding="utf-8"),
         str((SKILL_DIR / "standard_library.lp").resolve()),
         SKILL_DIR,
         is_file=True,
     )
-    assert payload["summary"] == {"error_count": 0, "warning_count": 0}, payload
-    assert payload["entries"] == []
+    assert payload["summary"] == {"error_count": 0, "warning_count": 3}, payload
+    assert all(entry["code"] == "set_stmt_premise" for entry in payload["entries"])
 
 
 def test_module_check_stdin_import_uses_base_dir() -> None:
@@ -2992,6 +3006,7 @@ def main() -> int:
         test_nested_ancestor_conflict_is_invalid,
         test_semantic_suppresses_multiple_inheritance_candidates_warning,
         test_semantic_warning_for_bare_index_operator_symbol,
+        test_semantic_set_premise_warnings,
         test_semantic_bare_index_operator_symbol_exempts_definitions,
         test_semantic_flags_undeclared_class_member_owner,
         test_semantic_flags_function_output_in_body_premise,
@@ -3064,7 +3079,7 @@ def main() -> int:
         test_module_check_final_ast_plain_declaration_conflict_uses_input_location,
         test_module_check_final_ast_class_method_body_conflict_uses_declaration_location,
         test_module_check_text_import_resolves_standard_library_from_skill_dir,
-        test_module_check_standard_library_is_clean,
+        test_module_check_standard_library_has_only_set_premise_warnings,
         test_module_check_stdin_import_uses_base_dir,
         test_expand_module_cli_text_mode,
         test_expand_module_cli_file_mode,

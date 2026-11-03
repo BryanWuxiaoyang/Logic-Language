@@ -31,6 +31,8 @@ BARE_INDEX_OPERATOR_WARNING_CODE = "bare_index_operator_symbol"
 BARE_INDEX_OPERATOR_WARNING_REASON = "bare [] is the index operator symbol; use [,] for the empty tuple literal"
 IMPLICIT_INHERITANCE_FALLBACK_CODE = "implicit_inheritance_fallback_symbol"
 IMPLICIT_INHERITANCE_FALLBACK_REASON = "implicit inheritance did not find a declared class; symbol falls back to Symbol"
+SET_STMT_PREMISE_CODE = "set_stmt_premise"
+SET_STMT_PREMISE_REASON = "Premise in set-stmt uses implication; when the premise is false, the predicate is true."
 
 
 @dataclass(frozen=True)
@@ -89,6 +91,7 @@ class SemanticChecker:
         self.source_lines_by_file: dict[str, list[str]] = {}
         self.class_member_owners = class_member_owners or []
         self.fallback_warning_keys: set[tuple[str, int, int, str]] = set()
+        self.set_premise_warning_keys: set[tuple[str, int, int]] = set()
         self.import_class_names: set[str] = set()
         if source_text is not None and source_file is not None:
             self.source_lines_by_file[source_file] = source_text.splitlines()
@@ -108,6 +111,7 @@ class SemanticChecker:
         return scope_id
 
     def visit_module(self, module: CheckModule, context: ScopeContext) -> None:
+        self.check_set_premises(module)
         current_declarations: list[VisibleDeclaration] = []
         ancestor_set = set(context.ancestors)
         current_class_names = set(context.visible_class_names)
@@ -131,6 +135,27 @@ class SemanticChecker:
                 self.visit_module(submodule, child_context)
         for declaration in current_declarations:
             self.visible[declaration.name].remove(declaration)
+
+    def check_set_premises(self, module: CheckModule) -> None:
+        for located in module.explicit_set_premises:
+            if not located.positions:
+                continue
+            position = located.positions[0]
+            key = (position.file, position.line, position.column)
+            if key in self.set_premise_warning_keys:
+                continue
+            self.set_premise_warning_keys.add(key)
+            # Diagnostics use a single-line range, including for multiline terms.
+            width = len(located.text.split("\n", 1)[0])
+            self.diagnostics.append(Diagnostic(
+                file=position.file,
+                lineno=max(position.line - 1, 0),
+                col_start_no=max(position.column - 1, 0),
+                col_end_no=max(position.column - 1 + width, 1),
+                type="warning",
+                code=SET_STMT_PREMISE_CODE,
+                reason=SET_STMT_PREMISE_REASON,
+            ))
 
     def check_binder(self, binder: Binder, ancestors: set[int]) -> None:
         if binder.text.startswith("^"):

@@ -2,7 +2,7 @@
   "name": "logic-language",
   "displayName": "Logic Language",
   "description": "Syntax, import assistance, and semantic diagnostics for logic-language .lp module text from the workspace source tree.",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "publisher": "xiaoyangwu",
   "license": "UNLICENSED",
   "engines": {
@@ -50,7 +50,7 @@
   },
   "scripts": {
     "package": "vsce package --allow-missing-repository --out ../../../../artifacts/logic-language.vsix",
-    "test": "node test/completion_helpers.test.js"
+    "test": "node test/completion_helpers.test.js && node test/diagnostics.test.js"
   },
   "devDependencies": {
     "@vscode/vsce": "^3.9.1"
