@@ -4,7 +4,7 @@
   "description": "Syntax, import assistance, and semantic diagnostics for logic-language .lp module text from the workspace source tree.",
   "version": "0.1.5",
   "publisher": "xiaoyangwu",
-  "license": "UNLICENSED",
+  "license": "MIT",
   "engines": {
     "vscode": "^1.85.0"
   },
