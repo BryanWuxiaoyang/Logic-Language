@@ -25,6 +25,7 @@ from AST import (
     ExprNode,
     Func_stmt,
     Literal_expr,
+    Lambda_expr,
     Module,
     Module_ref_expr,
     Module_stmt,
@@ -76,6 +77,7 @@ class AstLowerer:
         self.generated_bound_stack: list[list[AstNode]] = []
         self.generated_premise_stack: list[list[AstNode]] = []
         self.generated_target_stack: list[list[AstNode]] = []
+        self.lambda_scopes: list[dict[str, str]] = []
 
     def lower_module(self, module: Module, *, generated: bool = False) -> AstNode:
         self.generated_bound_stack.append([])
@@ -270,8 +272,35 @@ class AstLowerer:
 
     def expr_node_to_ast(self, expr: ExprNode, statement: Statement, bindings: list[AstNode]) -> AstNode:
         loc = expr_loc_json(expr) or self.statement_loc(statement)
+        if isinstance(expr, Lambda_expr):
+            function_name = self.fresh_temp("lambda")
+            parameter_name = self.fresh_temp("lambda_arg")
+            parameter_loc = loc_for_sym_node(expr.sym, loc)
+            parameter_expr = Sym_expr(parameter_loc, sym=SymNode(parameter_name, parameter_loc, generated=True))
+            application = Call_expr(loc, call_sym=SymNode(function_name, loc, generated=True), args=[parameter_expr])
+            definition = Module(
+                type="quantifier", syms=[parameter_name], quantifier="∀",
+                predicate_statements=[],
+                bound_sym_locs=[parameter_loc], source_loc=loc,
+                target_statements=[Statement(source_loc=loc, sub_modules=statement.sub_modules, expr=Call_expr(
+                    loc, call_sym=SymNode("=", loc), args=[application, expr.args[0]]
+                ))],
+            )
+            self.lambda_scopes.append({expr.sym.name: parameter_name})
+            try:
+                definition_ast = self.lower_module(definition, generated=True)
+            finally:
+                self.lambda_scopes.pop()
+            function_sym = sym_node(function_name, loc, generated=True)
+            self.generated_bound_stack[-1].append(function_sym)
+            self.generated_premise_stack[-1].extend([
+                func_stmt("~", [sym_node("Function", loc), function_sym], loc, generated=True),
+                definition_ast,
+            ])
+            return function_sym
         if isinstance(expr, Sym_expr) and expr.sym is not None:
-            return sym_node(expr.sym.name, loc_for_sym_node(expr.sym, loc), generated=expr.sym.generated, source_name=expr.sym.source_name)
+            name = self.lambda_name(expr.sym.name)
+            return sym_node(name, loc_for_sym_node(expr.sym, loc), generated=expr.sym.generated or name != expr.sym.name, source_name=expr.sym.source_name)
         if isinstance(expr, Literal_expr):
             kind = expr.literal_kind
             raw = expr.value or ""
@@ -291,7 +320,7 @@ class AstLowerer:
             ]
             bindings.extend(local_bindings)
             return func_stmt(
-                expr.call_sym.name,
+                self.lambda_name(expr.call_sym.name),
                 args,
                 loc,
                 call_loc=loc_for_sym_node(expr.call_sym, loc),
@@ -299,6 +328,12 @@ class AstLowerer:
         if isinstance(expr, Empty_expr):
             raise self.located_error("empty statement", statement, expr)
         raise self.located_error(f"unsupported expression: {expr.kind}", statement, expr)
+
+    def lambda_name(self, name: str) -> str:
+        for scope in reversed(self.lambda_scopes):
+            if name in scope:
+                return scope[name]
+        return name
 
     def located_error(self, message: str, statement: Statement | None = None, expr: ExprNode | None = None) -> CompileError:
         loc = expr_loc_json(expr) if expr is not None else None

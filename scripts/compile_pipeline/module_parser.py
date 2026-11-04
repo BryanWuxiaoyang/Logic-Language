@@ -28,6 +28,7 @@ from AST import (
     FunctionDecl,
     Module_ref_expr,
     Raw_expr,
+    Lambda_expr,
     SourceLoc,
     SourceModule,
     SourceStatement,
@@ -2046,6 +2047,18 @@ def parse_expr_located(located: LocatedText) -> ExprNode:
         if literal.kind == "string":
             return String_literal_expr(loc_from_located(located), value=literal.value)
         return Value_literal_expr(loc_from_located(located), value=literal.value)
+    arrows = find_top_level_operator_matches(text, (("->", "->"),))
+    if arrows:
+        index = arrows[0][0]
+        parameter = located.slice(0, index).strip()
+        body = located.slice(index + 2).strip()
+        if not is_plain_sym(parameter.text) or not body.text:
+            raise CompileError("inline mapping requires 'parameter -> expression'", source_loc=loc_from_located(located))
+        return Lambda_expr(
+            loc_from_located(located),
+            sym=SymNode(parameter.text, loc_from_located(parameter)),
+            body=parse_expr_located(body),
+        )
     range_terms = parse_range_literal_located(located)
     if range_terms is not None:
         start, end, op_loc = range_terms

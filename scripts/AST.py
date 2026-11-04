@@ -173,6 +173,13 @@ class Raw_expr(ExprNode):
         super().__init__(source_loc, value=value)
 
 
+class Lambda_expr(ExprNode):
+    expr_kind = "lambda"
+
+    def __init__(self, source_loc=None, *, sym: SymNode, body: ExprNode) -> None:
+        super().__init__(source_loc, sym=sym, args=[body])
+
+
 class Module_ref_expr(ExprNode):
     expr_kind = "module_ref"
 

@@ -759,6 +759,19 @@ The AST is intended as a precise intermediate logic form that can support human-
     )
     `null` does not imply any output class predicate such as `out_c~null`.
 
+## Mapped sums and inline functions
+
+- `sum(_set, _value -> expression)` maps each distinct source element and
+  sums the mapped values, preserving equal results from different source
+  elements. The unary mapper overload enumerates the source into a list,
+  applies `List::map`, and sums that list. The binary merge overload
+  `sum(_set, _merge_f)` remains available. Empty sums retain the library's
+  existing `null` convention.
+- Inline unary functions use `parameter -> expression`. They compile to a
+  fresh function symbol with a universally quantified defining equality;
+  parameters are renamed to avoid capture, while outer variables remain free
+  in the function body. Declaration syntax still uses `=>`.
+
 ## Diagnostics
 
 - `set_stmt_premise` warns on each explicit source premise in a set-stmt,

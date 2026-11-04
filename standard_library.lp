@@ -116,6 +116,12 @@ Set::lists: _set => _lists
             _list1[_id1] ≠ _list1[_id2]
         }
     }
+List::map: (_list, _mapping_f) => _mapped_list
+    | _mapping_f: _sym => _mapped_sym
+    _mapped_list.size = _list.size
+    ∀
+        | _id ∈ [0: _list.size]
+        _mapped_list[_id] = _mapping_f(_list[_id])
 List::sum: (_list, _merge_f) => _sum_sym
     | _merge_f: (_sym1, _sym2) => _merge_sym
     ∀
@@ -133,6 +139,13 @@ Set::sum: (_set, _merge_f) => _set_sum_sym
     _set_sum_sym = *_syms
 Set::sum: _set => _set_sum_sym
     _set_sum_sym = _set.sum(+)
+# Unary mapping overload: enumerate source elements before mapping so equal
+# mapped values at distinct source elements are counted separately.
+Set::sum: (_set, _mapping_f) => _set_sum_sym
+    | _mapping_f: _sym => _mapped_sym
+    ∀
+        | _list1 ∈ _set.lists
+        _set_sum_sym = sum(_list1.map(_mapping_f))
 List::max: (_list, _max_f) => _max_sym
     _max_sym = _list.sum(_max_f)
 List::max: _list => _max_sym

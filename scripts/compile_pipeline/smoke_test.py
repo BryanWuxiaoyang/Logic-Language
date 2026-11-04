@@ -2919,8 +2919,44 @@ def test_script_modules_import_without_cycles() -> None:
         importlib.import_module(module)
 
 
+def test_inline_mapping_lambda_scope_and_round_trip() -> None:
+    text = "| _offset_val\n_result = sum({1, 2}, _value -> _value + _offset_val)"
+    ast = compile_text(text, base_dir=SKILL_DIR)
+    payload = module_check.check_module(text, "<mapping-test>", SKILL_DIR, is_file=False)
+    assert payload["summary"]["error_count"] == 0, payload
+    plus = calls(ast, "+")[0]
+    assert plus["arg_sym_list"][0]["name"].startswith("^tmplambda_arg")
+    assert plus["arg_sym_list"][1]["name"] == "_offset_val"
+    assert_source_loc_invariant(ast)
+    assert compile_text(translate_ast_to_source(ast), base_dir=SKILL_DIR)
+
+
+def test_inline_mapping_nested_and_constant() -> None:
+    ast = compile_text("_result = sum({1, 2}, _value -> 2)", base_dir=SKILL_DIR)
+    assert len(calls(ast, "sum")) == 1
+    assert not any(node.get("kind") == "Set_stmt" for node in all_nodes(ast))
+    ast = compile_text("_result = sum({1, 2}, _value -> sum({3, 4}, _value -> _value))", base_dir=SKILL_DIR)
+    args = [node["name"] for node in all_nodes(ast)
+            if node.get("kind") == "Sym" and node.get("name", "").startswith("^tmplambda_arg")]
+    assert len(set(args)) == 2
+    assert len(calls(ast, "sum")) == 2
+    assert_source_loc_invariant(ast)
+
+
+def test_mapped_set_sum_standard_library() -> None:
+    text = "$import standard_library.lp\nmapping_example: () => _mapped_val\n    _mapped_val = sum({1, 2}, _value -> 2)"
+    payload = module_check.check_module(text, "<mapping-example>", SKILL_DIR, is_file=False)
+    assert payload["summary"] == {"error_count": 0, "warning_count": 3}, payload
+    ast = compile_text(text, base_dir=SKILL_DIR, allow_imports=True)
+    assert calls(ast, "map")
+    assert_source_loc_invariant(ast)
+
+
 def main() -> int:
     tests = [
+        test_inline_mapping_lambda_scope_and_round_trip,
+        test_inline_mapping_nested_and_constant,
+        test_mapped_set_sum_standard_library,
         test_simple_quantified,
         test_set_module,
         test_binding_call,
